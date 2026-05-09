@@ -1,0 +1,191 @@
+"""
+Ribo-seq analysis mode.
+STAR alignment to primary transcripts → riboWaltz R analysis.
+"""
+
+import os
+import sys
+import glob as globmod
+import subprocess
+from pathlib import Path
+
+from prnaseqtools.validate_options import validate_options
+from prnaseqtools.input_parser import parse_input
+from prnaseqtools.functions import download_sra, unzip_file, _tee
+from prnaseqtools import reference as ref
+
+
+def run(opts):
+    """Main entry point for Ribo-seq analysis."""
+    opts = validate_options(opts)
+    tee = _tee()
+
+    thread = opts.get('thread', 4)
+    genome = opts.get('genome', 'ath')
+    adaptor = opts.get('adaptor')
+    prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
+    nomapping = opts.get('no_mapping', False)
+    mappingonly = opts.get('mapping_only', False)
+    mask = opts.get('mask')
+
+    control_dict = _parse_to_dict(opts.get('control', ''))
+    tags, files, _ = parse_input(control_dict)
+
+    if opts.get('treatment'):
+        treatment_dict = _parse_to_dict(opts.get('treatment', ''))
+        t_tags, t_files, _ = parse_input(treatment_dict)
+        tags.extend(t_tags)
+        files.extend(t_files)
+
+    par_str = ' '.join(tags)
+
+    if not nomapping:
+        if mask:
+            mask_path = _resolve_path(mask)
+            os.symlink(mask_path, "mask.fa")
+            subprocess.run("bowtie-build -q mask.fa mask", shell=True, check=True)
+
+        if os.path.exists("Genome"):
+            subprocess.run("rm -rf Genome", shell=True)
+        os.makedirs("Genome", exist_ok=True)
+        os.makedirs("chr", exist_ok=True)
+
+        gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
+        fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
+
+        subprocess.run(
+            f"gffread -T -C -o {genome}.gtf -g {fasta_path} {gff_path}",
+            shell=True, check=True
+        )
+        ref.primary_transcript(prefix, genome)
+
+        subprocess.run(
+            f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
+            f"--genomeSAindexNbases 12 --genomeFastaFiles {fasta_path} "
+            f"--sjdbGTFfile {genome}.PrimaryTranscript.gtf "
+            f"--limitGenomeGenerateRAM 64000000000",
+            shell=True, check=True
+        )
+
+        for i in range(len(tags)):
+            tag = tags[i]
+            fpath = files[i]
+
+            sra_results = download_sra(fpath, thread)
+            unzip_file(sra_results[0], tag)
+
+            if adaptor:
+                tee.write(f"\nTrimming {tag}...\n")
+                subprocess.run(
+                    f"cutadapt -j {thread} -m 18 --discard-untrimmed --trim-n "
+                    f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq 2>&1",
+                    shell=True, check=True
+                )
+                os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+
+            if mask:
+                subprocess.run(
+                    f"bowtie -v 2 -a --un tmp.fastq -p {thread} -t -x mask "
+                    f"{tag}.fastq {tag}.mask.out 2>&1",
+                    shell=True, check=True
+                )
+                os.rename("tmp.fastq", f"{tag}.fastq")
+                if os.path.exists(f"{tag}.mask.out"):
+                    os.unlink(f"{tag}.mask.out")
+
+            tee.write("\nStart mapping...\n")
+            subprocess.run(
+                f"STAR --genomeDir Genome --alignIntronMax 5000 "
+                f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
+                f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
+                f"--quantMode TranscriptomeSAM --outFilterMismatchNoverLmax 0.1 "
+                f"--runThreadN {thread} --readFilesIn {tag}.fastq 2>&1",
+                shell=True, check=True
+            )
+
+            if os.path.exists("Log.final.out"):
+                with open("Log.final.out") as lf:
+                    tee.write(lf.read())
+
+            subprocess.run(
+                "samtools view -h -F 0x100 Aligned.toTranscriptome.out.bam | "
+                f"samtools sort -o {tag}.bam -",
+                shell=True, check=True
+            )
+            subprocess.run(f"samtools index {tag}.bam", shell=True, check=True)
+            subprocess.run(
+                f"samtools view -q 10 -b Aligned.sortedByCoord.out.bam > {tag}.chr.bam",
+                shell=True, check=True
+            )
+            subprocess.run(f"samtools index {tag}.chr.bam", shell=True, check=True)
+            subprocess.run(
+                f"bamCoverage -b {tag}.chr.bam --skipNAs -bs 5 "
+                f"--minMappingQuality 10 -p {thread} --normalizeUsing CPM -o {tag}.bw",
+                shell=True, check=True
+            )
+
+            os.unlink(f"{tag}.fastq")
+            for fname in (f"{tag}.chr.bam", f"{tag}.chr.bam.bai", f"{tag}.bw"):
+                if os.path.exists(fname):
+                    os.rename(fname, os.path.join("chr", fname))
+
+        # Cleanup
+        for fname in ("Aligned.toTranscriptome.out.bam", "Aligned.sortedByCoord.out.bam"):
+            if os.path.exists(fname):
+                os.unlink(fname)
+        for fname in globmod.glob("Log.*"):
+            os.unlink(fname)
+        for fname in ("SJ.out.tab", f"{genome}.gtf"):
+            if os.path.exists(fname):
+                os.unlink(fname)
+        if mask and os.path.exists("mask.fa"):
+            os.unlink("mask.fa")
+            for mf in globmod.glob("mask*ebwt"):
+                os.unlink(mf)
+
+        if not mappingonly:
+            subprocess.run(
+                f"Rscript --vanilla {prefix}/scripts/ribo.R {genome} {par_str}",
+                shell=True, check=True
+            )
+
+        if os.path.exists("Genome"):
+            subprocess.run("rm -rf Genome", shell=True)
+
+    else:
+        for pre in tags:
+            os.symlink(f"../{pre}.bam", f"{pre}.bam")
+
+        ref.get_gene_info(prefix, genome)
+        os.rename("transcripts.fa", f"{genome}.fa")
+        ref.primary_transcript(prefix, genome)
+        gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
+        fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
+        subprocess.run(
+            f"gffread -T -C -o {genome}.gtf -g {fasta_path} {gff_path}",
+            shell=True, check=True
+        )
+        subprocess.run(
+            f"Rscript --vanilla {prefix}/scripts/ribo.R {genome} {par_str}",
+            shell=True, check=True
+        )
+        for fname in (f"{genome}.gtf", f"{genome}.fa"):
+            if os.path.exists(fname):
+                os.unlink(fname)
+        for fname in globmod.glob("*.bam"):
+            os.unlink(fname)
+
+
+def _parse_to_dict(arg_str):
+    parts = arg_str.split('=')
+    if len(parts) == 2:
+        return {parts[0]: parts[1]}
+    return {}
+
+
+def _resolve_path(filepath):
+    if filepath.startswith('~/'):
+        return os.path.expanduser(filepath)
+    elif not filepath.startswith('/'):
+        return os.path.abspath(os.path.join('..', filepath))
+    return filepath

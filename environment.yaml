@@ -1,0 +1,136 @@
+# pRNASeqTools — mamba/conda environment file
+# Python3 rewrite of the plant NGS analysis pipeline.
+#
+# Usage:
+#   mamba env create -f environment.yaml
+#   mamba activate prnaseqtools
+#
+# Then install the remaining R packages from within R:
+#   Rscript scripts/checkPackages.R
+#
+# ---------------------------------------------------------------------------
+name: prnaseqtools
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  # ── Core language runtimes ────────────────────────────────────────────
+  - python >=3.9,<3.13
+  - perl                          # ShortStack and some helper scripts
+  - r-base >=4.0
+  - r-essentials
+
+  # ── Adapter trimming ─────────────────────────────────────────────────
+  - cutadapt
+
+  # ── Aligners ──────────────────────────────────────────────────────────
+  - bowtie
+  - bowtie2
+  - star >=2.7
+  - bismark                       # WGBS bisulfite alignment
+
+  # ── sRNA alignment & analysis ─────────────────────────────────────────
+  - shortstack >=3.0
+
+  # ── BAM/SAM processing ────────────────────────────────────────────────
+  - samtools >=1.0
+  - htslib                        # bgzip, tabix
+
+  # ── Read counting ─────────────────────────────────────────────────────
+  - subread                       # featureCounts
+
+  # ── Genome arithmetic ─────────────────────────────────────────────────
+  - bedtools
+
+  # ── SRA download ─────────────────────────────────────────────────────
+  - sra-tools                     # fasterq-dump, prefetch
+
+  # ── GFF/GTF utilities ────────────────────────────────────────────────
+  - gffread
+  - gffcompare                   # GTF comparison (RIBO Taper)
+
+  # ── Coverage tracks ──────────────────────────────────────────────────
+  - deeptools                     # bamCoverage, bamCompare
+  - ucsc-bedgraphtobigwig
+
+  # ── Transcript assembly & quantification (RIBO Taper) ───────────────
+  - stringtie                     # Transcript assembly
+  - rsem                          # RNA-seq expression quantification
+
+  # ── Peak calling ─────────────────────────────────────────────────────
+  - genrich                       # ChIP-seq / ATAC-seq
+
+  # ── UMI handling ─────────────────────────────────────────────────────
+  - umi_tools
+
+  # ── Python libraries (stdlib-only rewrite, but sPARTA needs these) ───
+  - numpy
+  - scipy
+
+  # ── R packages (available on conda) ──────────────────────────────────
+  - bioconductor-deseq2
+  - bioconductor-dmrcaller
+  - bioconductor-rnamodr.ribomethseq
+  - r-pheatmap
+  - r-dplyr
+  - r-devtools
+
+  # ── pip-installed tools not on conda ─────────────────────────────────
+  - pip
+  - pip:
+      # CLIPper — CLIP-seq peak caller
+      # (only needed for 'clip' and 'ts' modes)
+      # - clipper @ git+https://github.com/YeoLab/clipper.git
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Post-install — R packages not available on conda
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# After environment creation, run the bundled R script to install
+# remaining packages from Bioconductor and GitHub:
+#
+#   Rscript scripts/checkPackages.R
+#
+# This will install:
+#   - riboWaltz       (from GitHub — for degradome CRI analysis)
+#   - NMF@devel        (from GitHub — required for compatibility)
+#   - Seurat           (from GitHub)
+#   - BiocManager, devtools, dplyr (if not already present)
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# Optional — CLIPper (CLIP-seq modes only)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# CLIPper is not available on conda. Install manually if you need the
+# 'clip' or 'ts' analysis modes:
+#
+#   git clone https://github.com/YeoLab/clipper.git
+#   cd clipper && python setup.py install
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# Notes
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# 1. ShortStack v4 is available on bioconda. The Perl code checks for v3
+#    or v4 ("ShortStack.+[34]"). Both are compatible.
+#
+# 2. featureCounts ships inside the `subread` package. The binary is
+#    `featureCounts` (camelCase).
+#
+# 3. The Python3 rewrite uses only the standard library — no pip-installed
+#    Python packages are required for the pipeline itself. numpy/scipy are
+#    listed only because the bundled sPARTA.py (degradome mode) imports them.
+#
+#
+# 4. Reference genome files (~/software/pRNASeqTools/reference/) are NOT
+#    included in the environment. They must be obtained from the author and
+#    placed in the pRNASeqTools directory.
+#
+# 5. RIBO Taper (ribo mode) requires the RiboTaper scripts from GitHub.
+#    Install manually:
+#
+#      git clone https://github.com/hsinyenwu/RiboTaper.git ~/RiboTaper_v1.3
+#
+#    Or specify the path with --ribotaper when running the ribo mode.

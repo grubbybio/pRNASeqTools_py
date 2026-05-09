@@ -1,0 +1,1 @@
+/Users/cjyou/software/pRNASeqTools/scripts/CRI.R

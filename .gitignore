@@ -1,0 +1,56 @@
+# ── Reference genomes (large files, not versioned) ───────────────────
+reference/
+
+# ── Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# ── R ─────────────────────────────────────────────────────────────────
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+.Rapp.history
+cips_Rdata/
+
+# ── Analysis outputs ─────────────────────────────────────────────────
+out/
+*.log
+*.bam
+*.bam.bai
+*.bw
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.sam
+*.gtf
+*.gff
+*.fa
+*.fai
+*.ebwt
+*.bt2
+STAR_*/
+Genome/
+Genome2/
+STAR_SJ/
+assembledGTF/
+RSEM_index/
+RSEM_results/
+RiboTaper_annotation/
+STAR_*/
+sparta/
+
+# ── OS ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE / Editor ─────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
