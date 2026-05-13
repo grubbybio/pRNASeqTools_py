@@ -22,8 +22,8 @@ pRNASeqTools is a comprehensive NGS data analysis pipeline for plant genomics. I
 | `tt` | Truncation/tailing | ShortStack |
 | `ribo` | **Ribo-seq (RIBO Taper)** | Bowtie2, STAR, StringTie, RSEM, RiboTaper |
 | `cips` | **CiPS uORF analysis** | ORFik, GenomicFeatures (R) |
-| `chip` | ChIP-seq | bowtie2, Genrich, deepTools |
-| `atac` | ATAC-seq | bowtie2, Genrich, deepTools |
+| `chip` | ChIP-seq | bowtie2, Genrich / MACS3, deepTools |
+| `atac` | ATAC-seq | bowtie2, Genrich / MACS3, deepTools |
 | `wgbs` | Whole-genome bisulfite | Bismark, DMRcaller |
 | `clip` | CLIP-seq | STAR, CLIPper |
 | `ts` | TS-CLIP-seq | STAR, CLIPper |
@@ -77,8 +77,11 @@ python pRNASeqTools_run.py ribo \
   --contam "rRNA.fasta,tRNA.fasta,snRNA.fasta" \
   --ribotaper ~/RiboTaper_v1.3
 
-# ChIP-seq
-python pRNASeqTools_run.py chip -c "IP=data/ip.bam" -t "Input=data/input.bam"
+# ChIP-seq (Genrich, default)
+python pRNASeqTools_run.py chip --treatment "IP=data/ip.bam" --control "Input=data/input.bam"
+# ChIP-seq (MACS3 + bdgdiff)
+python pRNASeqTools_run.py chip --peak-caller macs3 --genome-size 1.35e8 \
+  --treatment "IP=data/ip.bam" --control "Input=data/input.bam"
 ```
 
 ---
@@ -147,6 +150,60 @@ Output: 4 Excel files
 
 ---
 
+## ChIP-seq / ATAC-seq (`chip` / `atac` modes)
+
+Both modes support **Genrich** (default) and **MACS3** peak calling, plus MACS3 `bdgdiff` for differential peak analysis between two conditions.
+
+### ChIP-seq with MACS3 + bdgdiff
+
+```
+bam → macs3 callpeak (per group, with Input) → macs3 bdgdiff → diff peaks
+```
+
+### ATAC-seq with MACS3 + bdgdiff
+
+```
+bam → macs3 callpeak (per group, ATAC-specific params) → macs3 bdgdiff → diff peaks
+```
+
+### Peak caller CLI options (chip)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--peak-caller` | `genrich` | `genrich` or `macs3` |
+| `--genome-size` | *(required for macs3)* | Effective genome size (e.g. `1.35e8` for ath) |
+| `--control2` | *(none)* | Second Input for bdgdiff |
+| `--treatment2` | *(none)* | Second IP for bdgdiff |
+
+### Peak caller CLI options (atac)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--peak-caller` | `genrich` | `genrich` or `macs3` |
+| `--genome-size` | *(required for macs3)* | Effective genome size |
+| `--treatment2` | *(none)* | Second ATAC group for bdgdiff |
+
+### bdgdiff example
+
+```bash
+# ChIP-seq: two-group differential peaks
+pRNASeqTools chip --peak-caller macs3 --genome-size 1.35e8 \
+  --control  "Input_WT=SRR111"  --treatment  "IP_WT=SRR222" \
+  --control2 "Input_mut=SRR333" --treatment2 "IP_mut=SRR444"
+
+# ATAC-seq: two-group differential peaks
+pRNASeqTools atac --peak-caller macs3 --genome-size 1.35e8 \
+  --treatment "ATAC_WT=SRR111" --treatment2 "ATAC_mut=SRR222"
+```
+
+Outputs:
+- `{tag}_peaks.narrowPeak` — per-group peaks
+- `diff_{g1}_vs_{g2}_cond1.bed` — condition 1-specific
+- `diff_{g1}_vs_{g2}_cond2.bed` — condition 2-specific
+- `diff_{g1}_vs_{g2}_common.bed` — shared peaks
+
+---
+
 ## Common Options (all modes)
 
 | Option | Description |
@@ -167,7 +224,7 @@ Output: 4 Excel files
 **Aligners:** STAR, bowtie, bowtie2, Bismark, ShortStack  
 **Processing:** cutadapt, samtools, bedtools, gffread, deepTools  
 **Counting:** featureCounts (subread), RSEM, StringTie  
-**Peak calling:** Genrich  
+**Peak calling:** Genrich, MACS3  
 **SRA:** sra-tools  
 **R:** r-base, DESeq2, DMRcaller, pheatmap, dplyr, devtools
 

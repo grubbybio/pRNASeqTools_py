@@ -162,19 +162,33 @@ def build_parser():
     p = sub.add_parser('chip', help='ChIP-seq analysis')
     add_common_args(p, control_required=False)
     add_mapping_args(p)
-    p.add_argument('--auc', default=20, type=float, help='AUC threshold')
+    p.add_argument('--peak-caller', default='genrich', choices=['genrich', 'macs3'],
+                   help='Peak caller: genrich or macs3 (default: genrich)')
+    p.add_argument('--genome-size', default=None,
+                   help='Effective genome size for MACS3 (e.g. 1.35e8 for ath)')
+    p.add_argument('--auc', default=20, type=float, help='AUC threshold (Genrich only)')
     p.add_argument('--qvalue', default=1.0, type=float, help='Q-value threshold')
     p.add_argument('--pvalue', default=0.01, type=float, help='P-value threshold')
     p.add_argument('--seqstrategy', default='paired', dest='seq_strategy',
                    help='single or paired')
+    p.add_argument('--control2', default=None,
+                   help='Second input group for MACS3 bdgdiff: name=file1+file2...')
+    p.add_argument('--treatment2', default=None,
+                   help='Second IP group for MACS3 bdgdiff: name=file1+file2...')
 
     # atac
     p = sub.add_parser('atac', help='ATAC-seq analysis')
     add_common_args(p, control_required=False)
     add_mapping_args(p)
-    p.add_argument('--auc', default=20, type=float, help='AUC threshold')
+    p.add_argument('--peak-caller', default='genrich', choices=['genrich', 'macs3'],
+                   help='Peak caller: genrich or macs3 (default: genrich)')
+    p.add_argument('--genome-size', default=None,
+                   help='Effective genome size for MACS3 (e.g. 1.35e8 for ath)')
+    p.add_argument('--auc', default=20, type=float, help='AUC threshold (Genrich only)')
     p.add_argument('--qvalue', default=1.0, type=float, help='Q-value threshold')
     p.add_argument('--pvalue', default=0.01, type=float, help='P-value threshold')
+    p.add_argument('--treatment2', default=None,
+                   help='Second ATAC group for MACS3 bdgdiff: name=file1+file2...')
 
     # wgbs
     p = sub.add_parser('wgbs', help='WGBS-seq analysis')

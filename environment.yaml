@@ -2,8 +2,8 @@
 # Python3 rewrite of the plant NGS analysis pipeline.
 #
 # Usage:
-#   mamba env create -f environment.yaml
-#   mamba activate prnaseqtools
+#   conda env create -f environment.yaml
+#   conda activate prnaseqtools
 #
 # Then install the remaining R packages from within R:
 #   Rscript scripts/checkPackages.R
@@ -60,6 +60,7 @@ dependencies:
   - rsem                          # RNA-seq expression quantification
 
   # ── Peak calling ─────────────────────────────────────────────────────
+  - macs3                         # MACS3 peak caller (ChIP/ATAC)
   - genrich                       # ChIP-seq / ATAC-seq
 
   # ── UMI handling ─────────────────────────────────────────────────────

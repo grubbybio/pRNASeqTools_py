@@ -154,6 +154,13 @@ DEPENDENCY_REGISTRY = {
         'mode_only': ['clip', 'ts'],
     },
 
+    # ── Peak callers ────────────────────────────────────────────────
+    'macs3': {
+        'pkg': 'macs3', 'channel': 'bioconda',
+        'install_msg': 'MACS3 peak caller (ChIP/ATAC)',
+        'mode_only': ['chip', 'atac'],
+    },
+
     # ── RIBO Taper / Ribo-seq tools ──────────────────────────────────
     'stringtie': {
         'pkg': 'stringtie', 'channel': 'bioconda',
