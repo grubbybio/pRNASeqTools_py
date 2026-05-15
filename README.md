@@ -39,8 +39,8 @@ pRNASeqTools is a comprehensive NGS data analysis pipeline for plant genomics. I
 
 ```bash
 # Create conda environment
-mamba env create -f environment.yaml
-mamba activate prnaseqtools
+conda env create -f environment.yaml
+conda activate prnaseqtools
 
 # Install R packages from Bioconductor/GitHub
 Rscript scripts/checkPackages.R

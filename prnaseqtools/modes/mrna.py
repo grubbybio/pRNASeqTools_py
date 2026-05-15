@@ -13,7 +13,6 @@ from pathlib import Path
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
 from prnaseqtools.functions import download_sra, unzip_file, _tee
-from prnaseqtools import reference as ref
 
 
 def run(opts):
@@ -237,11 +236,6 @@ def run(opts):
                 shell=True, check=True
             )
 
-            # Annotate DEG results
-            gann = ref.read_gene_annotation(prefix, genome)
-            for csv_file in globmod.glob("*.csv"):
-                _annotate_csv(csv_file, gann)
-
     else:
         # No mapping: symlink existing files or process BAMs
         for pre in tags:
@@ -276,11 +270,6 @@ def run(opts):
             f"{foldchange} {prefix} {genome} {par_str}",
             shell=True, check=True
         )
-
-        # Annotate
-        gann = ref.read_gene_annotation(prefix, genome)
-        for csv_file in globmod.glob("*.csv"):
-            _annotate_csv(csv_file, gann)
 
         # Clean up symlinks
         if do_count:
@@ -361,22 +350,3 @@ def _count_bam(tag, thread, seq_strategy, prefix, genome):
         fh.write("Gene\tCount\tLength\n")
         for name in sorted(count_data.keys()):
             fh.write(f"{name}\t{count_data[name]['exon']}\t{count_data[name]['length']}\n")
-
-
-def _annotate_csv(csv_file, gann):
-    """Add functional annotation to CSV file."""
-    tmp_file = "tmp"
-    with open(csv_file) as fh_in, open(tmp_file, 'w') as fh_out:
-        for line in fh_in:
-            line = line.strip()
-            if not line:
-                continue
-            cols = line.split(',')
-            if not cols:
-                continue
-            key = cols[0].strip('"')
-            if key in gann:
-                fh_out.write(f"{line},{gann[key]}\n")
-            else:
-                fh_out.write(f"{line},Mapman,type,short,description,long\n")
-    os.rename(tmp_file, csv_file)
