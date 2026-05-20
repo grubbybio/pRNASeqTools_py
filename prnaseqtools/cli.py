@@ -281,18 +281,9 @@ def main():
     TEE = setup_logging(PREFIX, START_TIME)
 
     try:
-        # Phase 1: parse known args to extract auto_install + mode early
+        # Parse all args in one pass (two-pass breaks subparser dispatch)
         parser = build_parser()
-        known_args, remaining = parser.parse_known_args()
-
-        mode = known_args.mode
-        auto_install = getattr(known_args, 'auto_install', True)
-
-        # Phase 2: check dependencies (may auto-install missing ones)
-        check_dependencies(auto_install=auto_install, mode=mode)
-
-        # Phase 3: full parse (with mode-specific args)
-        args = parser.parse_args(remaining)
+        args = parser.parse_args()
 
         if not args.mode:
             parser.print_help()
@@ -300,6 +291,9 @@ def main():
 
         # ── Real analysis confirmed — keep the log ──────────────────
         _cleanup_log = False
+
+        auto_install = getattr(args, 'auto_install', True)
+        check_dependencies(auto_install=auto_install, mode=args.mode)
 
         # Convert namespace to dict
         opts = vars(args)
