@@ -151,8 +151,9 @@ def run(opts):
             subprocess.run(f"samtools index {tag}.sorted.bam", shell=True, check=True)
             os.unlink(f"{tag}.bam")
             subprocess.run(
-                f"bamCoverage -b {tag}.sorted.bam --skipNAs -bs 5 -p {thread} "
-                f"--ignoreDuplicates --minMappingQuality 10 --normalizeUsing CPM -o {tag}.bw",
+                f"bamCoverage -b {tag}.sorted.bam -bs 5 -p {thread} "
+                f"--Offset 1 1 --smoothLength 150 --ignoreDuplicates "
+                f"--minMappingQuality 10 --normalizeUsing CPM -o {tag}.bw",
                 shell=True, check=True
             )
             tee.write("\nMapping completed!\n")
