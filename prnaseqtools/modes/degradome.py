@@ -38,11 +38,12 @@ def run(opts):
     pars_list = []
     treatment = opts.get('treatment')
     if treatment:
-        treatment_dict = _parse_to_dict(treatment)
-        t_tags, t_files, t_pars = parse_input(treatment_dict)
-        tags.extend(t_tags)
-        files.extend(t_files)
-        pars_list = t_pars
+        for t in (treatment if isinstance(treatment, list) else [treatment]):
+            treatment_dict = _parse_to_dict(t)
+            t_tags, t_files, t_pars = parse_input(treatment_dict)
+            tags.extend(t_tags)
+            files.extend(t_files)
+            pars_list = t_pars
 
     par_str = ' '.join(tags)
 

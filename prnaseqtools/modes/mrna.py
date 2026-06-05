@@ -36,7 +36,7 @@ def run(opts):
     seq_strategy = opts.get('seq_strategy')
     genome_size = opts.get('genome_size', 10)
 
-    mapping = run_mode not in (3,)
+    mapping = run_mode not in (3, 4)
     do_count = run_mode != 4
     do_de = run_mode != 2
 
@@ -45,11 +45,12 @@ def run(opts):
     tags, files, pars = parse_input(control_dict)
 
     if treatment:
-        treatment_dict = _parse_to_dict(treatment)
-        t_tags, t_files, t_pars = parse_input(treatment_dict)
-        tags.extend(t_tags)
-        files.extend(t_files)
-        pars.extend(t_pars)
+        for t in (treatment if isinstance(treatment, list) else [treatment]):
+            treatment_dict = _parse_to_dict(t)
+            t_tags, t_files, t_pars = parse_input(treatment_dict)
+            tags.extend(t_tags)
+            files.extend(t_files)
+            pars.extend(t_pars)
 
     par_str = ' '.join(pars)
 

@@ -34,8 +34,8 @@ def add_common_args(parser, control_required=True):
     else:
         parser.add_argument('--control', '-c', default=None,
                             help='Control: name=file1+file2...')
-    parser.add_argument('--treatment', '-p', default=None,
-                        help='Treatment: name=file1+file2...')
+    parser.add_argument('--treatment', '-p', default=None, action='append',
+                        help='Treatment: name=file1+file2... (repeat for multiple)')
     parser.add_argument('--mask', default=None, help='Mask sequences (fasta).')
     return parser
 

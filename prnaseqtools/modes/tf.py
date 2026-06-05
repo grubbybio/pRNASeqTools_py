@@ -29,6 +29,8 @@ def run(opts):
     pvalue = opts.get('pvalue', 0.05)
     control = opts.get('control', '')
     treatment = opts.get('treatment', '')
+    if isinstance(treatment, list):
+        treatment = treatment[0]
     run_mode = opts.get('run_mode', 'mrna')
     norm = opts.get('norm', 'rRNA,total')
     norms = norm.split(',')
