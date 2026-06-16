@@ -197,6 +197,34 @@ def rmvc(tag_r1, tag_r2=None):
     tee.write("The 3' PolyC is removed!\n")
 
 
+# ── ShortStack condensed BAM support ─────────────────────────────────────
+def bam_is_condensed(bam_path):
+    """Check if BAM uses ShortStack >= 4.1 condensed format (XW:i:n tags)."""
+    result = subprocess.run(
+        f"samtools view {bam_path} | head -5",
+        shell=True, capture_output=True, text=True
+    )
+    return 'XW:i:' in result.stdout
+
+
+def expand_bed_by_xw(bed_path, bam_path):
+    """Expand a BED file by duplicating lines according to XW:i:n tags in BAM.
+    Reads XW from BAM by matching read name (BED col 4 = BAM read name).
+    Overwrites the original BED file."""
+    subprocess.run(
+        f"samtools view {bam_path} | "
+        f"awk '{{xw=1; for(i=12;i<=NF;i++) "
+        f"if($i ~ /^XW:i:/) {{xw=substr($i,6)+0; break}}; "
+        f"print $1\"\\t\"xw}}' > {bed_path}.xw && "
+        f"awk 'NR==FNR{{xw[$1]=$2; next}} "
+        f"{{for(i=1;i<=xw[$4];i++) print}}' "
+        f"{bed_path}.xw {bed_path} > {bed_path}.tmp && "
+        f"mv {bed_path}.tmp {bed_path} && "
+        f"rm {bed_path}.xw",
+        shell=True, check=True
+    )
+
+
 # ── Fastq to fasta ───────────────────────────────────────────────────────
 def fastq2fasta(input_file, output_file):
     """Convert FASTQ to FASTA format."""

@@ -13,7 +13,8 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
-from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee
+from prnaseqtools.functions import (download_sra, unzip_file, revcomp, _tee,
+                                     bam_is_condensed, expand_bed_by_xw)
 from prnaseqtools import reference as ref
 
 
@@ -78,108 +79,142 @@ def run(opts):
 
             tee.write(f"\nMapping {tag}...\n")
 
-            # SRA download if needed
-            sra_results = download_sra(fpath, thread)
-            unzip_file(sra_results[0], tag)
+            # BAM input: skip alignment, symlink BAM, go to BED conversion
+            bam_input = fpath.endswith('.bam')
+            if bam_input:
+                tee.write("  BAM input detected, skipping alignment.\n")
+                bam_src = fpath if os.path.isabs(fpath) else f"../{fpath}"
+                os.symlink(bam_src, f"{tag}.bam")
+                subprocess.run(f"samtools index {tag}.bam", shell=True, check=True)
 
-            # UMI extraction for single-cell mode
-            if run_mode == 'sc':
-                tee.write(f"\nTrimming {tag}...\n")
-                subprocess.run(
-                    f"umi_tools extract -p {pattern} -I {tag}.fastq -S {tag}.fq",
-                    shell=True, check=True
-                )
-                if adaptor:
-                    subprocess.run(
-                        f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
-                        f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fq 2>&1",
-                        shell=True, check=True
-                    )
+                # Detect condensed format
+                condensed = bam_is_condensed(f"{tag}.bam")
 
-                # Deduplication
-                _umi_dedup(tag)
-                os.unlink(f"{tag}_trimmed.fastq")
-                if os.path.exists(f"{tag}.fq"):
-                    os.unlink(f"{tag}.fq")
-            elif run_mode == 'bulk':
-                if adaptor:
+                # Build .nf with XW-corrected total count
+                if condensed:
+                    bam_count = subprocess.run(
+                        f"samtools view -F 4 {tag}.bam | "
+                        f"awk '{{xw=1; for(i=12;i<=NF;i++) "
+                        f"if($i~/^XW:i:/){{xw=substr($i,6)+0;break}}; "
+                        f"sum+=xw}} END{{print sum}}'",
+                        shell=True, capture_output=True, text=True
+                    ).stdout.strip()
+                else:
+                    bam_count = subprocess.run(
+                        f"samtools view -c -F 4 {tag}.bam",
+                        shell=True, capture_output=True, text=True
+                    ).stdout.strip()
+                with open(f"{tag}.nf", 'w') as nf_fh:
+                    nf_fh.write(f"total_all_length\t{bam_count}\n")
+                tee.write(f"  Total reads (all lengths): {bam_count}\n")
+
+            if not bam_input:
+
+                # SRA download if needed
+                sra_results = download_sra(fpath, thread)
+                unzip_file(sra_results[0], tag)
+
+                # UMI extraction for single-cell mode
+                if run_mode == 'sc':
                     tee.write(f"\nTrimming {tag}...\n")
                     subprocess.run(
-                        f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
-                        f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq 2>&1",
+                        f"umi_tools extract -p {pattern} -I {tag}.fastq -S {tag}.fq",
                         shell=True, check=True
                     )
-                    os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+                    if adaptor:
+                        subprocess.run(
+                            f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
+                            f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fq 2>&1",
+                            shell=True, check=True
+                        )
 
-            # Mask filtering
-            if mask:
+                    # Deduplication
+                    _umi_dedup(tag)
+                    os.unlink(f"{tag}_trimmed.fastq")
+                    if os.path.exists(f"{tag}.fq"):
+                        os.unlink(f"{tag}.fq")
+                elif run_mode == 'bulk':
+                    if adaptor:
+                        tee.write(f"\nTrimming {tag}...\n")
+                        subprocess.run(
+                            f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
+                            f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq 2>&1",
+                            shell=True, check=True
+                        )
+                        os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+
+                # Mask filtering
+                if mask:
+                    subprocess.run(
+                        f"bowtie -v 0 -a --un tmp.fastq -p {thread} -t mask "
+                        f"{tag}.fastq {tag}.mask.out 2>&1",
+                        shell=True, check=True
+                    )
+                    os.rename("tmp.fastq", f"{tag}.fastq")
+                    if os.path.exists(f"{tag}.mask.out"):
+                        os.unlink(f"{tag}.mask.out")
+
+                # Spike-in counting
+                if spikein:
+                    subprocess.run(
+                        f"bowtie -v 0 -a -p {thread} -t spikein {tag}.fastq "
+                        f"{tag}.spikein.out 2>&1",
+                        shell=True, check=True
+                    )
+                    subprocess.run(
+                        f"awk -F \"\\t\" 'length($5)==13 && $2==\"+\"{{print $3}}' "
+                        f"{tag}.spikein.out | sort | uniq -c | awk '{{print $2\"\\t\"$1}}' > {tag}.spikein",
+                        shell=True, check=True
+                    )
+
+                tee.write("\nStart mapping...\n")
+
+                # rRNA filtering
+                lsu_rRNA = os.path.join(prefix, "reference", "lsu_rrna")
                 subprocess.run(
-                    f"bowtie -v 0 -a --un tmp.fastq -p {thread} -t mask "
-                    f"{tag}.fastq {tag}.mask.out 2>&1",
+                    f"bowtie -v 2 -a -p {thread} -t {lsu_rRNA} "
+                    f"{tag}.fastq {tag}.rRNA.out 2>&1",
                     shell=True, check=True
                 )
-                os.rename("tmp.fastq", f"{tag}.fastq")
-                if os.path.exists(f"{tag}.mask.out"):
-                    os.unlink(f"{tag}.mask.out")
-
-            # Spike-in counting
-            if spikein:
                 subprocess.run(
-                    f"bowtie -v 0 -a -p {thread} -t spikein {tag}.fastq "
-                    f"{tag}.spikein.out 2>&1",
-                    shell=True, check=True
-                )
-                subprocess.run(
-                    f"awk -F \"\\t\" 'length($5)==13 && $2==\"+\"{{print $3}}' "
-                    f"{tag}.spikein.out | sort | uniq -c | awk '{{print $2\"\\t\"$1}}' > {tag}.spikein",
+                    f"awk -F \"\\t\" 'BEGIN{{x=0;y=0;z=0}}"
+                    f"{{if($2==\"+\"){{if(/{genome}_LSU/){{x++}};"
+                    f"if(/{genome}_SSU/){{y++}};if(/{genome}_U6/){{z++}}}}}}"
+                    f"END{{print \"rRNA\\t\"x\"\\nSSU\\t\"y\"\\nU6\\t\"z}}' "
+                    f"{tag}.rRNA.out > {tag}.nf",
                     shell=True, check=True
                 )
 
-            tee.write("\nStart mapping...\n")
+                # ShortStack alignment
+                subprocess.run(
+                    f"ShortStack --outdir ShortStack_{tag} --align_only --mmap {mmap} "
+                    f"--threads {thread} --nohp --readfile {tag}.fastq "
+                    f"--genomefile {prefix}/reference/{genome}_chr_all.fasta 2>&1",
+                    shell=True, check=True
+                )
 
-            # rRNA filtering
-            lsu_rRNA = os.path.join(prefix, "reference", "lsu_rrna")
-            subprocess.run(
-                f"bowtie -v 2 -a -p {thread} -t {lsu_rRNA} "
-                f"{tag}.fastq {tag}.rRNA.out 2>&1",
-                shell=True, check=True
-            )
-            subprocess.run(
-                f"awk -F \"\\t\" 'BEGIN{{x=0;y=0;z=0}}"
-                f"{{if($2==\"+\"){{if(/{genome}_LSU/){{x++}};"
-                f"if(/{genome}_SSU/){{y++}};if(/{genome}_U6/){{z++}}}}}}"
-                f"END{{print \"rRNA\\t\"x\"\\nSSU\\t\"y\"\\nU6\\t\"z}}' "
-                f"{tag}.rRNA.out > {tag}.nf",
-                shell=True, check=True
-            )
+                tee.write("\nAlignment Completed!\n")
 
-            # ShortStack alignment
-            subprocess.run(
-                f"ShortStack --outdir ShortStack_{tag} --align_only --mmap {mmap} "
-                f"--threads {thread} --nohp --readfile {tag}.fastq "
-                f"--genomefile {prefix}/reference/{genome}_chr_all.fasta 2>&1",
-                shell=True, check=True
-            )
+                # Detect ShortStack >= 4.1 condensed BAM format (XW:i:n tags)
+                condensed = bam_is_condensed(f"ShortStack_{tag}/{tag}.bam")
 
-            tee.write("\nAlignment Completed!\n")
+                # Process SAM/BAM
+                subprocess.run(f"samtools view -h ShortStack_{tag}/{tag}.bam > {tag}", shell=True, check=True)
+                subprocess.run(
+                    f"awk '{{if($0~/^@/) print > (FILENAME\".unmapped.sam\"); "
+                    f"if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".sam\"); "
+                    f"if($10!=\"*\" && $3==\"*\") print > (FILENAME\".unmapped.sam\")}}' {tag}",
+                    shell=True, check=True
+                )
+                subprocess.run(f"samtools view -Sb {tag}.unmapped.sam > {tag}.unmapped.bam", shell=True, check=True)
+                subprocess.run(f"samtools view -Sb {tag}.sam > {tag}.bam", shell=True, check=True)
 
-            # Process SAM/BAM
-            subprocess.run(f"samtools view -h ShortStack_{tag}/{tag}.bam > {tag}", shell=True, check=True)
-            subprocess.run(
-                f"awk '{{if($0~/^@/) print > (FILENAME\".unmapped.sam\"); "
-                f"if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".sam\"); "
-                f"if($10!=\"*\" && $3==\"*\") print > (FILENAME\".unmapped.sam\")}}' {tag}",
-                shell=True, check=True
-            )
-            subprocess.run(f"samtools view -Sb {tag}.unmapped.sam > {tag}.unmapped.bam", shell=True, check=True)
-            subprocess.run(f"samtools view -Sb {tag}.sam > {tag}.bam", shell=True, check=True)
-
-            # Cleanup
-            for fname in (tag, f"{tag}.unmapped.sam", f"{tag}.sam", f"{tag}.fastq", f"{tag}.rRNA.out"):
-                if os.path.exists(fname):
-                    os.unlink(fname)
-            if os.path.exists(f"ShortStack_{tag}"):
-                subprocess.run(f"rm -rf ShortStack_{tag}", shell=True, check=True)
+                # Cleanup
+                for fname in (tag, f"{tag}.unmapped.sam", f"{tag}.sam", f"{tag}.fastq", f"{tag}.rRNA.out"):
+                    if os.path.exists(fname):
+                        os.unlink(fname)
+                if os.path.exists(f"ShortStack_{tag}"):
+                    subprocess.run(f"rm -rf ShortStack_{tag}", shell=True, check=True)
 
             tee.write("\nConverting BAM to BED...\n")
 
@@ -192,16 +227,52 @@ def run(opts):
                 f"if($11>=18 && $11 <= 26) {{print $0 > (a$11\".bed\")}}}}' {tag}.bed",
                 shell=True, check=True
             )
-            subprocess.run(
-                f"awk '!a[$4]++' {tag}.bed | awk '{{print $11}}' | sort | uniq -c | "
-                f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt",
-                shell=True, check=True
-            )
+
+            # Expand per-length BEDs for condensed ShortStack BAMs
+            if condensed:
+                tee.write("  Expanding per-length BEDs by XW tag...\n")
+                for sbed in globmod.glob(f"{tag}*.bed"):
+                    expand_bed_by_xw(sbed, f"{tag}.bam")
+                tee.write("  BED expansion done.\n")
+
+            # Length distribution (unique reads * multiplicity)
+            if condensed:
+                subprocess.run(
+                    f"samtools view {tag}.bam | "
+                    f"awk '{{xw=1; for(i=12;i<=NF;i++) if($i~/^XW:i:/){{xw=substr($i,6)+0;break}}; "
+                    f"len=length($10); if(len>=18 && len<=26) sum[len]+=xw}} "
+                    f"END{{for(l in sum) print l\"\\t\"sum[l] | \"sort -n\"}}' > {tag}.len_dist.txt",
+                    shell=True, check=True
+                )
+            else:
+                subprocess.run(
+                    f"awk '!a[$4]++' {tag}.bed | awk '{{print $11}}' | sort | uniq -c | "
+                    f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt",
+                    shell=True, check=True
+                )
             subprocess.run(
                 f"awk '{{if($1<=28){{n+=$2}}}}END{{print \"total\\t\"n}}' "
                 f"{tag}.len_dist.txt >> {tag}.nf",
                 shell=True, check=True
             )
+
+            # total_all_length: all mapped reads (XW-corrected for condensed)
+            if not bam_input:
+                if condensed:
+                    subprocess.run(
+                        f"samtools view -F 4 {tag}.bam | "
+                        f"awk '{{xw=1; for(i=12;i<=NF;i++) "
+                        f"if($i~/^XW:i:/){{xw=substr($i,6)+0;break}}; "
+                        f"sum+=xw}} END{{print \"total_all_length\\t\"sum}}' "
+                        f">> {tag}.nf",
+                        shell=True, check=True
+                    )
+                else:
+                    subprocess.run(
+                        f"echo \"total_all_length\\t$(samtools view -c -F 4 {tag}.bam)\" "
+                        f">> {tag}.nf",
+                        shell=True, check=True
+                    )
 
             tee.write("\nLength distribution summary done!\nCounting start...\n")
 
@@ -215,7 +286,8 @@ def run(opts):
 
             for mnorm in norms:
                 if mnorm in normhash:
-                    _count(mnorm, normhash[mnorm], prefix, genome, binsize, tag, tee)
+                    _count(mnorm, normhash[mnorm], prefix, genome, binsize,
+                           tag, tee, condensed)
 
             tee.write("Counting Completed!\n")
 
@@ -304,7 +376,7 @@ def _umi_dedup(tag):
                 )
 
 
-def _count(mnorm, rc, prefix, genome, binsize, tag, tee):
+def _count(mnorm, rc, prefix, genome, binsize, tag, tee, condensed=False):
     """Count reads in bins, genes, TEs, promoters, and miRNAs."""
     import math
 
@@ -312,11 +384,25 @@ def _count(mnorm, rc, prefix, genome, binsize, tag, tee):
 
     # miRNA counting
     mir_gff = os.path.join(prefix, "reference", f"{genome}_miRNA_miRNA_star.gff")
-    subprocess.run(
-        f"bedtools intersect -a {mir_gff} -b {tag}.bam -wa -f 1 -r -c | "
-        f"awk '{{print $9\"\\t\"$10}}' > {tag}.miRNA.tmp",
-        shell=True, check=True
-    )
+    if condensed:
+        # Use expanded BED to account for XW multiplicity
+        expand_bed_by_xw(f"{tag}.bed", f"{tag}.bam")
+        subprocess.run(
+            f"bedtools intersect -a {mir_gff} -b {tag}.bed -wa -f 1 -r -c | "
+            f"awk '{{print $9\"\\t\"$10}}' > {tag}.miRNA.tmp",
+            shell=True, check=True
+        )
+        # Restore condensed BED (re-generate from BAM)
+        subprocess.run(
+            f"bamToBed -bed12 -i {tag}.bam > {tag}.bed",
+            shell=True, check=True
+        )
+    else:
+        subprocess.run(
+            f"bedtools intersect -a {mir_gff} -b {tag}.bam -wa -f 1 -r -c | "
+            f"awk '{{print $9\"\\t\"$10}}' > {tag}.miRNA.tmp",
+            shell=True, check=True
+        )
 
     count_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(int)))

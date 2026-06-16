@@ -12,7 +12,8 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
-from prnaseqtools.functions import download_sra, unzip_file, _tee
+from prnaseqtools.functions import (download_sra, unzip_file, _tee,
+                                     bam_is_condensed, expand_bed_by_xw)
 from prnaseqtools import reference as ref
 
 
@@ -51,44 +52,57 @@ def run(opts):
             fpath = files[i]
 
             tee.write(f"\nMapping {tag}...\n")
-            sra_results = download_sra(fpath, thread)
-            unzip_file(sra_results[0], tag)
+            bam_input = fpath.endswith('.bam')
+            if bam_input:
+                tee.write("  BAM input detected, skipping alignment.\n")
+                bam_src = fpath if os.path.isabs(fpath) else f"../{fpath}"
+                os.symlink(bam_src, f"{tag}.bam")
+                subprocess.run(f"samtools index {tag}.bam", shell=True, check=True)
+                tee.write(f"  Using BAM: {bam_src}\n")
+            if not bam_input:
+                sra_results = download_sra(fpath, thread)
+                unzip_file(sra_results[0], tag)
 
-            if adaptor:
-                tee.write(f"\nTrimming {tag}...\n")
+                if adaptor:
+                    tee.write(f"\nTrimming {tag}...\n")
+                    subprocess.run(
+                        f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
+                        f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq 2>&1",
+                        shell=True, check=True
+                    )
+                    os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+
+                tee.write("\nStart mapping...\n")
+                rDNA_fasta = os.path.join(prefix, "reference", f"{genome}_rDNA_chr_all.fasta")
                 subprocess.run(
-                    f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
-                    f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq 2>&1",
+                    f"ShortStack --outdir ShortStack_{tag} --align_only --bowtie_m 1000 "
+                    f"--ranmax 50 --mmap {mmap} --mismatches 1 --bowtie_cores {thread} "
+                    f"--nohp --readfile {tag}.fastq --genomefile {rDNA_fasta} 2>&1",
                     shell=True, check=True
                 )
-                os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
 
-            tee.write("\nStart mapping...\n")
-            rDNA_fasta = os.path.join(prefix, "reference", f"{genome}_rDNA_chr_all.fasta")
-            subprocess.run(
-                f"ShortStack --outdir ShortStack_{tag} --align_only --bowtie_m 1000 "
-                f"--ranmax 50 --mmap {mmap} --mismatches 1 --bowtie_cores {thread} "
-                f"--nohp --readfile {tag}.fastq --genomefile {rDNA_fasta} 2>&1",
-                shell=True, check=True
-            )
+                tee.write("\nAlignment Completed!\n")
 
-            tee.write("\nAlignment Completed!\n")
+                condensed = bam_is_condensed(f"ShortStack_{tag}/{tag}.bam")
 
-            subprocess.run(f"samtools view -h ShortStack_{tag}/{tag}.bam > {tag}", shell=True, check=True)
-            subprocess.run(
-                f"awk '{{if($0~/^@/) print > (FILENAME\".unmapped.sam\"); "
-                f"if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".sam\"); "
-                f"if($10!=\"*\" && $3==\"*\") print > (FILENAME\".unmapped.sam\")}}' {tag}",
-                shell=True, check=True
-            )
-            subprocess.run(f"samtools view -Sb {tag}.unmapped.sam > {tag}.unmapped.bam", shell=True, check=True)
-            subprocess.run(f"samtools view -Sb {tag}.sam > {tag}.bam", shell=True, check=True)
+                subprocess.run(f"samtools view -h ShortStack_{tag}/{tag}.bam > {tag}", shell=True, check=True)
+                subprocess.run(
+                    f"awk '{{if($0~/^@/) print > (FILENAME\".unmapped.sam\"); "
+                    f"if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".sam\"); "
+                    f"if($10!=\"*\" && $3==\"*\") print > (FILENAME\".unmapped.sam\")}}' {tag}",
+                    shell=True, check=True
+                )
+                subprocess.run(f"samtools view -Sb {tag}.unmapped.sam > {tag}.unmapped.bam", shell=True, check=True)
+                subprocess.run(f"samtools view -Sb {tag}.sam > {tag}.bam", shell=True, check=True)
 
-            for fname in (tag, f"{tag}.unmapped.sam", f"{tag}.sam", f"{tag}.fastq"):
-                if os.path.exists(fname):
-                    os.unlink(fname)
-            if os.path.exists(f"ShortStack_{tag}"):
-                subprocess.run(f"rm -rf ShortStack_{tag}", shell=True)
+                for fname in (tag, f"{tag}.unmapped.sam", f"{tag}.sam", f"{tag}.fastq"):
+                    if os.path.exists(fname):
+                        os.unlink(fname)
+                if os.path.exists(f"ShortStack_{tag}"):
+                    subprocess.run(f"rm -rf ShortStack_{tag}", shell=True)
+            else:
+                # BAM input: detect condensed format
+                condensed = bam_is_condensed(f"{tag}.bam")
 
             tee.write("\nConverting BAM to BED...\n")
             subprocess.run(f"bamToBed -bed12 -i {tag}.bam > {tag}.bed", shell=True, check=True)
@@ -99,11 +113,29 @@ def run(opts):
                 f"if($11>=18 && $11 <= 26) {{print $0 > (a$11\".bed\")}}}}' {tag}.bed",
                 shell=True, check=True
             )
-            subprocess.run(
-                f"awk '!a[$4]++' {tag}.bed | awk '{{print $11}}' | sort | uniq -c | "
-                f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt",
-                shell=True, check=True
-            )
+
+            # Expand per-length BEDs for condensed ShortStack BAMs
+            if condensed:
+                tee.write("  Expanding per-length BEDs by XW tag...\n")
+                for sbed in globmod.glob(f"{tag}*.bed"):
+                    expand_bed_by_xw(sbed, f"{tag}.bam")
+                tee.write("  BED expansion done.\n")
+
+            # Length distribution
+            if condensed:
+                subprocess.run(
+                    f"samtools view {tag}.bam | "
+                    f"awk '{{xw=1; for(i=12;i<=NF;i++) if($i~/^XW:i:/){{xw=substr($i,6)+0;break}}; "
+                    f"len=length($10); if(len>=18 && len<=26) sum[len]+=xw}} "
+                    f"END{{for(l in sum) print l\"\\t\"sum[l] | \"sort -n\"}}' > {tag}.len_dist.txt",
+                    shell=True, check=True
+                )
+            else:
+                subprocess.run(
+                    f"awk '!a[$4]++' {tag}.bed | awk '{{print $11}}' | sort | uniq -c | "
+                    f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt",
+                    shell=True, check=True
+                )
             subprocess.run(
                 f"awk '{{n+=$2}}END{{print \"total\\t\"n}}' {tag}.len_dist.txt >> {tag}.nf",
                 shell=True, check=True

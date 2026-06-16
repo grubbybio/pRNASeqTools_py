@@ -52,6 +52,20 @@ def run(opts):
 
             tee.write(f"\nMapping {tag}...\n")
 
+            bam_input = fpath.endswith('.bam')
+            if bam_input:
+                tee.write("  BAM input detected, skipping alignment.\n")
+                bam_src = fpath if os.path.isabs(fpath) else f"../{fpath}"
+                os.symlink(bam_src, f"{tag}.bam")
+                bam_count = subprocess.run(
+                    f"samtools view -c {tag}.bam",
+                    shell=True, capture_output=True, text=True
+                ).stdout.strip()
+                with open(f"{tag}.nf", 'w') as nf_fh:
+                    nf_fh.write(f"total\t{bam_count}\n")
+                tee.write(f"  Total reads: {bam_count}\n")
+                continue
+
             sra_results = download_sra(fpath, thread)
             unzip_file(sra_results[0], tag)
 
