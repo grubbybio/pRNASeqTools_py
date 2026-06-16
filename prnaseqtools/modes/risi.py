@@ -38,7 +38,10 @@ def run(opts):
     tags, files, pars = parse_input(control_dict)
 
     if opts.get('treatment'):
-        if opts.get('treatment', '')\n    if isinstance(treatment_opt, list):\n        treatment_opt = treatment_opt[0] if treatment_opt else ''\n    treatment_dict = _parse_to_dict(treatment_opt)
+        treatment_opt = opts.get('treatment', '')
+        if isinstance(treatment_opt, list):
+            treatment_opt = treatment_opt[0] if treatment_opt else ''
+        treatment_dict = _parse_to_dict(treatment_opt)
         t_tags, t_files, t_pars = parse_input(treatment_dict)
         tags.extend(t_tags)
         files.extend(t_files)
@@ -124,20 +127,12 @@ def run(opts):
                 tee.write("  BED expansion done.\n")
 
             # Length distribution
-            if condensed:
-                subprocess.run(
-                    f"samtools view {tag}.bam | "
-                    f"awk '{{xw=1; for(i=12;i<=NF;i++) if($i~/^XW:i:/){{xw=substr($i,6)+0;break}}; "
-                    f"len=length($10); if(len>=18 && len<=26) sum[len]+=xw}} "
-                    f"END{{for(l in sum) print l\"\\t\"sum[l] | \"sort -n\"}}' > {tag}.len_dist.txt",
-                    shell=True, check=True
-                )
-            else:
-                subprocess.run(
-                    f"awk '!a[$4]++' {tag}.bed | awk '{{print $11}}' | sort | uniq -c | "
-                    f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt",
-                    shell=True, check=True
-                )
+            # Length distribution: count reads per length from expanded BED
+            subprocess.run(
+                f"awk '{{print $11}}' {tag}.bed | sort -n | uniq -c | "
+                f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt",
+                shell=True, check=True
+            )
             subprocess.run(
                 f"awk '{{n+=$2}}END{{print \"total\\t\"n}}' {tag}.len_dist.txt >> {tag}.nf",
                 shell=True, check=True

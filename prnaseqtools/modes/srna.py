@@ -90,23 +90,9 @@ def run(opts):
                 # Detect condensed format
                 condensed = bam_is_condensed(f"{tag}.bam")
 
-                # Build .nf with XW-corrected total count
-                if condensed:
-                    bam_count = subprocess.run(
-                        f"samtools view -F 4 {tag}.bam | "
-                        f"awk '{{xw=1; for(i=12;i<=NF;i++) "
-                        f"if($i~/^XW:i:/){{xw=substr($i,6)+0;break}}; "
-                        f"sum+=xw}} END{{print sum}}'",
-                        shell=True, capture_output=True, text=True
-                    ).stdout.strip()
-                else:
-                    bam_count = subprocess.run(
-                        f"samtools view -c -F 4 {tag}.bam",
-                        shell=True, capture_output=True, text=True
-                    ).stdout.strip()
+                # Create empty .nf (total_all_length added after BED expansion)
                 with open(f"{tag}.nf", 'w') as nf_fh:
-                    nf_fh.write(f"total_all_length\t{bam_count}\n")
-                tee.write(f"  Total reads (all lengths): {bam_count}\n")
+                    pass
 
             if not bam_input:
 
@@ -219,6 +205,10 @@ def run(opts):
             tee.write("\nConverting BAM to BED...\n")
 
             subprocess.run(f"bamToBed -bed12 -i {tag}.bam > {tag}.bed", shell=True, check=True)
+            if condensed:
+                tee.write("  Expanding full BED by XW tag...\n")
+                expand_bed_by_xw(f"{tag}.bed", f"{tag}.bam")
+                tee.write("  BED expansion done.\n")
 
             tee.write("\nGenerating individual files...\n")
 
@@ -228,54 +218,24 @@ def run(opts):
                 shell=True, check=True
             )
 
-            # Expand per-length BEDs for condensed ShortStack BAMs
-            if condensed:
-                tee.write("  Expanding per-length BEDs by XW tag...\n")
-                for sbed in sorted(globmod.glob(f"{tag}*.bed")):
-                    # Skip full BED, only expand per-length BEDs
-                    if sbed == f"{tag}.bed":
-                        continue
-                    expand_bed_by_xw(sbed, f"{tag}.bam")
-                tee.write("  BED expansion done.\n")
-
-            # Length distribution (unique reads * multiplicity)
-            if condensed:
-                subprocess.run(
-                    f"samtools view {tag}.bam | "
-                    f"awk '{{xw=1; for(i=12;i<=NF;i++) if($i~/^XW:i:/){{xw=substr($i,6)+0;break}}; "
-                    f"len=length($10); if(len>=18 && len<=26) sum[len]+=xw}} "
-                    f"END{{for(l in sum) print l\"\\t\"sum[l] | \"sort -n\"}}' > {tag}.len_dist.txt",
-                    shell=True, check=True
-                )
-            else:
-                subprocess.run(
-                    f"awk '!a[$4]++' {tag}.bed | awk '{{print $11}}' | sort | uniq -c | "
-                    f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt",
-                    shell=True, check=True
-                )
+            # Length distribution: count reads per length from expanded BED
+            subprocess.run(
+                f"awk '{{print $11}}' {tag}.bed | sort -n | uniq -c | "
+                f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt",
+                shell=True, check=True
+            )
             subprocess.run(
                 f"awk '{{if($1<=28){{n+=$2}}}}END{{print \"total\\t\"n}}' "
                 f"{tag}.len_dist.txt >> {tag}.nf",
                 shell=True, check=True
             )
 
-            # total_all_length: all mapped reads (XW-corrected for condensed)
-            if not bam_input:
-                if condensed:
-                    subprocess.run(
-                        f"samtools view -F 4 {tag}.bam | "
-                        f"awk '{{xw=1; for(i=12;i<=NF;i++) "
-                        f"if($i~/^XW:i:/){{xw=substr($i,6)+0;break}}; "
-                        f"sum+=xw}} END{{print \"total_all_length\\t\"sum}}' "
-                        f">> {tag}.nf",
-                        shell=True, check=True
-                    )
-                else:
-                    subprocess.run(
-                        f"echo \"total_all_length\\t$(samtools view -c -F 4 {tag}.bam)\" "
-                        f">> {tag}.nf",
-                        shell=True, check=True
-                    )
+            # total_all_length: all mapped reads (counted after BED expansion)
+            subprocess.run(
+                f"echo \"total_all_length\\t$(wc -l < {tag}.bed)\" "
+                f">> {tag}.nf",
+                shell=True, check=True
+            )
 
             tee.write("\nLength distribution summary done!\nCounting start...\n")
 
@@ -287,10 +247,27 @@ def run(opts):
                     if len(parts) == 2:
                         normhash[parts[0]] = int(parts[1])
 
+            # Pre-compute miRNA raw counts and load reference (once)
+            mir_gff = os.path.join(prefix, "reference",
+                                   f"{genome}_miRNA_miRNA_star.gff")
+            mir_raw = {}
+            subprocess.run(
+                f"bedtools intersect -a {mir_gff} -b {tag}.bed "
+                f"-wa -f 1 -r -c | "
+                f"awk '{{print $9\"\\t\"$10}}' > {tag}.miRNA.tmp",
+                shell=True, check=True
+            )
+            with open(f"{tag}.miRNA.tmp") as fh:
+                for line in fh:
+                    cols = line.strip().split('\t')
+                    if len(cols) >= 2:
+                        mir_raw[cols[0]] = int(cols[1])
+            os.unlink(f"{tag}.miRNA.tmp")
+            fas = ref.read_fasta(prefix, genome)
             for mnorm in norms:
                 if mnorm in normhash:
                     _count(mnorm, normhash[mnorm], prefix, genome, binsize,
-                           tag, tee, condensed)
+                           tag, tee, fas, mir_raw)
 
             tee.write("Counting Completed!\n")
 
@@ -379,46 +356,16 @@ def _umi_dedup(tag):
                 )
 
 
-def _count(mnorm, rc, prefix, genome, binsize, tag, tee, condensed):
+def _count(mnorm, rc, prefix, genome, binsize, tag, tee, fas, mir_raw):
     """Count reads in bins, genes, TEs, promoters, and miRNAs."""
     import math
-
-    fas = ref.read_fasta(prefix, genome)
-
-    # miRNA counting
-    mir_gff = os.path.join(prefix, "reference", f"{genome}_miRNA_miRNA_star.gff")
-    if condensed:
-        # Use expanded BED to account for XW multiplicity
-        expand_bed_by_xw(f"{tag}.bed", f"{tag}.bam")
-        subprocess.run(
-            f"bedtools intersect -a {mir_gff} -b {tag}.bed -wa -f 1 -r -c | "
-            f"awk '{{print $9\"\\t\"$10}}' > {tag}.miRNA.tmp",
-            shell=True, check=True
-        )
-        # Restore condensed BED (re-generate from BAM)
-        subprocess.run(
-            f"bamToBed -bed12 -i {tag}.bam > {tag}.bed",
-            shell=True, check=True
-        )
-    else:
-        subprocess.run(
-            f"bedtools intersect -a {mir_gff} -b {tag}.bam -wa -f 1 -r -c | "
-            f"awk '{{print $9\"\\t\"$10}}' > {tag}.miRNA.tmp",
-            shell=True, check=True
-        )
 
     count_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     )
 
-    with open(f"{tag}.miRNA.tmp") as fh:
-        for line in fh:
-            cols = line.strip().split('\t')
-            if len(cols) >= 2:
-                count_data['mir_raw'][cols[0]] = int(cols[1])
-
-    if os.path.exists(f"{tag}.miRNA.tmp"):
-        os.unlink(f"{tag}.miRNA.tmp")
+    for mir_name, mir_count in mir_raw.items():
+        count_data['mir_raw'][mir_name] = mir_count
 
     # miRNA annotation counting
     mirna_data = defaultdict(lambda: {'name': '', 'count': 0})

@@ -33,7 +33,10 @@ def run(opts):
     tags, files, pars = parse_input(control_dict)
 
     if opts.get('treatment'):
-        if opts.get('treatment', '')\n    if isinstance(treatment_opt, list):\n        treatment_opt = treatment_opt[0] if treatment_opt else ''\n    treatment_dict = _parse_to_dict(treatment_opt)
+        treatment_opt = opts.get('treatment', '')
+        if isinstance(treatment_opt, list):
+            treatment_opt = treatment_opt[0] if treatment_opt else ''
+        treatment_dict = _parse_to_dict(treatment_opt)
         t_tags, t_files, t_pars = parse_input(treatment_dict)
         tags.extend(t_tags)
         files.extend(t_files)
