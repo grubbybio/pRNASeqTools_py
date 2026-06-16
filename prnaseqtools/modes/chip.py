@@ -39,6 +39,8 @@ def run(opts):
 
     control_tags = []
     input_opt = opts.get('control')
+    if isinstance(input_opt, list):
+        input_opt = input_opt[0] if input_opt else ''
     genrich_input = ""
     if input_opt:
         input_dict = _parse_to_dict(input_opt)

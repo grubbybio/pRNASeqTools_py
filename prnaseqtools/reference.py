@@ -85,15 +85,20 @@ def read_fasta(prefix, genome):
     fas_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
     fas = {}
     current_name = None
+    chunks = []
 
     with open(fas_path) as fh:
         for line in fh:
             line = line.strip()
             if line.startswith('>'):
+                if current_name is not None:
+                    fas[current_name] = "".join(chunks)
+                    chunks = []
                 current_name = line[1:].split()[0]
-                fas[current_name] = ""
             else:
-                fas[current_name] += line
+                chunks.append(line)
+        if current_name is not None:
+            fas[current_name] = "".join(chunks)
 
     return fas
 
@@ -115,9 +120,13 @@ def read_exons(prefix, genome):
     tran = 0
 
     with open("exons.fa") as fh:
+        chunks = []
         for line in fh:
             line = line.strip()
             if line.startswith('>'):
+                if gene is not None:
+                    exon_data[gene][tran] = "".join(chunks)
+                    chunks = []
                 header = line[1:]
                 m = __import__('re').match(r'(\w+)\.(\d+)', header)
                 if m:
@@ -127,7 +136,9 @@ def read_exons(prefix, genome):
                     gene = header
                     tran = 0
             else:
-                exon_data[gene][tran] += line
+                chunks.append(line)
+        if gene is not None:
+            exon_data[gene][tran] = "".join(chunks)
 
     os.unlink("exons.fa")
     return dict(exon_data)

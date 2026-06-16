@@ -264,10 +264,18 @@ def run(opts):
                         mir_raw[cols[0]] = int(cols[1])
             os.unlink(f"{tag}.miRNA.tmp")
             fas = ref.read_fasta(prefix, genome)
+
+            # Raw counting (once)
+            mir_gff_inner = os.path.join(prefix, "reference",
+                                          f"{genome}_miRNA_miRNA_star.gff")
+            bed_files = _count(prefix, genome, binsize, tag, tee, fas,
+                               mir_raw, mir_gff_inner)
+
+            # Normalization per norm
             for mnorm in norms:
                 if mnorm in normhash:
-                    _count(mnorm, normhash[mnorm], prefix, genome, binsize,
-                           tag, tee, fas, mir_raw)
+                    _make_normalized(normhash[mnorm], mnorm, tag,
+                                     bed_files, prefix, genome)
 
             tee.write("Counting Completed!\n")
 
@@ -356,12 +364,10 @@ def _umi_dedup(tag):
                 )
 
 
-def _count(mnorm, rc, prefix, genome, binsize, tag, tee, fas, mir_raw):
-    """Count reads in bins, genes, TEs, promoters, and miRNAs."""
-    import math
-
+def _count(prefix, genome, binsize, tag, tee, fas, mir_raw, mir_gff):
+    """Compute raw counts only (bins, genes, TEs, promoters, miRNAs)."""
     count_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(int))))
     )
 
     for mir_name, mir_count in mir_raw.items():
@@ -389,23 +395,7 @@ def _count(mnorm, rc, prefix, genome, binsize, tag, tee, fas, mir_raw):
     bed_files = [f for f in os.listdir('.') if f.startswith(tag) and f.endswith('.bed') and any(c.isdigit() for c in f.replace(tag, '').replace('.bed', ''))]
 
     for sbed in bed_files:
-        nrc = 1000000.0 / rc
-
-        # Strand-specific and combined bedgraph generation
-        _make_bedgraph(sbed, prefix, genome, nrc, mnorm)
-
-        # miRNA counting per length
-        subprocess.run(
-            f"bedtools intersect -a {mir_gff} -b {sbed} -wa -f 0.95 -c | "
-            f"awk -v x={rc} '{{print $9\"\\t\"$10 * 1000000 / x}}' > {sbed}.tmp",
-            shell=True, check=True
-        )
-        with open(f"{sbed}.tmp") as fh:
-            for line in fh:
-                cols = line.strip().split('\t')
-                if len(cols) >= 2:
-                    count_data['mir'][cols[0]][sbed]['n'] = float(cols[1])
-
+        # miRNA counting per length (raw only)
         subprocess.run(
             f"bedtools intersect -a {mir_gff} -b {sbed} -wa -f 0.95 -c | "
             f"awk '{{print $9\"\\t\"$10}}' > {sbed}.tmp",
@@ -433,10 +423,10 @@ def _count(mnorm, rc, prefix, genome, binsize, tag, tee, fas, mir_raw):
         chrom_lengths = ref.read_chromosome_lengths(prefix, genome, binsize)
         for chr_name in sorted(chrom_lengths.keys()):
             for bi in range(chrom_lengths[chr_name] + 1):
-                if chr_name not in count_data['r100'] or bi not in count_data['r100'][chr_name] or sbed not in count_data['r100'][chr_name][bi]:
+                if (chr_name not in count_data['r100']
+                    or bi not in count_data['r100'][chr_name]
+                    or sbed not in count_data['r100'][chr_name][bi]):
                     count_data['r100'][chr_name][bi][sbed]['r'] = 0
-                count_data['r100'][chr_name][bi][sbed]['n'] = \
-                    count_data['r100'][chr_name][bi][sbed].get('r', 0) * 1000000.0 / rc
 
         # Gene counting
         subprocess.run(
@@ -448,7 +438,6 @@ def _count(mnorm, rc, prefix, genome, binsize, tag, tee, fas, mir_raw):
                 cols = line.strip().split('\t')
                 if len(cols) >= 10:
                     count_data['gene'][cols[8]][sbed]['r'] = int(cols[9])
-                    count_data['gene'][cols[8]][sbed]['n'] = int(cols[9]) * 1000000.0 / rc
         if os.path.exists(f"{sbed}.gene.tmp"):
             os.unlink(f"{sbed}.gene.tmp")
 
@@ -463,7 +452,6 @@ def _count(mnorm, rc, prefix, genome, binsize, tag, tee, fas, mir_raw):
                     cols = line.strip().split('\t')
                     if len(cols) >= 10:
                         count_data['te'][cols[8]][sbed]['r'] = int(cols[9])
-                        count_data['te'][cols[8]][sbed]['n'] = int(cols[9]) * 1000000.0 / rc
             if os.path.exists(f"{sbed}.te.tmp"):
                 os.unlink(f"{sbed}.te.tmp")
 
@@ -478,12 +466,13 @@ def _count(mnorm, rc, prefix, genome, binsize, tag, tee, fas, mir_raw):
                     cols = line.strip().split('\t')
                     if len(cols) >= 10:
                         count_data['promoter'][cols[8]][sbed]['r'] = int(cols[9])
-                        count_data['promoter'][cols[8]][sbed]['n'] = int(cols[9]) * 1000000.0 / rc
             if os.path.exists(f"{sbed}.promoter.tmp"):
                 os.unlink(f"{sbed}.promoter.tmp")
 
-    # Write count files
-    _write_count_files(count_data, tag, mnorm, bed_files, prefix, genome, fas)
+    # Write raw count files
+    _write_raw_count_files(count_data, tag, bed_files, prefix, genome, fas, mir_gff)
+
+    return bed_files
 
 
 def _make_bedgraph(sbed, prefix, genome, nrc, mnorm):
@@ -525,65 +514,49 @@ def _make_bedgraph(sbed, prefix, genome, nrc, mnorm):
     os.unlink(bg_norm)
 
 
-def _write_count_files(count_data, tag, mnorm, bed_files, prefix, genome, fas):
-    """Write count output files."""
+def _write_raw_count_files(count_data, tag, bed_files, prefix, genome, fas, mir_gff):
+    """Write raw count files (no normalization)."""
+    sbed_sorted = sorted(bed_files)
+
     # Bin counts
-    with open(f"{tag}.count", 'w') as fh1, open(f"{tag}.{mnorm}.norm.count", 'w') as fh2:
+    with open(f"{tag}.count", 'w') as fh:
         for chr_name in sorted(count_data.get('r100', {}).keys()):
             for bi in sorted(count_data['r100'][chr_name].keys()):
-                fh1.write(f"{chr_name}_{bi}")
-                fh2.write(f"{chr_name}_{bi}")
-                for sbed in sorted(bed_files):
+                fh.write(f"{chr_name}_{bi}")
+                for sbed in sbed_sorted:
                     r_val = count_data['r100'][chr_name][bi].get(sbed, {}).get('r', 0)
-                    n_val = count_data['r100'][chr_name][bi].get(sbed, {}).get('n', 0)
-                    fh1.write(f"\t{r_val}")
-                    fh2.write(f"\t{n_val}")
-                fh1.write('\n')
-                fh2.write('\n')
+                    fh.write(f"\t{r_val}")
+                fh.write('\n')
 
     # Gene counts
-    with open(f"{tag}.gene.count", 'w') as fh1, open(f"{tag}.gene.{mnorm}.norm.count", 'w') as fh2:
+    with open(f"{tag}.gene.count", 'w') as fh:
         for gene_name in sorted(count_data.get('gene', {}).keys()):
-            fh1.write(gene_name)
-            fh2.write(gene_name)
-            for sbed in sorted(bed_files):
+            fh.write(gene_name)
+            for sbed in sbed_sorted:
                 r_val = count_data['gene'][gene_name].get(sbed, {}).get('r', 0)
-                n_val = count_data['gene'][gene_name].get(sbed, {}).get('n', 0)
-                fh1.write(f"\t{r_val}")
-                fh2.write(f"\t{n_val}")
-            fh1.write('\n')
-            fh2.write('\n')
+                fh.write(f"\t{r_val}")
+            fh.write('\n')
 
     # TE counts
-    with open(f"{tag}.TE.count", 'w') as fh1, open(f"{tag}.TE.{mnorm}.norm.count", 'w') as fh2:
+    with open(f"{tag}.TE.count", 'w') as fh:
         for gene_name in sorted(count_data.get('te', {}).keys()):
-            fh1.write(gene_name)
-            fh2.write(gene_name)
-            for sbed in sorted(bed_files):
+            fh.write(gene_name)
+            for sbed in sbed_sorted:
                 r_val = count_data['te'][gene_name].get(sbed, {}).get('r', 0)
-                n_val = count_data['te'][gene_name].get(sbed, {}).get('n', 0)
-                fh1.write(f"\t{r_val}")
-                fh2.write(f"\t{n_val}")
-            fh1.write('\n')
-            fh2.write('\n')
+                fh.write(f"\t{r_val}")
+            fh.write('\n')
 
     # Promoter counts
-    with open(f"{tag}.promoter.count", 'w') as fh1, open(f"{tag}.promoter.{mnorm}.norm.count", 'w') as fh2:
+    with open(f"{tag}.promoter.count", 'w') as fh:
         for gene_name in sorted(count_data.get('promoter', {}).keys()):
-            fh1.write(gene_name)
-            fh2.write(gene_name)
-            for sbed in sorted(bed_files):
+            fh.write(gene_name)
+            for sbed in sbed_sorted:
                 r_val = count_data['promoter'][gene_name].get(sbed, {}).get('r', 0)
-                n_val = count_data['promoter'][gene_name].get(sbed, {}).get('n', 0)
-                fh1.write(f"\t{r_val}")
-                fh2.write(f"\t{n_val}")
-            fh1.write('\n')
-            fh2.write('\n')
+                fh.write(f"\t{r_val}")
+            fh.write('\n')
 
     # miRNA counts
-    mir_gff = os.path.join(prefix, "reference", f"{genome}_miRNA_miRNA_star.gff")
     mirna_data = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-
     with open(mir_gff) as fh:
         for line in fh:
             cols = line.strip().split('\t')
@@ -593,28 +566,52 @@ def _write_count_files(count_data, tag, mnorm, bed_files, prefix, genome, fas):
             if cols[6] == '-':
                 miseq = revcomp(miseq)
             mirna_data[miseq]['name'] = cols[8]
-
             for sbed in bed_files:
                 if cols[8] in count_data.get('mir', {}):
                     mirna_data[miseq][sbed]['r'] += count_data['mir'][cols[8]].get(sbed, {}).get('r', 0)
-                    mirna_data[miseq][sbed]['n'] += count_data['mir'][cols[8]].get(sbed, {}).get('n', 0)
 
-    with open(f"{tag}.miRNA.count", 'w') as fh1, open(f"{tag}.miRNA.{mnorm}.norm.count", 'w') as fh2:
+    with open(f"{tag}.miRNA.count", 'w') as fh:
         for miseq in sorted(mirna_data.keys()):
             mir_name = ""
             for mir_id_data in mirna_data[miseq].values():
                 if isinstance(mir_id_data, str):
                     mir_name += mir_id_data + ';'
             mir_name = mir_name.rstrip(';')
-            fh1.write(mir_name)
-            fh2.write(mir_name)
-            for sbed in sorted(bed_files):
+            fh.write(mir_name)
+            for sbed in sbed_sorted:
                 r_val = mirna_data[miseq].get(sbed, {}).get('r', 0)
-                n_val = mirna_data[miseq].get(sbed, {}).get('n', 0)
-                fh1.write(f"\t{r_val}")
-                fh2.write(f"\t{n_val}")
-            fh1.write('\n')
-            fh2.write('\n')
+                fh.write(f"\t{r_val}")
+            fh.write('\n')
+
+
+def _make_normalized(rc, mnorm, tag, bed_files, prefix, genome):
+    """Generate normalized counts and bedgraph/bigwig from raw counts."""
+    nrc = 1000000.0 / rc
+    sbed_sorted = sorted(bed_files)
+
+    # Generate bedgraph/bigwig per length
+    for sbed in sbed_sorted:
+        _make_bedgraph(sbed, prefix, genome, nrc, mnorm)
+
+    # Read raw count files, write normalized versions
+    for (raw_suffix, norm_suffix) in [
+        ('.count', f'.{mnorm}.norm.count'),
+        ('.gene.count', f'.gene.{mnorm}.norm.count'),
+        ('.TE.count', f'.TE.{mnorm}.norm.count'),
+        ('.promoter.count', f'.promoter.{mnorm}.norm.count'),
+        ('.miRNA.count', f'.miRNA.{mnorm}.norm.count'),
+    ]:
+        raw_path = f"{tag}{raw_suffix}"
+        if not os.path.exists(raw_path):
+            continue
+        norm_path = f"{tag}{norm_suffix}"
+        with open(raw_path) as fh_raw, open(norm_path, 'w') as fh_norm:
+            for line in fh_raw:
+                cols = line.strip().split('\t')
+                fh_norm.write(cols[0])
+                for val in cols[1:]:
+                    fh_norm.write(f"\t{int(val) * nrc:.2f}")
+                fh_norm.write('\n')
 
 
 def _stat_analysis(mnorm, prefix, genome, foldchange, pvalue, binsize,
