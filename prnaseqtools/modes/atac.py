@@ -46,6 +46,8 @@ def run(opts):
         genrich_input = "-c " + ','.join(f"{t}.sorted.name.bam" for t in i_tags)
 
     ip_opt = opts.get('treatment', '')
+    if isinstance(ip_opt, list):
+        ip_opt = ip_opt[0] if ip_opt else ''
     ip_dict = _parse_to_dict(ip_opt)
     i_tags, i_files, _ = parse_input(ip_dict)
     tags.extend(i_tags)

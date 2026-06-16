@@ -50,6 +50,8 @@ def run(opts):
 
     # Parse IP (treatment)
     ip_opt = opts.get('treatment', '')
+    if isinstance(ip_opt, list):
+        ip_opt = ip_opt[0] if ip_opt else ''
     ip_dict = _parse_to_dict(ip_opt)
     i_tags, i_files, i_pars = parse_input(ip_dict)
     tags.extend(i_tags)

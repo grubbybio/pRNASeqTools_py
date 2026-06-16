@@ -231,7 +231,10 @@ def run(opts):
             # Expand per-length BEDs for condensed ShortStack BAMs
             if condensed:
                 tee.write("  Expanding per-length BEDs by XW tag...\n")
-                for sbed in globmod.glob(f"{tag}*.bed"):
+                for sbed in sorted(globmod.glob(f"{tag}*.bed")):
+                    # Skip full BED, only expand per-length BEDs
+                    if sbed == f"{tag}.bed":
+                        continue
                     expand_bed_by_xw(sbed, f"{tag}.bam")
                 tee.write("  BED expansion done.\n")
 
@@ -376,7 +379,7 @@ def _umi_dedup(tag):
                 )
 
 
-def _count(mnorm, rc, prefix, genome, binsize, tag, tee, condensed=False):
+def _count(mnorm, rc, prefix, genome, binsize, tag, tee, condensed):
     """Count reads in bins, genes, TEs, promoters, and miRNAs."""
     import math
 

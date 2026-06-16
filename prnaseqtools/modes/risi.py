@@ -38,7 +38,7 @@ def run(opts):
     tags, files, pars = parse_input(control_dict)
 
     if opts.get('treatment'):
-        treatment_dict = _parse_to_dict(opts.get('treatment', ''))
+        if opts.get('treatment', '')\n    if isinstance(treatment_opt, list):\n        treatment_opt = treatment_opt[0] if treatment_opt else ''\n    treatment_dict = _parse_to_dict(treatment_opt)
         t_tags, t_files, t_pars = parse_input(treatment_dict)
         tags.extend(t_tags)
         files.extend(t_files)
@@ -117,7 +117,9 @@ def run(opts):
             # Expand per-length BEDs for condensed ShortStack BAMs
             if condensed:
                 tee.write("  Expanding per-length BEDs by XW tag...\n")
-                for sbed in globmod.glob(f"{tag}*.bed"):
+                for sbed in sorted(globmod.glob(f"{tag}*.bed")):
+                    if sbed == f"{tag}.bed":
+                        continue
                     expand_bed_by_xw(sbed, f"{tag}.bam")
                 tee.write("  BED expansion done.\n")
 

@@ -63,7 +63,7 @@ _CHECK_DEFS = {
     },
     'ShortStack': {
         'cmd': 'ShortStack --version',
-        'pattern': r'ShortStack.+[34]',
+        'pattern': r'ShortStack (\d+\.\d+\.\d+)',
         'required': True,
         'msg': 'Small RNA alignment',
         'mode_only': ['srna', 'phasi', 'tt', 'risi'],
