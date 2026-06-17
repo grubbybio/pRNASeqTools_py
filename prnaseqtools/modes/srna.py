@@ -181,11 +181,16 @@ def run(opts):
 
                 tee.write("\nAlignment Completed!\n")
 
-                # Detect ShortStack >= 4.1 condensed BAM format (XW:i:n tags)
-                condensed = bam_is_condensed(f"ShortStack_{tag}/{tag}.bam")
+                # ShortStack >= 4.1 outputs {tag}_condensed.bam, older uses {tag}.bam
+                ss_bam = f"ShortStack_{tag}/{tag}_condensed.bam"
+                if not os.path.exists(ss_bam):
+                    ss_bam = f"ShortStack_{tag}/{tag}.bam"
+
+                # Detect condensed BAM format (XW:i:n tags)
+                condensed = bam_is_condensed(ss_bam)
 
                 # Process SAM/BAM
-                subprocess.run(f"samtools view -h ShortStack_{tag}/{tag}.bam > {tag}", shell=True, check=True)
+                subprocess.run(f"samtools view -h {ss_bam} > {tag}", shell=True, check=True)
                 subprocess.run(
                     f"awk '{{if($0~/^@/) print > (FILENAME\".unmapped.sam\"); "
                     f"if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".sam\"); "
