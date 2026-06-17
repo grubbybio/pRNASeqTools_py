@@ -498,7 +498,8 @@ def _make_bedgraph(sbed, prefix, genome, nrc, mnorm):
             f"-bg -i {sbed} -g {fai} > {bg_norm}",
             shell=True, check=True
         )
-        subprocess.run(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}", shell=True, check=True)
+        if os.path.getsize(bg_norm) > 0:
+            subprocess.run(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}", shell=True, check=True)
         os.unlink(bg_file)
         os.unlink(bg_norm)
 
@@ -514,7 +515,8 @@ def _make_bedgraph(sbed, prefix, genome, nrc, mnorm):
         f"bedtools genomecov -split -scale {nrc} -bg -i {sbed} -g {fai} > {bg_norm}",
         shell=True, check=True
     )
-    subprocess.run(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}", shell=True, check=True)
+    if os.path.getsize(bg_norm) > 0:
+        subprocess.run(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}", shell=True, check=True)
     os.unlink(bg_file)
     os.unlink(bg_norm)
 
@@ -652,7 +654,8 @@ def _stat_analysis(mnorm, prefix, genome, foldchange, pvalue, binsize,
                     fh_out.write(f"{chr_name}\t{start}\t{end}\t{cols[2] if len(cols) > 2 else '0'}\n")
 
         bw_file = hcsv.replace('.csv', '.bw')
-        subprocess.run(f"bedGraphToBigWig {bg_file} {fai} {bw_file}", shell=True, check=True)
+        if os.path.getsize(bg_file) > 0:
+            subprocess.run(f"bedGraphToBigWig {bg_file} {fai} {bw_file}", shell=True, check=True)
         os.unlink(bg_file)
 
     # Annotate CSV files
