@@ -14,7 +14,8 @@ from collections import defaultdict
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
 from prnaseqtools.functions import (download_sra, unzip_file, revcomp, _tee,
-                                     bam_is_condensed, expand_bed_by_xw)
+                                     bam_is_condensed, expand_bed_by_xw,
+                                     run_cmd)
 from prnaseqtools import reference as ref
 
 
@@ -65,13 +66,13 @@ def run(opts):
         if mask:
             mask_path = _resolve_path(mask)
             os.symlink(mask_path, "mask.fa")
-            subprocess.run("bowtie-build -q mask.fa mask", shell=True, check=True)
+            run_cmd("bowtie-build -q mask.fa mask")
 
         # Spike-in setup
         if spikein:
             spikein_path = _resolve_path(spikein)
             os.symlink(spikein_path, "spikein.fa")
-            subprocess.run("bowtie-build -q spikein.fa spikein", shell=True, check=True)
+            run_cmd("bowtie-build -q spikein.fa spikein")
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -85,14 +86,14 @@ def run(opts):
                 tee.write("  BAM input detected, skipping alignment.\n")
                 bam_src = fpath if os.path.isabs(fpath) else f"../{fpath}"
                 os.symlink(bam_src, f"{tag}.bam")
-                subprocess.run(f"samtools index {tag}.bam", shell=True, check=True)
+                run_cmd(f"samtools index {tag}.bam")
 
                 # Detect condensed format
                 condensed = bam_is_condensed(f"{tag}.bam")
 
-                # Create empty .nf (total_all_length added after BED expansion)
+                # Create .nf with rRNA=0 (no rRNA alignment for BAM input)
                 with open(f"{tag}.nf", 'w') as nf_fh:
-                    pass
+                    nf_fh.write("rRNA\t0\n")
 
             if not bam_input:
 
@@ -103,15 +104,13 @@ def run(opts):
                 # UMI extraction for single-cell mode
                 if run_mode == 'sc':
                     tee.write(f"\nTrimming {tag}...\n")
-                    subprocess.run(
-                        f"umi_tools extract -p {pattern} -I {tag}.fastq -S {tag}.fq",
-                        shell=True, check=True
+                    run_cmd(
+                        f"umi_tools extract -p {pattern} -I {tag}.fastq -S {tag}.fq"
                     )
                     if adaptor:
-                        subprocess.run(
+                        run_cmd(
                             f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
-                            f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fq 2>&1",
-                            shell=True, check=True
+                            f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fq"
                         )
 
                     # Deduplication
@@ -122,19 +121,17 @@ def run(opts):
                 elif run_mode == 'bulk':
                     if adaptor:
                         tee.write(f"\nTrimming {tag}...\n")
-                        subprocess.run(
+                        run_cmd(
                             f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
-                            f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq 2>&1",
-                            shell=True, check=True
+                            f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq"
                         )
                         os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
 
                 # Mask filtering
                 if mask:
-                    subprocess.run(
+                    run_cmd(
                         f"bowtie -v 0 -a --un tmp.fastq -p {thread} -t mask "
-                        f"{tag}.fastq {tag}.mask.out 2>&1",
-                        shell=True, check=True
+                        f"{tag}.fastq {tag}.mask.out"
                     )
                     os.rename("tmp.fastq", f"{tag}.fastq")
                     if os.path.exists(f"{tag}.mask.out"):
@@ -142,10 +139,9 @@ def run(opts):
 
                 # Spike-in counting
                 if spikein:
-                    subprocess.run(
+                    run_cmd(
                         f"bowtie -v 0 -a -p {thread} -t spikein {tag}.fastq "
-                        f"{tag}.spikein.out 2>&1",
-                        shell=True, check=True
+                        f"{tag}.spikein.out"
                     )
                     subprocess.run(
                         f"awk -F \"\\t\" 'length($5)==13 && $2==\"+\"{{print $3}}' "
@@ -157,10 +153,9 @@ def run(opts):
 
                 # rRNA filtering
                 lsu_rRNA = os.path.join(prefix, "reference", "lsu_rrna")
-                subprocess.run(
+                run_cmd(
                     f"bowtie -v 2 -a -p {thread} -t {lsu_rRNA} "
-                    f"{tag}.fastq {tag}.rRNA.out 2>&1",
-                    shell=True, check=True
+                    f"{tag}.fastq {tag}.rRNA.out"
                 )
                 subprocess.run(
                     f"awk -F \"\\t\" 'BEGIN{{x=0;y=0;z=0}}"
@@ -172,11 +167,10 @@ def run(opts):
                 )
 
                 # ShortStack alignment
-                subprocess.run(
+                run_cmd(
                     f"ShortStack --outdir ShortStack_{tag} --align_only --mmap {mmap} "
                     f"--threads {thread} --nohp --readfile {tag}.fastq "
-                    f"--genomefile {prefix}/reference/{genome}_chr_all.fasta 2>&1",
-                    shell=True, check=True
+                    f"--genomefile {prefix}/reference/{genome}_chr_all.fasta"
                 )
 
                 tee.write("\nAlignment Completed!\n")
@@ -190,26 +184,25 @@ def run(opts):
                 condensed = bam_is_condensed(ss_bam)
 
                 # Process SAM/BAM
-                subprocess.run(f"samtools view -h {ss_bam} > {tag}", shell=True, check=True)
-                subprocess.run(
+                run_cmd(f"samtools view -h {ss_bam} > {tag}")
+                run_cmd(
                     f"awk '{{if($0~/^@/) print > (FILENAME\".unmapped.sam\"); "
                     f"if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".sam\"); "
-                    f"if($10!=\"*\" && $3==\"*\") print > (FILENAME\".unmapped.sam\")}}' {tag}",
-                    shell=True, check=True
+                    f"if($10!=\"*\" && $3==\"*\") print > (FILENAME\".unmapped.sam\")}}' {tag}"
                 )
-                subprocess.run(f"samtools view -Sb {tag}.unmapped.sam > {tag}.unmapped.bam", shell=True, check=True)
-                subprocess.run(f"samtools view -Sb {tag}.sam > {tag}.bam", shell=True, check=True)
+                run_cmd(f"samtools view -Sb {tag}.unmapped.sam > {tag}.unmapped.bam")
+                run_cmd(f"samtools view -Sb {tag}.sam > {tag}.bam")
 
                 # Cleanup
                 for fname in (tag, f"{tag}.unmapped.sam", f"{tag}.sam", f"{tag}.fastq", f"{tag}.rRNA.out"):
                     if os.path.exists(fname):
                         os.unlink(fname)
                 if os.path.exists(f"ShortStack_{tag}"):
-                    subprocess.run(f"rm -rf ShortStack_{tag}", shell=True, check=True)
+                    run_cmd(f"rm -rf ShortStack_{tag}")
 
             tee.write("\nConverting BAM to BED...\n")
 
-            subprocess.run(f"bamToBed -bed12 -i {tag}.bam > {tag}.bed", shell=True, check=True)
+            run_cmd(f"bamToBed -bed12 -i {tag}.bam > {tag}.bed")
             if condensed:
                 tee.write("  Expanding full BED by XW tag...\n")
                 expand_bed_by_xw(f"{tag}.bed", f"{tag}.bam")
@@ -217,29 +210,25 @@ def run(opts):
 
             tee.write("\nGenerating individual files...\n")
 
-            subprocess.run(
+            run_cmd(
                 f"awk -F \"\\t\" '{{a=substr(FILENAME,1,length(FILENAME)-3);"
-                f"if($11>=18 && $11 <= 26) {{print $0 > (a$11\".bed\")}}}}' {tag}.bed",
-                shell=True, check=True
+                f"if($11>=18 && $11 <= 26) {{print $0 > (a$11\".bed\")}}}}' {tag}.bed"
             )
 
             # Length distribution: count reads per length from expanded BED
-            subprocess.run(
+            run_cmd(
                 f"awk '{{print $11}}' {tag}.bed | sort -n | uniq -c | "
-                f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt",
-                shell=True, check=True
+                f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt"
             )
-            subprocess.run(
+            run_cmd(
                 f"awk '{{if($1<=28){{n+=$2}}}}END{{print \"total\\t\"n}}' "
-                f"{tag}.len_dist.txt >> {tag}.nf",
-                shell=True, check=True
+                f"{tag}.len_dist.txt >> {tag}.nf"
             )
 
             # total_all_length: all mapped reads (counted after BED expansion)
-            subprocess.run(
+            run_cmd(
                 f"echo \"total_all_length\\t$(wc -l < {tag}.bed)\" "
-                f">> {tag}.nf",
-                shell=True, check=True
+                f">> {tag}.nf"
             )
 
             tee.write("\nLength distribution summary done!\nCounting start...\n")
@@ -256,11 +245,10 @@ def run(opts):
             mir_gff = os.path.join(prefix, "reference",
                                    f"{genome}_miRNA_miRNA_star.gff")
             mir_raw = {}
-            subprocess.run(
+            run_cmd(
                 f"bedtools intersect -a {mir_gff} -b {tag}.bed "
                 f"-wa -f 1 -r -c | "
-                f"awk '{{print $9\"\\t\"$10}}' > {tag}.miRNA.tmp",
-                shell=True, check=True
+                f"awk '{{print $9\"\\t\"$10}}' > {tag}.miRNA.tmp"
             )
             with open(f"{tag}.miRNA.tmp") as fh:
                 for line in fh:
@@ -279,7 +267,10 @@ def run(opts):
             # Normalization per norm
             for mnorm in norms:
                 if mnorm in normhash:
-                    _make_normalized(normhash[mnorm], mnorm, tag,
+                    rc = normhash[mnorm]
+                    if rc == 0 and 'total' in normhash:
+                        rc = normhash['total']
+                    _make_normalized(rc, mnorm, tag,
                                      bed_files, prefix, genome)
 
             tee.write("Counting Completed!\n")
@@ -401,10 +392,9 @@ def _count(prefix, genome, binsize, tag, tee, fas, mir_raw, mir_gff):
 
     for sbed in bed_files:
         # miRNA counting per length (raw only)
-        subprocess.run(
+        run_cmd(
             f"bedtools intersect -a {mir_gff} -b {sbed} -wa -f 0.95 -c | "
-            f"awk '{{print $9\"\\t\"$10}}' > {sbed}.tmp",
-            shell=True, check=True
+            f"awk '{{print $9\"\\t\"$10}}' > {sbed}.tmp"
         )
         with open(f"{sbed}.tmp") as fh:
             for line in fh:
@@ -434,9 +424,8 @@ def _count(prefix, genome, binsize, tag, tee, fas, mir_raw, mir_gff):
                     count_data['r100'][chr_name][bi][sbed]['r'] = 0
 
         # Gene counting
-        subprocess.run(
-            f"bedtools intersect -a gene.gff -b {sbed} -wa -c > {sbed}.gene.tmp",
-            shell=True, check=True
+        run_cmd(
+            f"bedtools intersect -a gene.gff -b {sbed} -wa -c > {sbed}.gene.tmp"
         )
         with open(f"{sbed}.gene.tmp") as fh:
             for line in fh:
@@ -448,9 +437,8 @@ def _count(prefix, genome, binsize, tag, tee, fas, mir_raw, mir_gff):
 
         # TE counting
         if os.path.exists("te.gff"):
-            subprocess.run(
-                f"bedtools intersect -a te.gff -b {sbed} -wa -c > {sbed}.te.tmp",
-                shell=True, check=True
+            run_cmd(
+                f"bedtools intersect -a te.gff -b {sbed} -wa -c > {sbed}.te.tmp"
             )
             with open(f"{sbed}.te.tmp") as fh:
                 for line in fh:
@@ -462,9 +450,8 @@ def _count(prefix, genome, binsize, tag, tee, fas, mir_raw, mir_gff):
 
         # Promoter counting
         if os.path.exists("promoter.gff"):
-            subprocess.run(
-                f"bedtools intersect -a promoter.gff -b {sbed} -wa -c > {sbed}.promoter.tmp",
-                shell=True, check=True
+            run_cmd(
+                f"bedtools intersect -a promoter.gff -b {sbed} -wa -c > {sbed}.promoter.tmp"
             )
             with open(f"{sbed}.promoter.tmp") as fh:
                 for line in fh:
@@ -486,37 +473,33 @@ def _make_bedgraph(sbed, prefix, genome, nrc, mnorm):
 
     for strand_suffix, strand_flag, sign in [('p', '+', ''), ('n', '-', '-')]:
         bg_file = sbed.replace('.bed', f'{strand_suffix}.bedgraph')
-        subprocess.run(
-            f"bedtools genomecov -split -strand {strand_flag} -bg -i {sbed} -g {fai} > {bg_file}",
-            shell=True, check=True
+        run_cmd(
+            f"bedtools genomecov -split -strand {strand_flag} -bg -i {sbed} -g {fai} > {bg_file}"
         )
 
         bg_norm = bg_file.replace('.bedgraph', f'.{mnorm}.bedgraph')
         bw_norm = bg_file.replace('.bedgraph', f'.{mnorm}.bw')
-        subprocess.run(
+        run_cmd(
             f"bedtools genomecov -split -strand {strand_flag} -scale {sign}{nrc} "
-            f"-bg -i {sbed} -g {fai} > {bg_norm}",
-            shell=True, check=True
+            f"-bg -i {sbed} -g {fai} > {bg_norm}"
         )
         if os.path.getsize(bg_norm) > 0:
-            subprocess.run(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}", shell=True, check=True)
+            run_cmd(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}")
         os.unlink(bg_file)
         os.unlink(bg_norm)
 
     # Combined (non-strand-specific)
     bg_file = sbed.replace('.bed', '.bedgraph')
-    subprocess.run(
-        f"bedtools genomecov -split -bg -i {sbed} -g {fai} > {bg_file}",
-        shell=True, check=True
+    run_cmd(
+        f"bedtools genomecov -split -bg -i {sbed} -g {fai} > {bg_file}"
     )
     bg_norm = bg_file.replace('.bedgraph', f'.{mnorm}.bedgraph')
     bw_norm = bg_file.replace('.bedgraph', f'.{mnorm}.bw')
-    subprocess.run(
-        f"bedtools genomecov -split -scale {nrc} -bg -i {sbed} -g {fai} > {bg_norm}",
-        shell=True, check=True
+    run_cmd(
+        f"bedtools genomecov -split -scale {nrc} -bg -i {sbed} -g {fai} > {bg_norm}"
     )
     if os.path.getsize(bg_norm) > 0:
-        subprocess.run(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}", shell=True, check=True)
+        run_cmd(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}")
     os.unlink(bg_file)
     os.unlink(bg_norm)
 
@@ -626,9 +609,8 @@ def _stat_analysis(mnorm, prefix, genome, foldchange, pvalue, binsize,
     """Run statistical analyses via R scripts."""
     tee.write(f"\nDSR analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
 
-    subprocess.run(
-        f"Rscript --vanilla {prefix}/scripts/DSR.R {mnorm} {pvalue} {foldchange} {par_str}",
-        shell=True, check=True
+    run_cmd(
+        f"Rscript --vanilla {prefix}/scripts/DSR.R {mnorm} {pvalue} {foldchange} {par_str}"
     )
 
     # Generate bigwig from hyper/hypo CSV
@@ -655,7 +637,7 @@ def _stat_analysis(mnorm, prefix, genome, foldchange, pvalue, binsize,
 
         bw_file = hcsv.replace('.csv', '.bw')
         if os.path.getsize(bg_file) > 0:
-            subprocess.run(f"bedGraphToBigWig {bg_file} {fai} {bw_file}", shell=True, check=True)
+            run_cmd(f"bedGraphToBigWig {bg_file} {fai} {bw_file}")
         os.unlink(bg_file)
 
     # Annotate CSV files
@@ -665,27 +647,23 @@ def _stat_analysis(mnorm, prefix, genome, foldchange, pvalue, binsize,
 
     # miRNA DE, gene DE, TE DE, promoter DE
     tee.write(f"\nDE miRNA analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
-    subprocess.run(
-        f"Rscript --vanilla {prefix}/scripts/DEM.R {mnorm} {pvalue} {foldchange} {par_str}",
-        shell=True, check=True
+    run_cmd(
+        f"Rscript --vanilla {prefix}/scripts/DEM.R {mnorm} {pvalue} {foldchange} {par_str}"
     )
 
     tee.write(f"\nDS gene analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
-    subprocess.run(
-        f"Rscript --vanilla {prefix}/scripts/DSG.R {mnorm} {pvalue} {foldchange} {par_str}",
-        shell=True, check=True
+    run_cmd(
+        f"Rscript --vanilla {prefix}/scripts/DSG.R {mnorm} {pvalue} {foldchange} {par_str}"
     )
 
     tee.write(f"\nDS TE analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
-    subprocess.run(
-        f"Rscript --vanilla {prefix}/scripts/DST.R {mnorm} {pvalue} {foldchange} {par_str}",
-        shell=True, check=True
+    run_cmd(
+        f"Rscript --vanilla {prefix}/scripts/DST.R {mnorm} {pvalue} {foldchange} {par_str}"
     )
 
     tee.write(f"\nDS Promoter analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
-    subprocess.run(
-        f"Rscript --vanilla {prefix}/scripts/DSP.R {mnorm} {pvalue} {foldchange} {par_str}",
-        shell=True, check=True
+    run_cmd(
+        f"Rscript --vanilla {prefix}/scripts/DSP.R {mnorm} {pvalue} {foldchange} {par_str}"
     )
 
 

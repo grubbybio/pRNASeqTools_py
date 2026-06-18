@@ -12,7 +12,7 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
-from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee
+from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee, run_cmd
 from prnaseqtools import reference as ref
 
 
@@ -53,20 +53,16 @@ def run(opts):
 
         if adaptor:
             tee.write("\nStart trimming...\n")
-            subprocess.run(
+            run_cmd(
                 f"cutadapt -j {thread} -m 14 -M 42 --discard-untrimmed --trim-n "
-                f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq 2>&1",
-                shell=True, check=True
-            )
+                f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq")
             os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
 
         # Iterative bowtie mapping with increasing mismatches
         ref_idx = os.path.join(prefix, "reference", f"{genome}_chr_all")
-        subprocess.run(
+        run_cmd(
             f"bowtie -v 0 -p {thread} -t --un {tag}.unmapped_0.fastq "
-            f"--al {tag}.mapped.fastq {ref_idx} {tag}.fastq {tag}.out 2>&1",
-            shell=True, check=True
-        )
+            f"--al {tag}.mapped.fastq {ref_idx} {tag}.fastq {tag}.out")
 
         for p in range(1, 9):
             j = p - 1
@@ -89,35 +85,29 @@ def run(opts):
 
             os.unlink(f"{tag}.unmapped_{j}.fastq")
 
-            subprocess.run(
+            run_cmd(
                 f"bowtie -v 0 -p {thread} -t --un {tag}.unmapped_{p}.fastq "
-                f"--al {tag}.mapped_{p}.fastq {ref_idx} tmp.fastq {tag}.out 2>&1",
-                shell=True, check=True
-            )
+                f"--al {tag}.mapped_{p}.fastq {ref_idx} tmp.fastq {tag}.out")
 
         # Concatenate mapped reads
-        subprocess.run(f"cat {tag}.mapped*.fastq > {tag}_edited.fastq", shell=True, check=True)
+        run_cmd(f"cat {tag}.mapped*.fastq > {tag}_edited.fastq")
         for fname in ["tmp.fastq"]:
             if os.path.exists(fname):
                 os.unlink(fname)
 
         # ShortStack alignment
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
-        subprocess.run(
+        run_cmd(
             f"ShortStack --outdir {tag}tmp --align_only --bowtie_m 1000 "
             f"--ranmax 50 --mmap {mmap} --mismatches 0 --bowtie_cores {thread} "
-            f"--nohp --readfile {tag}_edited.fastq --genomefile {fasta_path} 2>&1",
-            shell=True, check=True
-        )
+            f"--nohp --readfile {tag}_edited.fastq --genomefile {fasta_path}")
 
-        subprocess.run(f"samtools view -h {tag}tmp/{tag}_edited.bam > {tag}", shell=True, check=True)
-        subprocess.run(
-            f"awk '{{if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".edited.sam\")}}' {tag}",
-            shell=True, check=True
-        )
-        subprocess.run(f"samtools view -Sb {tag}.edited.sam > {tag}.edited.bam", shell=True, check=True)
+        run_cmd(f"samtools view -h {tag}tmp/{tag}_edited.bam > {tag}")
+        run_cmd(
+            f"awk '{{if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".edited.sam\")}}' {tag}")
+        run_cmd(f"samtools view -Sb {tag}.edited.sam > {tag}.edited.bam")
 
-        subprocess.run(f"rm -rf {tag}tmp", shell=True)
+        run_cmd(f"rm -rf {tag}tmp", shell=True)
         for fname in (f"{tag}_edited.fastq", f"{tag}.fastq", tag, f"{tag}.edited.sam"):
             if os.path.exists(fname):
                 os.unlink(fname)
@@ -128,10 +118,8 @@ def run(opts):
 
         # miRNA intersection
         mir_gff = os.path.join(prefix, "reference", f"{genome}_miRNA_miRNA_star.gff")
-        subprocess.run(
-            f"bedtools intersect -wo -s -a {mir_gff} -b {tag}.edited.bam > {tag}.out",
-            shell=True, check=True
-        )
+        run_cmd(
+            f"bedtools intersect -wo -s -a {mir_gff} -b {tag}.edited.bam > {tag}.out")
 
         mir_data = ref.read_mirna_gff(prefix, genome)
 
@@ -210,10 +198,8 @@ def run(opts):
         _process_mir(prefix, genome, tag, fas)
 
     par_str = ' '.join(map(str, pars))
-    subprocess.run(
-        f"Rscript --vanilla {prefix}/scripts/bubble_plot.R {par_str}",
-        shell=True, check=True
-    )
+    run_cmd(
+        f"Rscript --vanilla {prefix}/scripts/bubble_plot.R {par_str}")
 
 
 def _parse_to_dict(arg_str):
@@ -246,10 +232,8 @@ def _process_mir(prefix, genome, tag, fas):
                 'end': int(cols[4]),
             }
 
-    subprocess.run(
-        f"bedtools intersect -wo -s -a {mir_gff} -b {tag}.edited.bam > {tag}.out2",
-        shell=True, check=True
-    )
+    run_cmd(
+        f"bedtools intersect -wo -s -a {mir_gff} -b {tag}.edited.bam > {tag}.out2")
 
     with open(f"{tag}.out2") as fh:
         for line in fh:

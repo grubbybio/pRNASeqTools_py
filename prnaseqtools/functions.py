@@ -22,6 +22,26 @@ def _tee():
     return sys.stderr
 
 
+def run_cmd(cmd, tee=None, check=True, **kwargs):
+    """Run a shell command, tee-ing stdout+stderr to log file and terminal.
+
+    All subprocess output streams through the TeeHandler so alignment tool
+    logs appear in both the pipeline log file and stderr in real-time.
+    """
+    if tee is None:
+        tee = _tee()
+    proc = subprocess.Popen(
+        cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, **kwargs
+    )
+    for line in proc.stdout:
+        tee.write(line)
+    ret = proc.wait()
+    if check and ret != 0:
+        raise subprocess.CalledProcessError(ret, cmd)
+    return ret
+
+
 # ── SRA download ─────────────────────────────────────────────────────────
 def download_sra(srr, threads=4):
     """
@@ -36,9 +56,8 @@ def download_sra(srr, threads=4):
     tee = _tee()
     tee.write("Downloading...\n")
 
-    subprocess.run(
-        f"fasterq-dump -p --threads {threads} --split-3 {srr_id}",
-        shell=True, check=True
+    run_cmd(
+        f"fasterq-dump -p --threads {threads} --split-3 {srr_id}"
     )
 
     if os.path.exists(f"{srr_id}_1.fastq"):
@@ -95,22 +114,22 @@ def unzip_file(filepath, tag):
 
     if filepath.endswith('.bz2'):
         tee.write("Decompressing...\n")
-        subprocess.run(f"bzip2 -dc {filepath} > {target}", shell=True, check=True)
+        run_cmd(f"bzip2 -dc {filepath} > {target}")
     elif filepath.endswith('.gz'):
         tee.write("Decompressing...\n")
-        subprocess.run(f"gzip -dc {filepath} > {target}", shell=True, check=True)
+        run_cmd(f"gzip -dc {filepath} > {target}")
     elif filepath.endswith('.gtz'):
         tee.write("Decompressing...\n")
-        subprocess.run(f"gtz -dc {filepath} > {target}", shell=True, check=True)
+        run_cmd(f"gtz -dc {filepath} > {target}")
     elif filepath.endswith(('.fastq', '.fq')):
         if filepath != target:
             tee.write("Renaming...\n")
-            subprocess.run(f"cp {filepath} {target}", shell=True, check=True)
+            run_cmd(f"cp {filepath} {target}")
             if filepath.startswith('SRR') or filepath.startswith('ERR') or filepath.startswith('DRR'):
                 os.unlink(filepath)
         else:
             tee.write("Backing up...\n")
-            subprocess.run(f"cp {filepath} {target}.bak", shell=True, check=True)
+            run_cmd(f"cp {filepath} {target}.bak")
     else:
         raise ValueError("Please provide the seq file in correct formats!")
 
@@ -211,7 +230,7 @@ def expand_bed_by_xw(bed_path, bam_path):
     """Expand a BED file by duplicating lines according to XW:i:n tags in BAM.
     Streams SAM → expands each BED line by its own XW value.
     Overwrites the original BED file."""
-    subprocess.run(
+    run_cmd(
         f"samtools view {bam_path} | "
         f"awk '{{xw=1; for(i=12;i<=NF;i++) "
         f"if($i ~ /^XW:i:/) {{xw=substr($i,6)+0; break}}; "
@@ -222,8 +241,7 @@ def expand_bed_by_xw(bed_path, bam_path):
         f"printf \"%s%s\", $j, (j<NF-1?\"\\t\":\"\"); print \"\"}}}}' "
         f"> {bed_path}.tmp && "
         f"mv {bed_path}.tmp {bed_path} && "
-        f"rm {bed_path}.xw",
-        shell=True, check=True
+        f"rm {bed_path}.xw"
     )
 
 

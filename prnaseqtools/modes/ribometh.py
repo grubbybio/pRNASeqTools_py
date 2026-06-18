@@ -12,7 +12,7 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
-from prnaseqtools.functions import download_sra, unzip_file, _tee
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
 from prnaseqtools import reference as ref
 
 
@@ -94,16 +94,14 @@ def run(opts):
 
         # STAR index
         if os.path.exists("Genome"):
-            subprocess.run("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome", shell=True)
         os.makedirs("Genome", exist_ok=True)
 
-        subprocess.run(
+        run_cmd(
             f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
             f"--genomeFastaFiles reference.fa --sjdbGTFfile reference.gff "
             f"--sjdbGTFtagExonParentTranscript Parent --sjdbGTFtagExonParentGene ID "
-            f"--limitGenomeGenerateRAM 64000000000 --genomeSAindexNbases 5",
-            shell=True, check=True
-        )
+            f"--limitGenomeGenerateRAM 64000000000 --genomeSAindexNbases 5")
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -117,20 +115,16 @@ def run(opts):
                     unzip_file(sra_results[0], tag)
                     if adaptor:
                         tee.write("Trimming...\n")
-                        subprocess.run(
+                        run_cmd(
                             f"cutadapt -j {thread} -m 15 --trim-n -a {adaptor} "
-                            f"-o {tag}_trimmed.fastq {tag}.fastq 2>&1",
-                            shell=True, check=True
-                        )
+                            f"-o {tag}_trimmed.fastq {tag}.fastq")
                         os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
-                    subprocess.run(
+                    run_cmd(
                         f"STAR --genomeDir Genome --seedSearchStartLmax 15 "
                         f"--outSAMtype SAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
-                        f"--readFilesIn {tag}.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"--readFilesIn {tag}.fastq")
                     if os.path.exists(f"{tag}.fastq"):
                         os.unlink(f"{tag}.fastq")
                 else:
@@ -138,22 +132,18 @@ def run(opts):
                     unzip_file(sra_results[1], f"{tag}_R2")
                     if adaptor:
                         tee.write("Trimming...\n")
-                        subprocess.run(
+                        run_cmd(
                             f"cutadapt -j {thread} -m 15 --trim-n -a {adaptor} -A {adaptor2} "
                             f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                            f"{tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                            shell=True, check=True
-                        )
+                            f"{tag}_R1.fastq {tag}_R2.fastq")
                         os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                         os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
-                    subprocess.run(
+                    run_cmd(
                         f"STAR --genomeDir Genome --seedSearchStartLmax 15 "
                         f"--outSAMtype SAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
-                        f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
                     for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
                         if os.path.exists(fname):
                             os.unlink(fname)
@@ -162,27 +152,23 @@ def run(opts):
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
                 if adaptor:
-                    subprocess.run(
+                    run_cmd(
                         f"cutadapt -j {thread} -m 15 --trim-n -a {adaptor} -A {adaptor2} "
                         f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                        f"{tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"{tag}_R1.fastq {tag}_R2.fastq")
                     os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                     os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
-                subprocess.run(
+                run_cmd(
                     f"STAR --genomeDir Genome --seedSearchStartLmax 15 "
                     f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                     f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
                     f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
-                    f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                    shell=True, check=True
-                )
+                    f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
                 for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
                     if os.path.exists(fname):
                         os.unlink(fname)
 
-            subprocess.run(f"samtools view -h Aligned.sortedByCoord.out.bam > {tag}.sam", shell=True, check=True)
+            run_cmd(f"samtools view -h Aligned.sortedByCoord.out.bam > {tag}.sam")
             if os.path.exists("Log.final.out"):
                 with open("Log.final.out") as lf:
                     tee.write(lf.read())
@@ -251,18 +237,16 @@ def run(opts):
                     for site in sorted(ends[chr_name].keys()):
                         fh.write(f"{site}\t{ends[chr_name][site]}\n")
 
-            subprocess.run(f"samtools view -Sb {tag}.filtered.sam > {tag}.filtered.bam", shell=True, check=True)
-            subprocess.run(f"samtools index {tag}.filtered.bam", shell=True, check=True)
+            run_cmd(f"samtools view -Sb {tag}.filtered.sam > {tag}.filtered.bam")
+            run_cmd(f"samtools index {tag}.filtered.bam")
 
             for fname in ("Aligned.sortedByCoord.out.bam", f"{tag}.sam", f"{tag}.filtered.sam"):
                 if os.path.exists(fname):
                     os.unlink(fname)
 
             tee.write("\nCalculating RiboMeth Scores...\n")
-            subprocess.run(
-                f"Rscript --vanilla {prefix}/scripts/RNAmodR.R {tag} {coverage}",
-                shell=True, check=True
-            )
+            run_cmd(
+                f"Rscript --vanilla {prefix}/scripts/RNAmodR.R {tag} {coverage}")
 
         # Cleanup
         for fname in ("reference.fa", "reference.gff"):
@@ -272,7 +256,7 @@ def run(opts):
             if os.path.exists(fname):
                 os.unlink(fname)
         if os.path.exists("Genome"):
-            subprocess.run("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome", shell=True)
 
 
 def _parse_to_dict(arg_str):

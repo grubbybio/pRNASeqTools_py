@@ -19,7 +19,7 @@ def run(opts):
     tee = sys.stderr
 
     try:
-        from prnaseqtools.functions import _tee
+        from prnaseqtools.functions import _tee, run_cmd
         tee = _tee()
     except Exception:
         pass
@@ -95,11 +95,9 @@ def run(opts):
         for pre in tags:
             os.symlink(f"../{pre}.txt", f"{pre}.txt")
 
-        subprocess.run(
+        run_cmd(
             f"Rscript --vanilla {prefix}/scripts/tf_mrna.R "
-            f"{deseq2_norm} {pvalue} {foldchange} {par_str}",
-            shell=True, check=True
-        )
+            f"{deseq2_norm} {pvalue} {foldchange} {par_str}")
 
         for fname in globmod.glob("*_?.txt"):
             os.unlink(fname)
@@ -112,11 +110,9 @@ def run(opts):
                     os.symlink(f"../{fname}", fname)
 
         for mnorm in norms:
-            subprocess.run(
+            run_cmd(
                 f"Rscript --vanilla {prefix}/scripts/tf_srna.R "
-                f"{mnorm} {pvalue} {foldchange} {par_str}",
-                shell=True, check=True
-            )
+                f"{mnorm} {pvalue} {foldchange} {par_str}")
 
             # Generate bedgraph from results
             csv_files = [f for f in os.listdir('.') if f.endswith('.csv') and mnorm in f and 'bin' in f]
@@ -156,11 +152,9 @@ def run(opts):
                             fh_out.write(f"{line},Intergenic\n")
                 os.rename(tmp_file, csv_file)
 
-            subprocess.run(
+            run_cmd(
                 f"Rscript --vanilla {prefix}/scripts/tf_mirna.R "
-                f"{mnorm} {pvalue} {foldchange} {par_str}",
-                shell=True, check=True
-            )
+                f"{mnorm} {pvalue} {foldchange} {par_str}")
 
         for fname in globmod.glob("*.count"):
             os.unlink(fname)

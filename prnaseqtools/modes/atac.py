@@ -11,7 +11,7 @@ from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
-from prnaseqtools.functions import download_sra, unzip_file, _tee
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
 
 
 def run(opts):
@@ -73,10 +73,8 @@ def run(opts):
         tee.write("\nBuilding index...\n")
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
         os.symlink(fasta_path, f"{genome}_chr_all.fasta")
-        subprocess.run(
-            f"bowtie2-build -q {genome}_chr_all.fasta {genome}_chr_all",
-            shell=True, check=True
-        )
+        run_cmd(
+            f"bowtie2-build -q {genome}_chr_all.fasta {genome}_chr_all")
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -90,36 +88,28 @@ def run(opts):
                     unzip_file(sra_results[0], tag)
                     if adaptor:
                         tee.write("\nTrimming...\n")
-                        subprocess.run(
+                        run_cmd(
                             f"cutadapt -j {thread} -m 50 --trim-n -a {adaptor} "
-                            f"-o {tag}_trimmed.fastq {tag}.fastq 2>&1",
-                            shell=True, check=True
-                        )
+                            f"-o {tag}_trimmed.fastq {tag}.fastq")
                         os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
-                    subprocess.run(
+                    run_cmd(
                         f"bowtie2 -p {thread} -x {genome}_chr_all -U {tag}.fastq "
-                        f"-S {tag}.sam 2>&1",
-                        shell=True, check=True
-                    )
+                        f"-S {tag}.sam")
                     if os.path.exists(f"{tag}.fastq"):
                         os.unlink(f"{tag}.fastq")
                 else:
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
                     if adaptor:
-                        subprocess.run(
+                        run_cmd(
                             f"cutadapt -j {thread} -m 50 --trim-n -a {adaptor} -A {adaptor} "
                             f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                            f"{tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                            shell=True, check=True
-                        )
+                            f"{tag}_R1.fastq {tag}_R2.fastq")
                         os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                         os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
-                    subprocess.run(
+                    run_cmd(
                         f"bowtie2 -p {thread} -x {genome}_chr_all "
-                        f"-1 {tag}_R1.fastq -2 {tag}_R2.fastq -S {tag}.sam 2>&1",
-                        shell=True, check=True
-                    )
+                        f"-1 {tag}_R1.fastq -2 {tag}_R2.fastq -S {tag}.sam")
                     for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
                         if os.path.exists(fname):
                             os.unlink(fname)
@@ -128,38 +118,30 @@ def run(opts):
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
                 if adaptor:
-                    subprocess.run(
+                    run_cmd(
                         f"cutadapt -j {thread} -m 50 --trim-n -a {adaptor} -A {adaptor} "
                         f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                        f"{tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"{tag}_R1.fastq {tag}_R2.fastq")
                     os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                     os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
-                subprocess.run(
+                run_cmd(
                     f"bowtie2 -p {thread} -x {genome}_chr_all "
-                    f"-1 {tag}_R1.fastq -2 {tag}_R2.fastq -S {tag}.sam 2>&1",
-                    shell=True, check=True
-                )
+                    f"-1 {tag}_R1.fastq -2 {tag}_R2.fastq -S {tag}.sam")
                 for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
                     if os.path.exists(fname):
                         os.unlink(fname)
 
-            subprocess.run(
-                f"samtools view -Sb -q 10 --threads {thread} {tag}.sam > {tag}.bam",
-                shell=True, check=True
-            )
+            run_cmd(
+                f"samtools view -Sb -q 10 --threads {thread} {tag}.sam > {tag}.bam")
             os.unlink(f"{tag}.sam")
-            subprocess.run(f"samtools sort -n -o {tag}.sorted.name.bam {tag}.bam", shell=True, check=True)
-            subprocess.run(f"samtools sort -o {tag}.sorted.bam {tag}.bam", shell=True, check=True)
-            subprocess.run(f"samtools index {tag}.sorted.bam", shell=True, check=True)
+            run_cmd(f"samtools sort -n -o {tag}.sorted.name.bam {tag}.bam")
+            run_cmd(f"samtools sort -o {tag}.sorted.bam {tag}.bam")
+            run_cmd(f"samtools index {tag}.sorted.bam")
             os.unlink(f"{tag}.bam")
-            subprocess.run(
+            run_cmd(
                 f"bamCoverage -b {tag}.sorted.bam -bs 5 -p {thread} "
                 f"--Offset 1 1 --smoothLength 150 --ignoreDuplicates "
-                f"--minMappingQuality 10 --normalizeUsing CPM -o {tag}.bw",
-                shell=True, check=True
-            )
+                f"--minMappingQuality 10 --normalizeUsing CPM -o {tag}.bw")
             tee.write("\nMapping completed!\n")
 
         for fname in globmod.glob(f"{genome}_chr_all*"):
@@ -214,8 +196,8 @@ def _run_macs3(ip_tags, ip2_tags, ip_tag, genome_size, qvalue, pvalue, tee):
     else:
         tee.write(f"  P-value threshold: {pvalue}\n")
         cmd1 += f" -p {pvalue}"
-    cmd1 += " --bdg 2>&1"
-    subprocess.run(cmd1, shell=True, check=True)
+    cmd1 += " --bdg"
+    run_cmd(cmd1)
 
     # Group 2 (if provided)
     if ip2_tags:
@@ -232,8 +214,8 @@ def _run_macs3(ip_tags, ip2_tags, ip_tag, genome_size, qvalue, pvalue, tee):
             cmd2 += f" -q {qvalue}"
         else:
             cmd2 += f" -p {pvalue}"
-        cmd2 += " --bdg 2>&1"
-        subprocess.run(cmd2, shell=True, check=True)
+        cmd2 += " --bdg"
+        run_cmd(cmd2)
 
         # bdgdiff for ATAC (treatment-only, no controls)
         tee.write(f"\nMACS3 bdgdiff — {ip_tag} vs {ip2_tag}\n")
@@ -251,8 +233,8 @@ def _run_macs3(ip_tags, ip2_tags, ip_tag, genome_size, qvalue, pvalue, tee):
         )
         if qvalue < 1:
             diff_cmd += f" -C {qvalue}"
-        diff_cmd += " 2>&1"
-        subprocess.run(diff_cmd, shell=True, check=True)
+        diff_cmd += ""
+        run_cmd(diff_cmd)
 
         tee.write(f"\nDifferential peaks output:\n")
         tee.write(f"  {diff_prefix}_cond1.bed  (enriched in group1)\n")
@@ -281,4 +263,4 @@ def _run_genrich(genrich_ip, genrich_input, ip_tag, qvalue, pvalue, auc, tee):
         tee.write(f"\nFinding peaks...\nAUC\t{auc}\tP Value\t{pvalue}\n")
         command += f" -p {pvalue}"
 
-    subprocess.run(command + " 2>&1", shell=True, check=True)
+    run_cmd(command + "")

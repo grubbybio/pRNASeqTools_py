@@ -12,7 +12,7 @@ from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
-from prnaseqtools.functions import download_sra, unzip_file, _tee
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
 
 
 def run(opts):
@@ -59,35 +59,29 @@ def run(opts):
         if mask:
             mask_path = _resolve_path(mask)
             os.symlink(mask_path, "mask.fa")
-            subprocess.run("bowtie-build -q mask.fa mask", shell=True, check=True)
+            run_cmd("bowtie-build -q mask.fa mask")
 
         tee.write("\nBuilding STAR genome index ...\n")
 
         if os.path.exists("Genome"):
-            subprocess.run("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome", shell=True)
         os.makedirs("Genome", exist_ok=True)
 
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
 
-        subprocess.run(
+        run_cmd(
             f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
             f"--genomeSAindexNbases {genome_size} --genomeFastaFiles {fasta_path} "
             f"--sjdbGTFfile {gff_path} --sjdbGTFtagExonParentTranscript Parent "
-            f"--sjdbGTFtagExonParentGene ID --limitGenomeGenerateRAM 64000000000",
-            shell=True, check=True
-        )
+            f"--sjdbGTFtagExonParentGene ID --limitGenomeGenerateRAM 64000000000")
 
         if total:
-            subprocess.run(
-                f"gffread -T -o {genome}_genes.gtf -g {fasta_path} {gff_path}",
-                shell=True, check=True
-            )
+            run_cmd(
+                f"gffread -T -o {genome}_genes.gtf -g {fasta_path} {gff_path}")
         else:
-            subprocess.run(
-                f"gffread -T -C -o {genome}_genes.gtf -g {fasta_path} {gff_path}",
-                shell=True, check=True
-            )
+            run_cmd(
+                f"gffread -T -C -o {genome}_genes.gtf -g {fasta_path} {gff_path}")
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -102,30 +96,24 @@ def run(opts):
                     seq_strategy = 'single'
                     unzip_file(sra_results[0], tag)
                     if adaptor:
-                        subprocess.run(
+                        run_cmd(
                             f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} "
-                            f"-o {tag}_trimmed.fastq {tag}.fastq 2>&1",
-                            shell=True, check=True
-                        )
+                            f"-o {tag}_trimmed.fastq {tag}.fastq")
                         os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
                     if mask:
-                        subprocess.run(
+                        run_cmd(
                             f"bowtie -v 0 -a --un tmp.fastq -p {thread} -t mask "
-                            f"{tag}.fastq {tag}.mask.out 2>&1",
-                            shell=True, check=True
-                        )
+                            f"{tag}.fastq {tag}.mask.out")
                         os.rename("tmp.fastq", f"{tag}.fastq")
                         if os.path.exists(f"{tag}.mask.out"):
                             os.unlink(f"{tag}.mask.out")
 
-                    subprocess.run(
+                    run_cmd(
                         f"STAR --runMode alignReads --genomeDir Genome --alignIntronMax 5000 "
                         f"--outReadsUnmapped Fastx --outSAMtype BAM SortedByCoordinate "
                         f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
                         f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
-                        f"--runThreadN {thread} --readFilesIn {tag}.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"--runThreadN {thread} --readFilesIn {tag}.fastq")
                     if os.path.exists(f"{tag}.fastq"):
                         os.unlink(f"{tag}.fastq")
                 else:
@@ -134,20 +122,16 @@ def run(opts):
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
                     if adaptor:
-                        subprocess.run(
+                        run_cmd(
                             f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} -A {adaptor} "
                             f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                            f"{tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                            shell=True, check=True
-                        )
+                            f"{tag}_R1.fastq {tag}_R2.fastq")
                         os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                         os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                     if mask:
-                        subprocess.run(
+                        run_cmd(
                             f"bowtie -v 0 -a --un tmp.fastq -p {thread} -t mask "
-                            f"-1 {tag}_R1.fastq -2 {tag}_R2.fastq {tag}.mask.out 2>&1",
-                            shell=True, check=True
-                        )
+                            f"-1 {tag}_R1.fastq -2 {tag}_R2.fastq {tag}.mask.out")
                         if os.path.exists("tmp_1.fastq"):
                             os.rename("tmp_1.fastq", f"{tag}_R1.fastq")
                         if os.path.exists("tmp_2.fastq"):
@@ -155,14 +139,12 @@ def run(opts):
                         if os.path.exists(f"{tag}.mask.out"):
                             os.unlink(f"{tag}.mask.out")
 
-                    subprocess.run(
+                    run_cmd(
                         f"STAR --runMode alignReads --genomeDir Genome --alignIntronMax 5000 "
                         f"--outReadsUnmapped Fastx --outSAMtype BAM SortedByCoordinate "
                         f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
                         f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
-                        f"--runThreadN {thread} --readFilesIn {tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"--runThreadN {thread} --readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
                     for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
                         if os.path.exists(fname):
                             os.unlink(fname)
@@ -173,20 +155,16 @@ def run(opts):
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
                 if adaptor:
-                    subprocess.run(
+                    run_cmd(
                         f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} -A {adaptor} "
                         f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                        f"{tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"{tag}_R1.fastq {tag}_R2.fastq")
                     os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                     os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                 if mask:
-                    subprocess.run(
+                    run_cmd(
                         f"bowtie -v 0 -a --un tmp.fastq -p {thread} -t mask "
-                        f"-1 {tag}_R1.fastq -2 {tag}_R2.fastq {tag}.mask.out 2>&1",
-                        shell=True, check=True
-                    )
+                        f"-1 {tag}_R1.fastq -2 {tag}_R2.fastq {tag}.mask.out")
                     if os.path.exists("tmp_1.fastq"):
                         os.rename("tmp_1.fastq", f"{tag}_R1.fastq")
                     if os.path.exists("tmp_2.fastq"):
@@ -195,14 +173,12 @@ def run(opts):
                         os.unlink(f"{tag}.mask.out")
 
                 tee.write("\nMapping...\n")
-                subprocess.run(
+                run_cmd(
                     f"STAR --runMode alignReads --genomeDir Genome --alignIntronMax 5000 "
                     f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                     f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
                     f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
-                    f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                    shell=True, check=True
-                )
+                    f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
                 for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
                     if os.path.exists(fname):
                         os.unlink(fname)
@@ -227,15 +203,13 @@ def run(opts):
             for mf in globmod.glob("mask*"):
                 os.unlink(mf)
         if os.path.exists("Genome"):
-            subprocess.run("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome", shell=True)
 
         if do_de:
             tee.write(f"\nFinding DEG...\nFold Change\t{foldchange}\tP Value\t{pvalue}\tFDR\t{fdr}\n")
-            subprocess.run(
+            run_cmd(
                 f"Rscript --vanilla {prefix}/scripts/DEG.R {norm} {pvalue} {fdr} "
-                f"{foldchange} {prefix} {genome} {par_str}",
-                shell=True, check=True
-            )
+                f"{foldchange} {prefix} {genome} {par_str}")
 
     else:
         # No mapping: symlink existing files or process BAMs
@@ -249,28 +223,22 @@ def run(opts):
             if total:
                 gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
                 fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
-                subprocess.run(
-                    f"gffread -T -o {genome}_genes.gtf -g {fasta_path} {gff_path}",
-                    shell=True, check=True
-                )
+                run_cmd(
+                    f"gffread -T -o {genome}_genes.gtf -g {fasta_path} {gff_path}")
             else:
                 gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
                 fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
-                subprocess.run(
-                    f"gffread -T -C -o {genome}_genes.gtf -g {fasta_path} {gff_path}",
-                    shell=True, check=True
-                )
+                run_cmd(
+                    f"gffread -T -C -o {genome}_genes.gtf -g {fasta_path} {gff_path}")
             for pre in tags:
                 _count_bam(pre, thread, seq_strategy, prefix, genome)
             if os.path.exists(f"{genome}_genes.gtf"):
                 os.unlink(f"{genome}_genes.gtf")
 
         tee.write(f"\nFinding DEG...\nFold Change\t{foldchange}\tP Value\t{pvalue}\tFDR\t{fdr}\n")
-        subprocess.run(
+        run_cmd(
             f"Rscript --vanilla {prefix}/scripts/DEG.R {norm} {pvalue} {fdr} "
-            f"{foldchange} {prefix} {genome} {par_str}",
-            shell=True, check=True
-        )
+            f"{foldchange} {prefix} {genome} {par_str}")
 
         # Clean up symlinks
         if do_count:
@@ -298,12 +266,10 @@ def _resolve_path(filepath):
 
 def _count_bam(tag, thread, seq_strategy, prefix, genome):
     """Count reads in BAM using featureCounts."""
-    subprocess.run(f"samtools index {tag}.bam", shell=True, check=True)
-    subprocess.run(
+    run_cmd(f"samtools index {tag}.bam")
+    run_cmd(
         f"bamCoverage -b {tag}.bam --skipNAs -bs 5 -p {thread} "
-        f"--minMappingQuality 10 --normalizeUsing CPM -o {tag}.bw",
-        shell=True, check=True
-    )
+        f"--minMappingQuality 10 --normalizeUsing CPM -o {tag}.bw")
 
     tee = _tee()
     tee.write("\nStart counting...\n")
@@ -312,24 +278,18 @@ def _count_bam(tag, thread, seq_strategy, prefix, genome):
     gtf_file = f"{genome}_genes.gtf"
 
     if seq_strategy == 'single':
-        subprocess.run(
+        run_cmd(
             f"featureCounts -T {thread} -O -G {fasta_path} -s 0 "
-            f"-a {gtf_file} -o total.count {tag}.bam 2>&1",
-            shell=True, check=True
-        )
+            f"-a {gtf_file} -o total.count {tag}.bam")
     elif seq_strategy == 'paired':
-        subprocess.run(
+        run_cmd(
             f"featureCounts -T {thread} -p --countReadPairs -BCO -G {fasta_path} "
-            f"-s 0 -a {gtf_file} -o total.count {tag}.bam 2>&1",
-            shell=True, check=True
-        )
+            f"-s 0 -a {gtf_file} -o total.count {tag}.bam")
     else:
         # Default to single
-        subprocess.run(
+        run_cmd(
             f"featureCounts -T {thread} -O -G {fasta_path} -s 0 "
-            f"-a {gtf_file} -o total.count {tag}.bam 2>&1",
-            shell=True, check=True
-        )
+            f"-a {gtf_file} -o total.count {tag}.bam")
 
     count_data = {}
     count_sum = 0

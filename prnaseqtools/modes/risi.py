@@ -13,7 +13,8 @@ from collections import defaultdict
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
 from prnaseqtools.functions import (download_sra, unzip_file, _tee,
-                                     bam_is_condensed, expand_bed_by_xw)
+                                     bam_is_condensed, expand_bed_by_xw,
+                                     run_cmd)
 from prnaseqtools import reference as ref
 
 
@@ -60,7 +61,7 @@ def run(opts):
                 tee.write("  BAM input detected, skipping alignment.\n")
                 bam_src = fpath if os.path.isabs(fpath) else f"../{fpath}"
                 os.symlink(bam_src, f"{tag}.bam")
-                subprocess.run(f"samtools index {tag}.bam", shell=True, check=True)
+                run_cmd(f"samtools index {tag}.bam")
                 tee.write(f"  Using BAM: {bam_src}\n")
             if not bam_input:
                 sra_results = download_sra(fpath, thread)
@@ -68,54 +69,46 @@ def run(opts):
 
                 if adaptor:
                     tee.write(f"\nTrimming {tag}...\n")
-                    subprocess.run(
+                    run_cmd(
                         f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
-                        f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq")
                     os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
 
                 tee.write("\nStart mapping...\n")
                 rDNA_fasta = os.path.join(prefix, "reference", f"{genome}_rDNA_chr_all.fasta")
-                subprocess.run(
+                run_cmd(
                     f"ShortStack --outdir ShortStack_{tag} --align_only --bowtie_m 1000 "
                     f"--ranmax 50 --mmap {mmap} --mismatches 1 --bowtie_cores {thread} "
-                    f"--nohp --readfile {tag}.fastq --genomefile {rDNA_fasta} 2>&1",
-                    shell=True, check=True
-                )
+                    f"--nohp --readfile {tag}.fastq --genomefile {rDNA_fasta}")
 
                 tee.write("\nAlignment Completed!\n")
 
                 condensed = bam_is_condensed(f"ShortStack_{tag}/{tag}.bam")
 
-                subprocess.run(f"samtools view -h ShortStack_{tag}/{tag}.bam > {tag}", shell=True, check=True)
-                subprocess.run(
+                run_cmd(f"samtools view -h ShortStack_{tag}/{tag}.bam > {tag}")
+                run_cmd(
                     f"awk '{{if($0~/^@/) print > (FILENAME\".unmapped.sam\"); "
                     f"if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".sam\"); "
-                    f"if($10!=\"*\" && $3==\"*\") print > (FILENAME\".unmapped.sam\")}}' {tag}",
-                    shell=True, check=True
-                )
-                subprocess.run(f"samtools view -Sb {tag}.unmapped.sam > {tag}.unmapped.bam", shell=True, check=True)
-                subprocess.run(f"samtools view -Sb {tag}.sam > {tag}.bam", shell=True, check=True)
+                    f"if($10!=\"*\" && $3==\"*\") print > (FILENAME\".unmapped.sam\")}}' {tag}")
+                run_cmd(f"samtools view -Sb {tag}.unmapped.sam > {tag}.unmapped.bam")
+                run_cmd(f"samtools view -Sb {tag}.sam > {tag}.bam")
 
                 for fname in (tag, f"{tag}.unmapped.sam", f"{tag}.sam", f"{tag}.fastq"):
                     if os.path.exists(fname):
                         os.unlink(fname)
                 if os.path.exists(f"ShortStack_{tag}"):
-                    subprocess.run(f"rm -rf ShortStack_{tag}", shell=True)
+                    run_cmd(f"rm -rf ShortStack_{tag}", shell=True)
             else:
                 # BAM input: detect condensed format
                 condensed = bam_is_condensed(f"{tag}.bam")
 
             tee.write("\nConverting BAM to BED...\n")
-            subprocess.run(f"bamToBed -bed12 -i {tag}.bam > {tag}.bed", shell=True, check=True)
+            run_cmd(f"bamToBed -bed12 -i {tag}.bam > {tag}.bed")
 
             tee.write("\nGenerating individual files...\n")
-            subprocess.run(
+            run_cmd(
                 f"awk -F \"\\t\" '{{a=substr(FILENAME,1,length(FILENAME)-3);"
-                f"if($11>=18 && $11 <= 26) {{print $0 > (a$11\".bed\")}}}}' {tag}.bed",
-                shell=True, check=True
-            )
+                f"if($11>=18 && $11 <= 26) {{print $0 > (a$11\".bed\")}}}}' {tag}.bed")
 
             # Expand per-length BEDs for condensed ShortStack BAMs
             if condensed:
@@ -128,15 +121,11 @@ def run(opts):
 
             # Length distribution
             # Length distribution: count reads per length from expanded BED
-            subprocess.run(
+            run_cmd(
                 f"awk '{{print $11}}' {tag}.bed | sort -n | uniq -c | "
-                f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt",
-                shell=True, check=True
-            )
-            subprocess.run(
-                f"awk '{{n+=$2}}END{{print \"total\\t\"n}}' {tag}.len_dist.txt >> {tag}.nf",
-                shell=True, check=True
-            )
+                f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt")
+            run_cmd(
+                f"awk '{{n+=$2}}END{{print \"total\\t\"n}}' {tag}.len_dist.txt >> {tag}.nf")
 
             tee.write("\nLength distribution summary done!\nCounting start...\n")
 
@@ -206,10 +195,8 @@ def _count_risi(mnorm, rc, prefix, genome, binsize, tag, tee):
 
         # Feature counting
         rDNA_gff = os.path.join(prefix, "reference", f"{genome}_rDNA.gff")
-        subprocess.run(
-            f"bedtools intersect -a {sbed} -b {rDNA_gff} -wb > {sbed}.tmp",
-            shell=True, check=True
-        )
+        run_cmd(
+            f"bedtools intersect -a {sbed} -b {rDNA_gff} -wb > {sbed}.tmp")
 
         tmp_hash = defaultdict(lambda: {'strand': '', 'feature': set(), 'length': 0})
         with open(f"{sbed}.tmp") as fh:
@@ -235,20 +222,20 @@ def _make_bedgraph(sbed, prefix, genome, nrc, mnorm, fai):
     """Generate rDNA bedgraph."""
     for suffix, strand, sign in [('p', '+', ''), ('n', '-', '-')]:
         bg = sbed.replace('.bed', f'{suffix}.bedgraph')
-        subprocess.run(f"bedtools genomecov -split -strand {strand} -bg -i {sbed} -g {fai} > {bg}", shell=True, check=True)
+        run_cmd(f"bedtools genomecov -split -strand {strand} -bg -i {sbed} -g {fai} > {bg}")
         bg_norm = bg.replace('.bedgraph', f'.{mnorm}.bedgraph')
         bw_norm = bg.replace('.bedgraph', f'.{mnorm}.bw')
-        subprocess.run(f"bedtools genomecov -split -strand {strand} -scale {sign}{nrc} -bg -i {sbed} -g {fai} > {bg_norm}", shell=True, check=True)
-        subprocess.run(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}", shell=True, check=True)
+        run_cmd(f"bedtools genomecov -split -strand {strand} -scale {sign}{nrc} -bg -i {sbed} -g {fai} > {bg_norm}")
+        run_cmd(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}")
         os.unlink(bg)
         os.unlink(bg_norm)
 
     bg = sbed.replace('.bed', '.bedgraph')
-    subprocess.run(f"bedtools genomecov -split -bg -i {sbed} -g {fai} > {bg}", shell=True, check=True)
+    run_cmd(f"bedtools genomecov -split -bg -i {sbed} -g {fai} > {bg}")
     bg_norm = bg.replace('.bedgraph', f'.{mnorm}.bedgraph')
     bw_norm = bg.replace('.bedgraph', f'.{mnorm}.bw')
-    subprocess.run(f"bedtools genomecov -split -scale {nrc} -bg -i {sbed} -g {fai} > {bg_norm}", shell=True, check=True)
-    subprocess.run(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}", shell=True, check=True)
+    run_cmd(f"bedtools genomecov -split -scale {nrc} -bg -i {sbed} -g {fai} > {bg_norm}")
+    run_cmd(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}")
     os.unlink(bg)
     os.unlink(bg_norm)
 
@@ -285,10 +272,8 @@ def _write_risi_counts(count_data, tag, mnorm, rc, bed_files, lengths):
 def _stat_analysis(mnorm, prefix, genome, foldchange, pvalue, binsize, par_str, tee):
     """Run DSR and DSF analyses."""
     tee.write(f"\nDSR analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
-    subprocess.run(
-        f"Rscript --vanilla {prefix}/scripts/DSR.R {mnorm} {pvalue} {foldchange} {par_str}",
-        shell=True, check=True
-    )
+    run_cmd(
+        f"Rscript --vanilla {prefix}/scripts/DSR.R {mnorm} {pvalue} {foldchange} {par_str}")
 
     fai = os.path.join(prefix, "reference", f"{genome}_rDNA_chr_all.fasta.fai")
     csv_files = [f for f in os.listdir('.') if f.endswith('.csv') and mnorm in f and 'bin' in f]
@@ -309,11 +294,9 @@ def _stat_analysis(mnorm, prefix, genome, foldchange, pvalue, binsize, par_str, 
                     end = start + binsize - 1
                     fh_out.write(f"{chr_name}\t{start}\t{end}\t{cols[2] if len(cols) > 2 else '0'}\n")
         bw_file = hcsv.replace('.csv', '.bw')
-        subprocess.run(f"bedGraphToBigWig {bg_file} {fai} {bw_file}", shell=True, check=True)
+        run_cmd(f"bedGraphToBigWig {bg_file} {fai} {bw_file}")
         os.unlink(bg_file)
 
     tee.write(f"\nDS feature analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
-    subprocess.run(
-        f"Rscript --vanilla {prefix}/scripts/DSF.R {mnorm} {pvalue} {foldchange} {par_str}",
-        shell=True, check=True
-    )
+    run_cmd(
+        f"Rscript --vanilla {prefix}/scripts/DSF.R {mnorm} {pvalue} {foldchange} {par_str}")

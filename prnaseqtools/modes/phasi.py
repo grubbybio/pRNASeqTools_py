@@ -13,7 +13,7 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
-from prnaseqtools.functions import download_sra, unzip_file, _tee
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
 from prnaseqtools import reference as ref
 
 
@@ -60,7 +60,7 @@ def run(opts):
                 tee.write("  BAM input detected, skipping alignment.\n")
                 bam_src = fpath if os.path.isabs(fpath) else f"../{fpath}"
                 os.symlink(bam_src, f"{tag}.bam")
-                bam_count = subprocess.run(
+                bam_count = run_cmd(
                     f"samtools view -c {tag}.bam",
                     shell=True, capture_output=True, text=True
                 ).stdout.strip()
@@ -74,34 +74,26 @@ def run(opts):
 
             if adaptor:
                 tee.write(f"\nTrimming {tag}...\n")
-                subprocess.run(
+                run_cmd(
                     f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
-                    f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq 2>&1",
-                    shell=True, check=True
-                )
+                    f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq")
                 os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
 
             # rRNA filtering
             lsu_rRNA = os.path.join(prefix, "reference", "lsu_rrna")
-            subprocess.run(
+            run_cmd(
                 f"bowtie -v 2 -a -p {thread} -t {lsu_rRNA} "
-                f"{tag}.fastq {tag}.rRNA.out 2>&1",
-                shell=True, check=True
-            )
-            subprocess.run(
+                f"{tag}.fastq {tag}.rRNA.out")
+            run_cmd(
                 f"awk -F \"\\t\" 'BEGIN{{x=0}}{{if(/{genome}/){{x++}}}}END{{print \"rRNA\\t\"x}}' "
-                f"{tag}.rRNA.out > {tag}.nf",
-                shell=True, check=True
-            )
+                f"{tag}.rRNA.out > {tag}.nf")
 
             # ShortStack alignment
             fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
-            subprocess.run(
+            run_cmd(
                 f"ShortStack --outdir ShortStack_{tag} --align_only --bowtie_m 1000 "
                 f"--ranmax 50 --mmap {mmap} --mismatches 0 --bowtie_cores {thread} "
-                f"--nohp --readfile {tag}.fastq --genomefile {fasta_path} 2>&1",
-                shell=True, check=True
-            )
+                f"--nohp --readfile {tag}.fastq --genomefile {fasta_path}")
 
             for fname in globmod.glob(f"{tag}*.fastq"):
                 os.unlink(fname)
@@ -111,25 +103,21 @@ def run(opts):
             tee.write("\nAlignment Completed!\n")
 
             # Process SAM/BAM
-            subprocess.run(f"samtools view -h ShortStack_{tag}/{tag}.bam > {tag}", shell=True, check=True)
-            subprocess.run(
+            run_cmd(f"samtools view -h ShortStack_{tag}/{tag}.bam > {tag}")
+            run_cmd(
                 f"awk '{{if($0~/^@/) print > (FILENAME\".unmapped.sam\"); "
                 f"if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".sam\"); "
-                f"if($10!=\"*\" && $3==\"*\") print > (FILENAME\".unmapped.sam\")}}' {tag}",
-                shell=True, check=True
-            )
-            subprocess.run(f"samtools view -Sb {tag}.unmapped.sam > {tag}.unmapped.bam", shell=True, check=True)
-            subprocess.run(f"samtools view -Sb {tag}.sam > {tag}.bam", shell=True, check=True)
-            subprocess.run(
-                f"awk '{{n++}}END{{print \"total\\t\"n}}' {tag}.sam >> {tag}.nf",
-                shell=True, check=True
-            )
+                f"if($10!=\"*\" && $3==\"*\") print > (FILENAME\".unmapped.sam\")}}' {tag}")
+            run_cmd(f"samtools view -Sb {tag}.unmapped.sam > {tag}.unmapped.bam")
+            run_cmd(f"samtools view -Sb {tag}.sam > {tag}.bam")
+            run_cmd(
+                f"awk '{{n++}}END{{print \"total\\t\"n}}' {tag}.sam >> {tag}.nf")
 
             for fname in (tag, f"{tag}.unmapped.sam", f"{tag}.sam"):
                 if os.path.exists(fname):
                     os.unlink(fname)
             if os.path.exists(f"ShortStack_{tag}"):
-                subprocess.run(f"rm -rf ShortStack_{tag}", shell=True)
+                run_cmd(f"rm -rf ShortStack_{tag}", shell=True)
 
         _phasi_analysis(pars, period, norms, prefix, genome, binsize, phasing_score_cutoff, tee)
     else:
@@ -177,8 +165,8 @@ def _phasi_analysis(pars, period, norms, prefix, genome, binsize, phasing_score_
                         normc[parts[0]] += int(parts[1])
             command += f"{sample}_{j}.bam "
 
-        subprocess.run(command, shell=True, check=True)
-        subprocess.run(f"samtools view -h {sample}.bam > {sample}.sam", shell=True, check=True)
+        run_cmd(command)
+        run_cmd(f"samtools view -h {sample}.bam > {sample}.sam")
 
         tee.write("Reading SAM ...\n")
 
@@ -209,10 +197,8 @@ def _phasi_analysis(pars, period, norms, prefix, genome, binsize, phasing_score_
                 if count > 0 and count % 100000 == 0:
                     tee.write(f"Read counts: {count}\r")
 
-        subprocess.run(
-            f"samtools view -Sb {sample}.phasi.sam > {sample}.phasi.bam",
-            shell=True, check=True
-        )
+        run_cmd(
+            f"samtools view -Sb {sample}.phasi.sam > {sample}.phasi.bam")
         for fname in (f"{sample}.phasi.sam", f"{sample}.sam", f"{sample}.bam"):
             if os.path.exists(fname):
                 os.unlink(fname)

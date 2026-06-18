@@ -13,7 +13,7 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
-from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee
+from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee, run_cmd
 from prnaseqtools import reference as ref
 
 
@@ -52,30 +52,26 @@ def run(opts):
         os.rename("transcripts.fa", f"{genome}.fa")
 
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
-        subprocess.run(f"gffread -T {gff_path} -o {genome}.gtf", shell=True, check=True)
+        run_cmd(f"gffread -T {gff_path} -o {genome}.gtf")
 
         # Build transcriptome index
         if os.path.exists("Genome"):
-            subprocess.run("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome", shell=True)
         os.makedirs("Genome", exist_ok=True)
-        subprocess.run(
+        run_cmd(
             f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
-            f"--genomeFastaFiles {genome}.fa --limitGenomeGenerateRAM 64000000000",
-            shell=True, check=True
-        )
+            f"--genomeFastaFiles {genome}.fa --limitGenomeGenerateRAM 64000000000")
 
         # Build genome index
         if os.path.exists("Genome2"):
-            subprocess.run("rm -rf Genome2", shell=True)
+            run_cmd("rm -rf Genome2", shell=True)
         os.makedirs("Genome2", exist_ok=True)
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
-        subprocess.run(
+        run_cmd(
             f"STAR --runThreadN {thread} --genomeDir Genome2 --runMode genomeGenerate "
             f"--genomeFastaFiles {fasta_path} --sjdbGTFfile {gff_path} "
             f"--sjdbGTFtagExonParentTranscript Parent --sjdbGTFtagExonParentGene ID "
-            f"--limitGenomeGenerateRAM 64000000000",
-            shell=True, check=True
-        )
+            f"--limitGenomeGenerateRAM 64000000000")
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -88,56 +84,46 @@ def run(opts):
 
             if adaptor:
                 tee.write("\nTrimming...\n")
-                subprocess.run(
+                run_cmd(
                     f"cutadapt -j {thread} -m 18 --trim-n -a {adaptor} "
-                    f"-o {tag}_trimmed.fastq {tag}.fastq 2>&1",
-                    shell=True, check=True
-                )
+                    f"-o {tag}_trimmed.fastq {tag}.fastq")
                 os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
 
             tee.write("\nStart mapping...\n")
 
             # Map to transcriptome
-            subprocess.run(
+            run_cmd(
                 f"STAR --genomeDir Genome --outSAMtype BAM SortedByCoordinate "
                 f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
                 f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
                 f"--limitOutSJcollapsed 10000000 --limitIObufferSize 280000000 "
-                f"--runThreadN {thread} --readFilesIn {tag}.fastq 2>&1",
-                shell=True, check=True
-            )
+                f"--runThreadN {thread} --readFilesIn {tag}.fastq")
             os.rename("Aligned.sortedByCoord.out.bam", f"{tag}.bam")
             if os.path.exists("Log.final.out"):
                 with open("Log.final.out") as lf:
                     tee.write(lf.read())
 
-            subprocess.run(f"samtools index {tag}.bam", shell=True, check=True)
-            subprocess.run(
+            run_cmd(f"samtools index {tag}.bam")
+            run_cmd(
                 f"bamCoverage -b {tag}.bam --skipNAs -bs 5 -p {thread} "
-                f"--minMappingQuality 10 --ignoreDuplicates --normalizeUsing CPM -o {tag}.bw",
-                shell=True, check=True
-            )
+                f"--minMappingQuality 10 --ignoreDuplicates --normalizeUsing CPM -o {tag}.bw")
 
             # Map to genome
-            subprocess.run(
+            run_cmd(
                 f"STAR --genomeDir Genome2 --outSAMtype BAM SortedByCoordinate "
                 f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
                 f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
                 f"--limitOutSJcollapsed 10000000 --limitIObufferSize 280000000 "
-                f"--runThreadN {thread} --readFilesIn {tag}.fastq 2>&1",
-                shell=True, check=True
-            )
+                f"--runThreadN {thread} --readFilesIn {tag}.fastq")
             os.rename("Aligned.sortedByCoord.out.bam", f"{tag}.genomic.bam")
             if os.path.exists("Log.final.out"):
                 with open("Log.final.out") as lf:
                     tee.write(lf.read())
 
-            subprocess.run(f"samtools index {tag}.genomic.bam", shell=True, check=True)
-            subprocess.run(
+            run_cmd(f"samtools index {tag}.genomic.bam")
+            run_cmd(
                 f"bamCoverage -b {tag}.genomic.bam --skipNAs -bs 5 -p {thread} "
-                f"--minMappingQuality 10 --ignoreDuplicates --normalizeUsing CPM -o {tag}.genomic.bw",
-                shell=True, check=True
-            )
+                f"--minMappingQuality 10 --ignoreDuplicates --normalizeUsing CPM -o {tag}.genomic.bw")
 
             tee.write("\nAlignment Completed!\n")
 
@@ -160,15 +146,11 @@ def run(opts):
             _find_peaks(thread, prefix, genome, sirna, tags)
 
             tee.write("Calculating CRIs...\n")
-            subprocess.run(
-                f"Rscript --vanilla {prefix}/scripts/ribo.R {genome} {par_str}",
-                shell=True, check=True
-            )
+            run_cmd(
+                f"Rscript --vanilla {prefix}/scripts/ribo.R {genome} {par_str}")
             _calculate_cri(tags, targets)
-            subprocess.run(
-                f"Rscript --vanilla {prefix}/scripts/CRI.R {par_str}",
-                shell=True, check=True
-            )
+            run_cmd(
+                f"Rscript --vanilla {prefix}/scripts/CRI.R {par_str}")
 
         # Cleanup
         for fname in globmod.glob("Log.*"):
@@ -178,7 +160,7 @@ def run(opts):
                 os.unlink(fname)
         for d in ("Genome", "Genome2"):
             if os.path.exists(d):
-                subprocess.run(f"rm -rf {d}", shell=True)
+                run_cmd(f"rm -rf {d}", shell=True)
 
     else:
         # No mapping mode
@@ -193,16 +175,12 @@ def run(opts):
 
         tee.write("Calculating CRIs...\n")
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
-        subprocess.run(f"gffread -T {gff_path} -o {genome}.gtf", shell=True, check=True)
-        subprocess.run(
-            f"Rscript --vanilla {prefix}/scripts/ribo.R {genome} {par_str}",
-            shell=True, check=True
-        )
+        run_cmd(f"gffread -T {gff_path} -o {genome}.gtf")
+        run_cmd(
+            f"Rscript --vanilla {prefix}/scripts/ribo.R {genome} {par_str}")
         _calculate_cri(tags, targets)
-        subprocess.run(
-            f"Rscript --vanilla {prefix}/scripts/CRI.R {par_str}",
-            shell=True, check=True
-        )
+        run_cmd(
+            f"Rscript --vanilla {prefix}/scripts/CRI.R {par_str}")
 
         for fname in globmod.glob("*_lib.txt"):
             os.unlink(fname)
@@ -287,7 +265,7 @@ def _find_peaks(thread, prefix, genome, sirna, tags):
             fh.write(f">{mirna_data[miseq]['name']}\n{miseq}\n")
 
     if sirna != 'none':
-        subprocess.run(f"cat {sirna} >> {genome}_miRNA.fa", shell=True, check=True)
+        run_cmd(f"cat {sirna} >> {genome}_miRNA.fa")
 
     # Symlink sPARTA
     sparta_path = os.path.join(prefix, "sPARTA.py")
@@ -301,12 +279,10 @@ def _find_peaks(thread, prefix, genome, sirna, tags):
         tags_lib.append(lib_file)
 
     libs_str = ' '.join(tags_lib)
-    subprocess.run(
+    run_cmd(
         f"python3 sPARTA.py -accel {thread} -featureFile {genome}.fa "
         f"-genomeFeature 0 -miRNAFile {genome}_miRNA.fa -libs {libs_str} "
-        f"-minTagLen 18 -tarPred -tarScore --tag2FASTA --map2DD --validate",
-        shell=True, check=True
-    )
+        f"-minTagLen 18 -tarPred -tarScore --tag2FASTA --map2DD --validate")
 
     # Move output files
     if os.path.exists("output"):
@@ -319,4 +295,4 @@ def _find_peaks(thread, prefix, genome, sirna, tags):
         os.rmdir("output")
 
     os.chdir("..")
-    subprocess.run("rm -rf sparta", shell=True)
+    run_cmd("rm -rf sparta", shell=True)

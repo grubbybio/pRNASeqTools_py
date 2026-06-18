@@ -23,7 +23,7 @@ from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
-from prnaseqtools.functions import download_sra, unzip_file, _tee
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
 
 
 # ── Main entry point ─────────────────────────────────────────────────────
@@ -92,10 +92,8 @@ def run(opts):
     tee.write("=" * 60 + "\n")
 
     contam_index = "Contam"
-    subprocess.run(
-        f"bowtie2-build {contam} {contam_index}",
-        shell=True, check=True
-    )
+    run_cmd(
+        f"bowtie2-build {contam} {contam_index}")
     tee.write("  Contamination index built.\n")
 
     # ==================================================================
@@ -128,101 +126,79 @@ def run(opts):
         if adaptor:
             if is_paired:
                 tee.write(f"  Trimming {tag} (paired-end)...\n")
-                subprocess.run(
+                run_cmd(
                     f"cutadapt -j {thread} -m 18 --trim-n "
                     f"-a {adaptor} -A {adaptor} "
                     f"-o {tag}_trimmed_r1.fastq -p {tag}_trimmed_r2.fastq "
-                    f"{r1_fq} {r2_fq} 2>&1",
-                    shell=True, check=True
-                )
+                    f"{r1_fq} {r2_fq}")
                 os.rename(f"{tag}_trimmed_r1.fastq", r1_fq)
                 os.rename(f"{tag}_trimmed_r2.fastq", r2_fq)
             else:
                 tee.write(f"  Trimming {tag}...\n")
-                subprocess.run(
+                run_cmd(
                     f"cutadapt -j {thread} -m 18 --discard-untrimmed --trim-n "
-                    f"-a {adaptor} -o {tag}_trimmed.fastq {r1_fq} 2>&1",
-                    shell=True, check=True
-                )
+                    f"-a {adaptor} -o {tag}_trimmed.fastq {r1_fq}")
                 os.rename(f"{tag}_trimmed.fastq", r1_fq)
 
         # Bowtie2 decontamination
         tee.write(f"  Removing contamination...\n")
         if is_paired:
-            subprocess.run(
+            run_cmd(
                 f"bowtie2 -L 20 -p {thread} -x {contam_index} "
                 f"-1 {r1_fq} -2 {r2_fq} "
-                f"-S {tag}.mapped_and_unmapped.sam",
-                shell=True, check=True
-            )
+                f"-S {tag}.mapped_and_unmapped.sam")
         else:
-            subprocess.run(
+            run_cmd(
                 f"bowtie2 -L 20 -p {thread} -x {contam_index} "
                 f"-U {r1_fq} "
-                f"-S {tag}.mapped_and_unmapped.sam",
-                shell=True, check=True
-            )
+                f"-S {tag}.mapped_and_unmapped.sam")
 
         # Convert SAM to BAM
-        subprocess.run(
+        run_cmd(
             f"samtools view -bS -o {tag}.mapped_and_unmapped.bam "
-            f"{tag}.mapped_and_unmapped.sam",
-            shell=True, check=True
-        )
+            f"{tag}.mapped_and_unmapped.sam")
 
         # Extract unmapped reads
         if is_paired:
             # -f 12: both ends unmapped; -F 256: discard secondary alignments
             unmapped_flag = "-f 12 -F 256"
-            subprocess.run(
+            run_cmd(
                 f"samtools view -b {unmapped_flag} "
                 f"-o {tag}.bothEndsUnmapped.bam "
-                f"{tag}.mapped_and_unmapped.bam",
-                shell=True, check=True
-            )
+                f"{tag}.mapped_and_unmapped.bam")
             # Split into R1/R2 fastq
-            subprocess.run(
+            run_cmd(
                 f"samtools sort -n -o {tag}.bothEndsUnmapped_sorted.bam "
-                f"{tag}.bothEndsUnmapped.bam",
-                shell=True, check=True
-            )
-            subprocess.run(
+                f"{tag}.bothEndsUnmapped.bam")
+            run_cmd(
                 f"bedtools bamtofastq -i {tag}.bothEndsUnmapped_sorted.bam "
-                f"-fq {tag}.r1.fastq -fq2 {tag}.r2.fastq",
-                shell=True, check=True
-            )
+                f"-fq {tag}.r1.fastq -fq2 {tag}.r2.fastq")
             # Reuse r1_fq/r2_fq pointing to clean files
             os.rename(f"{tag}.r1.fastq", r1_fq)
             os.rename(f"{tag}.r2.fastq", r2_fq)
         else:
             # -f 4: unmapped; -F 256: discard secondary
-            subprocess.run(
+            run_cmd(
                 f"samtools view -b -f 4 -F 256 "
                 f"-o {tag}.unmapped.bam "
-                f"{tag}.mapped_and_unmapped.bam",
-                shell=True, check=True
-            )
-            subprocess.run(
+                f"{tag}.mapped_and_unmapped.bam")
+            run_cmd(
                 f"samtools sort -n -o {tag}.unmapped_sorted.bam "
-                f"{tag}.unmapped.bam",
-                shell=True, check=True
-            )
-            subprocess.run(
+                f"{tag}.unmapped.bam")
+            run_cmd(
                 f"bedtools bamtofastq -i {tag}.unmapped_sorted.bam "
-                f"-fq {tag}.clean.fastq",
-                shell=True, check=True
-            )
+                f"-fq {tag}.clean.fastq")
             os.rename(f"{tag}.clean.fastq", r1_fq)
 
         # Gzip clean fastq
         if is_paired:
-            subprocess.run(f"gzip -f {r1_fq}", shell=True, check=True)
-            subprocess.run(f"gzip -f {r2_fq}", shell=True, check=True)
+            run_cmd(f"gzip -f {r1_fq}")
+            run_cmd(f"gzip -f {r2_fq}")
             # Store as noContam paired files for later use
             os.rename(f"{r1_fq}.gz", f"{tag}.noContam_r1.fastq.gz")
             os.rename(f"{r2_fq}.gz", f"{tag}.noContam_r2.fastq.gz")
         else:
-            subprocess.run(f"gzip -f {r1_fq}", shell=True, check=True)
+            run_cmd(f"gzip -f {r1_fq}")
             os.rename(f"{r1_fq}.gz", f"{tag}.noContam.fastq.gz")
 
         # Cleanup intermediate files
@@ -255,16 +231,14 @@ def run(opts):
     # Build STAR genome index for RNA-seq
     star_rna_index = "STAR_RNA_index"
     if os.path.exists(star_rna_index):
-        subprocess.run(f"rm -rf {star_rna_index}", shell=True)
+        run_cmd(f"rm -rf {star_rna_index}", shell=True)
     os.makedirs(star_rna_index, exist_ok=True)
 
-    subprocess.run(
+    run_cmd(
         f"STAR --runThreadN {thread} --runMode genomeGenerate "
         f"--genomeDir {star_rna_index} --genomeFastaFiles {fasta_path} "
         f"--sjdbGTFfile {gff_path} --sjdbOverhang 99 "
-        f"--limitGenomeGenerateRAM 64000000000",
-        shell=True, check=True
-    )
+        f"--limitGenomeGenerateRAM 64000000000")
 
     # STAR 1st pass for each RNA-seq sample
     star_sj_dir = "STAR_SJ"
@@ -279,18 +253,18 @@ def run(opts):
         if rna_paired:
             unzip_file(sra_r[0], f"{tag}_r1")
             unzip_file(sra_r[1], f"{tag}_r2")
-            subprocess.run(f"gzip -f {tag}_r1.fastq", shell=True, check=True)
-            subprocess.run(f"gzip -f {tag}_r2.fastq", shell=True, check=True)
+            run_cmd(f"gzip -f {tag}_r1.fastq")
+            run_cmd(f"gzip -f {tag}_r2.fastq")
             read_files = f"{tag}_r1.fastq.gz {tag}_r2.fastq.gz"
         else:
             unzip_file(sra_r[0], tag)
-            subprocess.run(f"gzip -f {tag}.fastq", shell=True, check=True)
+            run_cmd(f"gzip -f {tag}.fastq")
             read_files = f"{tag}.fastq.gz"
 
         star_out_1st = f"star_{tag}_1st"
         os.makedirs(star_out_1st, exist_ok=True)
 
-        subprocess.run(
+        run_cmd(
             f"STAR --runThreadN {thread} --genomeDir {star_rna_index} "
             f"--readFilesCommand zcat --readFilesIn {read_files} "
             f"--alignIntronMax 5000 --alignIntronMin 15 "
@@ -300,9 +274,7 @@ def run(opts):
             f"--outSAMtype BAM SortedByCoordinate "
             f"--quantMode TranscriptomeSAM --outSAMmultNmax 1 "
             f"--outMultimapperOrder Random "
-            f"--outFileNamePrefix {star_out_1st}/star_{tag}_ ",
-            shell=True, check=True
-        )
+            f"--outFileNamePrefix {star_out_1st}/star_{tag}_ ")
 
         # Collect splice junctions
         sj_src = f"{star_out_1st}/star_{tag}_SJ.out.tab"
@@ -333,7 +305,7 @@ def run(opts):
         else:
             read_files = f"{tag}.fastq.gz"
 
-        subprocess.run(
+        run_cmd(
             f"STAR --runThreadN {thread} --genomeDir {star_rna_index} "
             f"--sjdbFileChrStartEnd {sj_files} "
             f"--readFilesCommand zcat --readFilesIn {read_files} "
@@ -344,12 +316,10 @@ def run(opts):
             f"--outSAMtype BAM SortedByCoordinate "
             f"--quantMode TranscriptomeSAM --outSAMmultNmax 1 "
             f"--outMultimapperOrder Random "
-            f"--outFileNamePrefix {star_out_2nd}/star_{tag}_ ",
-            shell=True, check=True
-        )
+            f"--outFileNamePrefix {star_out_2nd}/star_{tag}_ ")
 
         bam_file = f"{star_out_2nd}/star_{tag}_Aligned.sortedByCoord.out.bam"
-        subprocess.run(f"samtools index {bam_file}", shell=True, check=True)
+        run_cmd(f"samtools index {bam_file}")
 
         tx_bam = f"{star_out_2nd}/star_{tag}_Aligned.toTranscriptome.out.bam"
         if os.path.exists(tx_bam):
@@ -366,11 +336,9 @@ def run(opts):
         bam_file = f"{star_out_2nd}/star_{tag}_Aligned.sortedByCoord.out.bam"
         gtf_out = os.path.join(assembled_gtf_dir, f"{tag}.gtf")
 
-        subprocess.run(
+        run_cmd(
             f"stringtie --rf -p {thread} -G {gff_path} "
-            f"-o {gtf_out} -l {tag} {bam_file}",
-            shell=True, check=True
-        )
+            f"-o {gtf_out} -l {tag} {bam_file}")
         merge_list_paths.append(gtf_out)
 
     # Merge transcripts
@@ -381,19 +349,15 @@ def run(opts):
             fh.write(p + '\n')
 
     merged_gtf = os.path.join(assembled_gtf_dir, f"{genome}_merged.gtf")
-    subprocess.run(
+    run_cmd(
         f"stringtie --merge -p {thread} -T 0.05 -G {gff_path} "
-        f"-o {merged_gtf} {merge_list_file}",
-        shell=True, check=True
-    )
+        f"-o {merged_gtf} {merge_list_file}")
 
     # gffcompare
     tee.write("  Running gffcompare...\n")
     gffcomp_prefix = os.path.join(assembled_gtf_dir, genome)
-    subprocess.run(
-        f"gffcompare -V -r {gff_path} -o {gffcomp_prefix} {merged_gtf}",
-        shell=True, check=True
-    )
+    run_cmd(
+        f"gffcompare -V -r {gff_path} -o {gffcomp_prefix} {merged_gtf}")
 
     # ==================================================================
     # STEP 4 — R: Filter novel transcripts + add gene_biotype
@@ -413,11 +377,9 @@ def run(opts):
 
     updated_gtf = f"{genome}_updated.gtf"
 
-    subprocess.run(
+    run_cmd(
         f"Rscript --vanilla {prefix}/scripts/ribotaper_filter_gtf.R "
-        f"{annotated_gtf} {gff_path} {updated_gtf}",
-        shell=True, check=True
-    )
+        f"{annotated_gtf} {gff_path} {updated_gtf}")
     tee.write(f"  Updated GTF written to: {updated_gtf}\n")
 
     # ==================================================================
@@ -432,13 +394,11 @@ def run(opts):
     os.makedirs(rsem_index, exist_ok=True)
     star_bin = shutil.which("STAR") or "STAR"
 
-    subprocess.run(
+    run_cmd(
         f"rsem-prepare-reference --gtf {updated_gtf} "
         f"--star --star-path {os.path.dirname(star_bin)} "
         f"--star-sjdboverhang 99 -p {thread} "
-        f"{fasta_path} {rsem_index}/RNA",
-        shell=True, check=True
-    )
+        f"{fasta_path} {rsem_index}/RNA")
 
     # Run RSEM for each RNA-seq sample
     rsem_dir = "RSEM_results"
@@ -457,15 +417,13 @@ def run(opts):
             read_files = f"{tag}.fastq.gz"
 
         # Use RSEM's built-in STAR alignment
-        subprocess.run(
+        run_cmd(
             f"rsem-calculate-expression {paired_flag} "
             f"--star --star-path {os.path.dirname(star_bin)} "
             f"--star-gzipped-read-file "
             f"-p {thread} --time --strandedness reverse "
             f"--no-bam-output "
-            f"{read_files} {rsem_index}/RNA {rsem_dir}/{tag}",
-            shell=True, check=True
-        )
+            f"{read_files} {rsem_index}/RNA {rsem_dir}/{tag}")
 
     # Filter expressed isoforms with R
     tee.write(f"\n  Filtering expressed isoforms (mean TPM > {tpm_threshold})...\n")
@@ -474,11 +432,9 @@ def run(opts):
     rsem_files_arg = ' '.join([
         f"{rsem_dir}/{tag}.isoforms.results" for tag in rna_tags
     ])
-    subprocess.run(
+    run_cmd(
         f"Rscript --vanilla {prefix}/scripts/ribotaper_filter_rsem.R "
-        f"{updated_gtf} {expressed_gtf} {tpm_threshold} {rsem_files_arg}",
-        shell=True, check=True
-    )
+        f"{updated_gtf} {expressed_gtf} {tpm_threshold} {rsem_files_arg}")
     tee.write(f"  Expressed GTF written to: {expressed_gtf}\n")
 
     # ==================================================================
@@ -493,13 +449,11 @@ def run(opts):
     os.makedirs(star_ribo_idx, exist_ok=True)
     ribo_overhang = min(int(ribo_len.split(',')[0]) - 1, 99)
 
-    subprocess.run(
+    run_cmd(
         f"STAR --runThreadN {thread} --runMode genomeGenerate "
         f"--genomeDir {star_ribo_idx} --genomeFastaFiles {fasta_path} "
         f"--sjdbGTFfile {expressed_gtf} --sjdbOverhang {ribo_overhang} "
-        f"--limitGenomeGenerateRAM 64000000000",
-        shell=True, check=True
-    )
+        f"--limitGenomeGenerateRAM 64000000000")
 
     # Map Ribo-seq reads
     ribo_map_dir = "STAR_Ribo_map"
@@ -517,7 +471,7 @@ def run(opts):
                 tee.write(f"  Warning: Ribo-seq fastq not found for {tag}, skipping\n")
                 continue
 
-        subprocess.run(
+        run_cmd(
             f"STAR --runThreadN {thread} --genomeDir {star_ribo_idx} "
             f"--alignEndsType EndToEnd --readFilesCommand zcat "
             f"--readFilesIn {fq_gz} "
@@ -528,21 +482,17 @@ def run(opts):
             f"--outSAMtype BAM SortedByCoordinate "
             f"--quantMode TranscriptomeSAM --outSAMmultNmax 1 "
             f"--outMultimapperOrder Random "
-            f"--outFileNamePrefix {ribo_map_dir}/star_{tag}_ ",
-            shell=True, check=True
-        )
+            f"--outFileNamePrefix {ribo_map_dir}/star_{tag}_ ")
 
     # 6b — Build updated RNA-seq STAR index
     star_rna_new_idx = "STAR_RNA_index_new"
     os.makedirs(star_rna_new_idx, exist_ok=True)
 
-    subprocess.run(
+    run_cmd(
         f"STAR --runThreadN {thread} --runMode genomeGenerate "
         f"--genomeDir {star_rna_new_idx} --genomeFastaFiles {fasta_path} "
         f"--sjdbGTFfile {expressed_gtf} --sjdbOverhang 99 "
-        f"--limitGenomeGenerateRAM 64000000000",
-        shell=True, check=True
-    )
+        f"--limitGenomeGenerateRAM 64000000000")
 
     # Map RNA-seq with new annotation
     star_rna_new_map = "STAR_RNA_map_new"
@@ -557,7 +507,7 @@ def run(opts):
         else:
             read_files = f"{tag}.fastq.gz"
 
-        subprocess.run(
+        run_cmd(
             f"STAR --runThreadN {thread} --genomeDir {star_rna_new_idx} "
             f"--readFilesCommand zcat --readFilesIn {read_files} "
             f"--alignIntronMax 5000 --alignIntronMin 15 "
@@ -567,9 +517,7 @@ def run(opts):
             f"--outSAMtype BAM SortedByCoordinate "
             f"--quantMode TranscriptomeSAM --outSAMmultNmax 1 "
             f"--outMultimapperOrder Random "
-            f"--outFileNamePrefix {star_rna_new_map}/star_{tag}_ ",
-            shell=True, check=True
-        )
+            f"--outFileNamePrefix {star_rna_new_map}/star_{tag}_ ")
 
     # ==================================================================
     # STEP 7 — RIBO Taper annotation
@@ -590,14 +538,12 @@ def run(opts):
     # Ensure genome fasta is indexed (fai)
     fai_file = f"{fasta_path}.fai"
     if not os.path.exists(fai_file):
-        subprocess.run(f"samtools faidx {fasta_path}", shell=True, check=True)
+        run_cmd(f"samtools faidx {fasta_path}")
 
-    subprocess.run(
+    run_cmd(
         f"bash {create_anno_script} {expressed_gtf} {fasta_path} "
         f"false false {ribo_anno_dir} {bedtools_bin} "
-        f"{ribotaper_path}/scripts/",
-        shell=True, check=True
-    )
+        f"{ribotaper_path}/scripts/")
     tee.write("  RIBO Taper annotation created.\n")
 
     # ==================================================================
@@ -617,16 +563,12 @@ def run(opts):
     rna_bams_arg = ' '.join(rna_bam_list)
 
     rna_merged = "RNA_merged.bam"
-    subprocess.run(
-        f"samtools merge -f {rna_merged} {rna_bams_arg}",
-        shell=True, check=True
-    )
-    subprocess.run(
-        f"samtools sort -o RNA_merged_sorted.bam {rna_merged}",
-        shell=True, check=True
-    )
+    run_cmd(
+        f"samtools merge -f {rna_merged} {rna_bams_arg}")
+    run_cmd(
+        f"samtools sort -o RNA_merged_sorted.bam {rna_merged}")
     os.rename("RNA_merged_sorted.bam", rna_merged)
-    subprocess.run(f"samtools index {rna_merged}", shell=True, check=True)
+    run_cmd(f"samtools index {rna_merged}")
 
     # Merge Ribo-seq BAMs
     tee.write("  Merging Ribo-seq BAMs...\n")
@@ -638,16 +580,12 @@ def run(opts):
     ribo_bams_arg = ' '.join(ribo_bam_list)
 
     ribo_merged = "Ribo_merged.bam"
-    subprocess.run(
-        f"samtools merge -f {ribo_merged} {ribo_bams_arg}",
-        shell=True, check=True
-    )
-    subprocess.run(
-        f"samtools sort -o Ribo_merged_sorted.bam {ribo_merged}",
-        shell=True, check=True
-    )
+    run_cmd(
+        f"samtools merge -f {ribo_merged} {ribo_bams_arg}")
+    run_cmd(
+        f"samtools sort -o Ribo_merged_sorted.bam {ribo_merged}")
     os.rename("Ribo_merged_sorted.bam", ribo_merged)
-    subprocess.run(f"samtools index {ribo_merged}", shell=True, check=True)
+    run_cmd(f"samtools index {ribo_merged}")
 
     # Run RIBO Taper
     tee.write("\n  Running RIBO Taper ORF detection...\n")
@@ -655,12 +593,10 @@ def run(opts):
     if not os.path.exists(ribotaper_script):
         sys.exit(f"RIBO Taper script not found: {ribotaper_script}")
 
-    subprocess.run(
+    run_cmd(
         f"bash {ribotaper_script} {ribo_merged} {rna_merged} "
         f"{ribo_anno_dir} {ribo_len} {cutoffs} "
-        f"{ribotaper_path}/scripts/ {bedtools_bin} {thread}",
-        shell=True, check=True
-    )
+        f"{ribotaper_path}/scripts/ {bedtools_bin} {thread}")
 
     tee.write("\n  RIBO Taper analysis complete.\n")
 

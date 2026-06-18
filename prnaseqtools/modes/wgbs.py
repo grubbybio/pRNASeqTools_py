@@ -12,7 +12,7 @@ from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
-from prnaseqtools.functions import download_sra, unzip_file, _tee
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
 
 
 def run(opts):
@@ -48,7 +48,7 @@ def run(opts):
         tee.write("\nBuilding indices...\n")
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
         os.symlink(fasta_path, f"{genome}.fasta")
-        subprocess.run("bismark_genome_preparation . 2>&1", shell=True, check=True)
+        run_cmd("bismark_genome_preparation .")
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -62,27 +62,19 @@ def run(opts):
                     unzip_file(sra_results[0], tag)
                     if adaptor:
                         tee.write("\nStart trimming...\r")
-                        subprocess.run(
+                        run_cmd(
                             f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} "
-                            f"-o {tag}_trimmed.fastq {tag}.fastq 2>&1",
-                            shell=True, check=True
-                        )
+                            f"-o {tag}_trimmed.fastq {tag}.fastq")
                         os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
 
-                    subprocess.run(
-                        f"bismark -p {thread} -N 1 . {tag}.fastq 2>&1",
-                        shell=True, check=True
-                    )
-                    subprocess.run(
-                        f"deduplicate_bismark -s --bam {tag}_bismark_bt2.bam 2>&1",
-                        shell=True, check=True
-                    )
+                    run_cmd(
+                        f"bismark -p {thread} -N 1 . {tag}.fastq")
+                    run_cmd(
+                        f"deduplicate_bismark -s --bam {tag}_bismark_bt2.bam")
                     os.rename(f"{tag}_bismark_bt2.deduplicated.bam", f"{tag}.bam")
-                    subprocess.run(
+                    run_cmd(
                         f"bismark_methylation_extractor --parallel {thread} -s --bedGraph "
-                        f"--cutoff 4 --cytosine_report --CX --genome_folder . {tag}.bam 2>&1",
-                        shell=True, check=True
-                    )
+                        f"--cutoff 4 --cytosine_report --CX --genome_folder . {tag}.bam")
                     for fname in (f"{tag}.fastq", f"{tag}_bismark_bt2.bam"):
                         if os.path.exists(fname):
                             os.unlink(fname)
@@ -90,29 +82,21 @@ def run(opts):
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
                     if adaptor:
-                        subprocess.run(
+                        run_cmd(
                             f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} -A {adaptor} "
                             f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                            f"{tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                            shell=True, check=True
-                        )
+                            f"{tag}_R1.fastq {tag}_R2.fastq")
                         os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                         os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
 
-                    subprocess.run(
-                        f"bismark -p {thread} -N 1 . -1 {tag}_R1.fastq -2 {tag}_R2.fastq 2>&1",
-                        shell=True, check=True
-                    )
-                    subprocess.run(
-                        f"deduplicate_bismark -p --bam {tag}_R1_bismark_bt2_pe.bam 2>&1",
-                        shell=True, check=True
-                    )
+                    run_cmd(
+                        f"bismark -p {thread} -N 1 . -1 {tag}_R1.fastq -2 {tag}_R2.fastq")
+                    run_cmd(
+                        f"deduplicate_bismark -p --bam {tag}_R1_bismark_bt2_pe.bam")
                     os.rename(f"{tag}_R1_bismark_bt2_pe.deduplicated.bam", f"{tag}.bam")
-                    subprocess.run(
+                    run_cmd(
                         f"bismark_methylation_extractor --parallel {thread} -p --bedGraph "
-                        f"--cutoff 4 --cytosine_report --CX --genome_folder . {tag}.bam 2>&1",
-                        shell=True, check=True
-                    )
+                        f"--cutoff 4 --cytosine_report --CX --genome_folder . {tag}.bam")
                     for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq", f"{tag}_R1_bismark_bt2_pe.bam"):
                         if os.path.exists(fname):
                             os.unlink(fname)
@@ -121,48 +105,36 @@ def run(opts):
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
                 if adaptor:
-                    subprocess.run(
+                    run_cmd(
                         f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} -A {adaptor} "
                         f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                        f"{tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"{tag}_R1.fastq {tag}_R2.fastq")
                     os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                     os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
 
-                subprocess.run(
-                    f"bismark -p {thread} -N 1 . -1 {tag}_R1.fastq -2 {tag}_R2.fastq 2>&1",
-                    shell=True, check=True
-                )
-                subprocess.run(
-                    f"deduplicate_bismark -p --bam {tag}_R1_bismark_bt2_pe.bam 2>&1",
-                    shell=True, check=True
-                )
+                run_cmd(
+                    f"bismark -p {thread} -N 1 . -1 {tag}_R1.fastq -2 {tag}_R2.fastq")
+                run_cmd(
+                    f"deduplicate_bismark -p --bam {tag}_R1_bismark_bt2_pe.bam")
                 os.rename(f"{tag}_R1_bismark_bt2_pe.deduplicated.bam", f"{tag}.bam")
-                subprocess.run(
+                run_cmd(
                     f"bismark_methylation_extractor --parallel {thread} -p --bedGraph "
-                    f"--cutoff 4 --cytosine_report --CX --genome_folder . {tag}.bam 2>&1",
-                    shell=True, check=True
-                )
+                    f"--cutoff 4 --cytosine_report --CX --genome_folder . {tag}.bam")
                 for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq", f"{tag}_R1_bismark_bt2_pe.bam"):
                     if os.path.exists(fname):
                         os.unlink(fname)
 
                 # Generate bedgraph
-                subprocess.run(
+                run_cmd(
                     f"awk '{{OFS=\"\\t\";if($4+$5>0){{"
                     f"if($6==\"CG\"){{print $1,$2,$2+1,$4/($4+$5) > \"{tag}.CG.bedgraph\"}}; "
                     f"if($6==\"CHG\"){{print $1,$2,$2+1,$4/($4+$5) > \"{tag}.CHG.bedgraph\"}}; "
                     f"if($6==\"CHH\"){{print $1,$2,$2+1,$4/($4+$5) > \"{tag}.CHH.bedgraph\"}}}}}}' "
-                    f"{tag}.CX_report.txt",
-                    shell=True, check=True
-                )
-                subprocess.run(
-                    f"sort -k1,1 -k2,2n {tag}.CX_report.txt > tmp",
-                    shell=True, check=True
-                )
-                subprocess.run(f"bgzip -c tmp > {tag}.CX_report.txt.gz", shell=True, check=True)
-                subprocess.run(f"tabix -C -p vcf {tag}.CX_report.txt.gz", shell=True, check=True)
+                    f"{tag}.CX_report.txt")
+                run_cmd(
+                    f"sort -k1,1 -k2,2n {tag}.CX_report.txt > tmp")
+                run_cmd(f"bgzip -c tmp > {tag}.CX_report.txt.gz")
+                run_cmd(f"tabix -C -p vcf {tag}.CX_report.txt.gz")
 
             tee.write("\nAlignment finished...\n")
             _bin_methylation(tag, binsize, min_c, tee)
@@ -174,12 +146,10 @@ def run(opts):
 
         if not mappingonly and len(pars) > 1:
             tee.write("\nPerforming DMRcaller...\n")
-            subprocess.run(
-                f"Rscript --vanilla {prefix}/scripts/DMRcaller.R {thread} {par_str}",
-                shell=True, check=True
-            )
+            run_cmd(
+                f"Rscript --vanilla {prefix}/scripts/DMRcaller.R {thread} {par_str}")
 
-        subprocess.run("rm -rf Bisulfite_Genome", shell=True)
+        run_cmd("rm -rf Bisulfite_Genome", shell=True)
         for fname in ([f"{genome}.fasta"] + globmod.glob("*.ebwt")):
             if os.path.exists(fname):
                 os.unlink(fname)
@@ -189,10 +159,8 @@ def run(opts):
             os.symlink(f"../{pre}.CX_report.txt.gz", f"{pre}.CX_report.txt.gz")
 
         tee.write("\nPerforming DMRcaller...\n")
-        subprocess.run(
-            f"Rscript --vanilla {prefix}/scripts/DMRcaller.R {thread} {par_str}",
-            shell=True, check=True
-        )
+        run_cmd(
+            f"Rscript --vanilla {prefix}/scripts/DMRcaller.R {thread} {par_str}")
         for fname in globmod.glob("*.CX_report.txt.gz"):
             os.unlink(fname)
 

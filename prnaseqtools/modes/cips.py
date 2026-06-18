@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
-from prnaseqtools.functions import _tee
+from prnaseqtools.functions import _tee, run_cmd
 
 
 def run(opts):
@@ -76,7 +76,7 @@ def run(opts):
     fai_file = f"{fasta_path}.fai"
     if not os.path.exists(fai_file):
         tee.write("Indexing FASTA...\n")
-        subprocess.run(f"samtools faidx {fasta_path}", shell=True, check=True)
+        run_cmd(f"samtools faidx {fasta_path}")
 
     # ── Build Rscript command ─────────────────────────────────────────
     r_script = os.path.join(prefix, "scripts", "cips_uORF.R")
@@ -105,7 +105,7 @@ def run(opts):
 
     # ── Run R script ──────────────────────────────────────────────────
     tee.write("Running CiPS uORF analysis (R)...\n")
-    subprocess.run(cmd, shell=True, check=True)
+    run_cmd(cmd)
 
     tee.write("\nCiPS analysis complete.\n")
     tee.write(f"Output files:\n")

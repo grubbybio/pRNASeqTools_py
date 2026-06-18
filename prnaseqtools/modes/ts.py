@@ -12,7 +12,7 @@ from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input
-from prnaseqtools.functions import download_sra, unzip_file, rmvc, _tee
+from prnaseqtools.functions import download_sra, unzip_file, rmvc, _tee, run_cmd
 from prnaseqtools.modes.clip import _differential_analysis
 
 
@@ -49,18 +49,16 @@ def run(opts):
 
         tee.write("\nBuilding STAR genome index ...\n")
         if os.path.exists("Genome"):
-            subprocess.run("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome", shell=True)
         os.makedirs("Genome", exist_ok=True)
 
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
 
-        subprocess.run(
+        run_cmd(
             f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
             f"--genomeFastaFiles {fasta_path} --sjdbGTFfile {gff_path} "
-            f"--sjdbGTFtagExonParentTranscript Parent --sjdbGTFtagExonParentGene ID",
-            shell=True, check=True
-        )
+            f"--sjdbGTFtagExonParentTranscript Parent --sjdbGTFtagExonParentGene ID")
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -72,21 +70,17 @@ def run(opts):
                 sra_results = download_sra(fpath, thread)
                 if len(sra_results) == 1:
                     unzip_file(sra_results[0], tag)
-                    subprocess.run(
+                    run_cmd(
                         f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} "
-                        f"-o {tag}_trimmed.fastq {tag}.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"-o {tag}_trimmed.fastq {tag}.fastq")
                     rmvc(tag)
 
-                    subprocess.run(
+                    run_cmd(
                         f"STAR --genomeDir Genome --alignIntronMax 5000 "
                         f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
-                        f"--readFilesIn {tag}.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"--readFilesIn {tag}.fastq")
                     if os.path.exists("Unmapped.out.mate1"):
                         os.rename("Unmapped.out.mate1", f"{tag}.unmapped.fastq")
                     for fname in (f"{tag}.fastq", f"{tag}_trimmed.fastq"):
@@ -95,22 +89,18 @@ def run(opts):
                 else:
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
-                    subprocess.run(
+                    run_cmd(
                         f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} -A AAAAAAGAAAAAA "
                         f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                        f"{tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"{tag}_R1.fastq {tag}_R2.fastq")
                     rmvc(f"{tag}_R1", f"{tag}_R2")
 
-                    subprocess.run(
+                    run_cmd(
                         f"STAR --genomeDir Genome --alignIntronMax 5000 "
                         f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
-                        f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                        shell=True, check=True
-                    )
+                        f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
                     if os.path.exists("Unmapped.out.mate1"):
                         os.rename("Unmapped.out.mate1", f"{tag}.unmapped_R1.fastq")
                     if os.path.exists("Unmapped.out.mate2"):
@@ -123,22 +113,18 @@ def run(opts):
                 f1, f2 = fpath.split(',')
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
-                subprocess.run(
+                run_cmd(
                     f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} -A AAAAAAGAAAAAA "
                     f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                    f"{tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                    shell=True, check=True
-                )
+                    f"{tag}_R1.fastq {tag}_R2.fastq")
                 rmvc(f"{tag}_R1", f"{tag}_R2")
 
-                subprocess.run(
+                run_cmd(
                     f"STAR --genomeDir Genome --alignIntronMax 5000 "
                     f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                     f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
                     f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
-                    f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq 2>&1",
-                    shell=True, check=True
-                )
+                    f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
                 if os.path.exists("Unmapped.out.mate1"):
                     os.rename("Unmapped.out.mate1", f"{tag}.unmapped_R1.fastq")
                 if os.path.exists("Unmapped.out.mate2"):
@@ -153,26 +139,22 @@ def run(opts):
                 with open("Log.final.out") as lf:
                     tee.write(lf.read())
 
-            subprocess.run(f"samtools index {tag}.bam", shell=True, check=True)
-            subprocess.run(
+            run_cmd(f"samtools index {tag}.bam")
+            run_cmd(
                 f"bamCoverage -b {tag}.bam --skipNAs -bs 5 -p {thread} "
-                f"--minMappingQuality 10 --ignoreDuplicates --normalizeUsing CPM -o {tag}.bw",
-                shell=True, check=True
-            )
+                f"--minMappingQuality 10 --ignoreDuplicates --normalizeUsing CPM -o {tag}.bw")
 
             tee.write("\nFinding peaks...\n")
-            subprocess.run(
+            run_cmd(
                 f"clipper -b {tag}.bam -s {genome} --FDR=0.01 --minreads=2 "
                 f"--processors={thread} --threshold-method=binomial --min_width=20 "
-                f"-o {tag}.fitted_clusters.bed -v 2>&1",
-                shell=True, check=True
-            )
+                f"-o {tag}.fitted_clusters.bed -v")
 
         for fname in ("Log.out", "Log.progress.out", "Log.final.out", "SJ.out.tab"):
             if os.path.exists(fname):
                 os.unlink(fname)
         if os.path.exists("Genome"):
-            subprocess.run("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome", shell=True)
 
         if not mappingonly and len(pars) > 1:
             _ts_ana(pars, prefix, pvalue, foldchange, tee)
@@ -213,11 +195,9 @@ def _ts_ana(pars, prefix, pvalue, foldchange, tee):
             all_tags.append(tag)
             command += f"{tag}.fitted_clusters.bed "
 
-    subprocess.run(
+    run_cmd(
         f"cat {command} | sort -k1,1 -k2,2n | bedtools merge "
-        f"-c 4 -o collapse -s -i - > tmp.bed",
-        shell=True, check=True
-    )
+        f"-c 4 -o collapse -s -i - > tmp.bed")
 
     with open("tmp.bed") as fh_peak, open("ref.bed", 'w') as fh_ref:
         for line in fh_peak:
@@ -240,18 +220,14 @@ def _ts_ana(pars, prefix, pvalue, foldchange, tee):
 
     tee.write("\nCounting reads in each sample...\n")
     for tag in all_tags:
-        subprocess.run(
+        run_cmd(
             f"bedtools intersect -c -s -a ref.bed -b {tag}.bam | "
-            f"awk '{{print $1\"_\"$2\"_\"$3\"_\"$6\"_\"$4\"\\t\"$7}}' > {tag}.txt",
-            shell=True, check=True
-        )
+            f"awk '{{print $1\"_\"$2\"_\"$3\"_\"$6\"_\"$4\"\\t\"$7}}' > {tag}.txt")
 
     tee.write("\nFinding differential peaks...\n")
-    subprocess.run(
+    run_cmd(
         f"Rscript --vanilla {prefix}/scripts/CLIP.R {pvalue} {foldchange} "
-        + ' '.join(p_list),
-        shell=True, check=True
-    )
+        + ' '.join(p_list))
 
     for fname in ("tmp.bed", "ref.bed"):
         if os.path.exists(fname):
