@@ -27,6 +27,8 @@ def run_cmd(cmd, tee=None, check=True, **kwargs):
 
     All subprocess output streams through the TeeHandler so alignment tool
     logs appear in both the pipeline log file and stderr in real-time.
+    On failure the captured output is included in the exception so R / tool
+    error messages are visible in the pipeline log.
     """
     if tee is None:
         tee = _tee()
@@ -34,11 +36,21 @@ def run_cmd(cmd, tee=None, check=True, **kwargs):
         cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, **kwargs
     )
+    out_lines = []
     for line in proc.stdout:
         tee.write(line)
+        out_lines.append(line)
+    # Drain any trailing output buffered without a newline
+    remainder = proc.stdout.read()
+    if remainder:
+        tee.write(remainder)
+        out_lines.append(remainder)
     ret = proc.wait()
     if check and ret != 0:
-        raise subprocess.CalledProcessError(ret, cmd)
+        tail = "".join(out_lines[-40:]) if out_lines else "(no output)"
+        raise subprocess.CalledProcessError(
+            ret, cmd, output=tail, stderr=None
+        )
     return ret
 
 

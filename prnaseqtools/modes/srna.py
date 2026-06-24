@@ -19,6 +19,16 @@ from prnaseqtools.functions import (download_sra, unzip_file, revcomp, _tee,
 from prnaseqtools import reference as ref
 
 
+# ── Adaptor alias table (all ≥ 13 nt for cutadapt specificity) ──────────
+ADAPTOR_ALIASES = {
+    'truseq':    'TGGAATTCTCGGG',   # TruSeq sRNA 3'
+    'illumina':  'TGGAATTCTCGGG',
+    'srna':      'TGGAATTCTCGGG',
+    'neb':       'AGATCGGAAGAGC',   # NEB small RNA
+    'nextera':   'CTGTCTCTTATAC',   # Nextera
+}
+
+
 def run(opts):
     """Main entry point for sRNA-seq analysis."""
     opts = validate_options(opts)
@@ -27,6 +37,8 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
+    if adaptor and adaptor.lower() in ADAPTOR_ALIASES:
+        adaptor = ADAPTOR_ALIASES[adaptor.lower()]
     prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
     mmap = opts.get('mmap', 'u')
     control = opts.get('control')

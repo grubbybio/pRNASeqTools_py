@@ -203,7 +203,7 @@ def run(opts):
             for mf in globmod.glob("mask*"):
                 os.unlink(mf)
         if os.path.exists("Genome"):
-            run_cmd("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome")
 
         if do_de:
             tee.write(f"\nFinding DEG...\nFold Change\t{foldchange}\tP Value\t{pvalue}\tFDR\t{fdr}\n")
