@@ -1,6 +1,7 @@
 """
 ChIP-seq analysis mode.
-bowtie2 alignment → Genrich / MACS3 peak calling (+ MACS3 bdgdiff).
+bowtie2 alignment → Genrich / MACS3 peak calling → Peak QC (FRiP, avg length, etc.)
+Group comparison (bdgdiff) is implemented in the tf module.
 """
 
 import os
@@ -61,28 +62,6 @@ def run(opts):
     genrich_ip = "-t " + ','.join(f"{t}.sorted.name.bam" for t in i_tags)
     ip_tag = i_tags[0] if i_tags else 'ip'
     ip_tags = list(i_tags)
-
-    # Parse group2 for MACS3 bdgdiff
-    control2_tags = []
-    ip2_tags = []
-    if peak_caller == 'macs3':
-        control2_opt = opts.get('control2')
-        if control2_opt:
-            c2_dict = _parse_to_dict(control2_opt)
-            c2_tags, c2_files, _ = parse_input(c2_dict)
-            control2_tags.extend(c2_tags)
-            tags.extend(c2_tags)
-            files.extend(c2_files)
-        treatment2_opt = opts.get('treatment2')
-        if treatment2_opt:
-            t2_dict = _parse_to_dict(treatment2_opt)
-            t2_tags, t2_files, _ = parse_input(t2_dict)
-            ip2_tags.extend(t2_tags)
-            tags.extend(t2_tags)
-            files.extend(t2_files)
-        if ip2_tags and not control2_tags:
-            tee.write("Warning: --treatment2 provided without --control2; "
-                       "bdgdiff will run without Input2 controls.\n")
 
     if not nomapping:
         tee.write("\nBuilding index...\n")
@@ -168,7 +147,7 @@ def run(opts):
 
         if not mappingonly:
             if peak_caller == 'macs3':
-                _run_macs3(ip_tags, control_tags, ip2_tags, control2_tags,
+                _run_macs3(ip_tags, control_tags,
                            ip_tag, seq_strategy, genome_size,
                            qvalue, pvalue, tee)
             else:
@@ -197,87 +176,137 @@ def _parse_to_dict(arg_str):
     return {}
 
 
-def _run_macs3(ip_tags, control_tags, ip2_tags, control2_tags,
+def _peak_qc(ip_tag, narrow_file, ip_bam_list, tee, caller='MACS3'):
+    """Run peak QC: count, length, FRiP, and save report."""
+    if not os.path.exists(narrow_file):
+        tee.write(f"\nWarning: {narrow_file} not found, skipping QC.\n")
+        return
+
+    tee.write(f"\n{'='*60}\n")
+    tee.write(f"Peak Quality Control — {ip_tag} ({caller})\n")
+    tee.write(f"{'='*60}\n")
+
+    # Parse peaks
+    peak_count = 0
+    total_length = 0
+    try:
+        with open(narrow_file) as f:
+            for line in f:
+                cols = line.strip().split('\t')
+                if len(cols) >= 3:
+                    start, end = int(cols[1]), int(cols[2])
+                    total_length += end - start
+                    peak_count += 1
+    except Exception as e:
+        tee.write(f"Error reading peak file: {e}\n")
+        return
+
+    if peak_count == 0:
+        tee.write("No peaks found.\n")
+        return
+
+    avg_length = total_length / peak_count
+
+    # FRiP (每个生物学重复单独计算)
+    tee.write("\nCalculating FRiP (Fraction of Reads in Peaks)...\n")
+    frip_results = []
+    total_reads_all = 0
+    reads_in_peaks_all = 0
+    for bam in ip_bam_list:
+        if not os.path.exists(bam):
+            continue
+        label = os.path.basename(bam).replace('.sorted.bam', '').replace('.sorted.dedup.bam', '')
+        res = subprocess.run(
+            ['samtools', 'view', '-c', bam],
+            capture_output=True, text=True)
+        try:
+            n_total = int(res.stdout.strip())
+        except ValueError:
+            continue
+        res2 = subprocess.run(
+            ['samtools', 'view', '-c', bam, '-L', narrow_file],
+            capture_output=True, text=True)
+        try:
+            n_peaks = int(res2.stdout.strip())
+        except ValueError:
+            continue
+        frip_rep = n_peaks / n_total if n_total > 0 else 0
+        frip_results.append((label, n_total, n_peaks, frip_rep))
+        total_reads_all += n_total
+        reads_in_peaks_all += n_peaks
+
+    frip_pooled = reads_in_peaks_all / total_reads_all if total_reads_all > 0 else 0
+
+    # Output
+    tee.write(f"\n{'─'*40}\n")
+    tee.write(f"  Peak QC Summary\n")
+    tee.write(f"{'─'*40}\n")
+    tee.write(f"  Total peaks           : {peak_count}\n")
+    tee.write(f"  Total peak length (bp): {total_length:,}\n")
+    tee.write(f"  Average peak length   : {avg_length:.1f} bp\n")
+    for label, n_total, n_peaks, frip_rep in frip_results:
+        tee.write(f"\n  ── {label} ──\n")
+        tee.write(f"    Total reads  : {n_total:,}\n")
+        tee.write(f"    Reads in peaks: {n_peaks:,}\n")
+        tee.write(f"    FRiP         : {frip_rep:.4f} ({frip_rep*100:.2f}%)\n")
+    tee.write(f"\n  ── Pooled ──\n")
+    tee.write(f"    FRiP         : {frip_pooled:.4f} ({frip_pooled*100:.2f}%)\n")
+    tee.write(f"{'─'*40}\n")
+
+    # Save
+    qc_file = f"{ip_tag}_peak_qc.txt"
+    with open(qc_file, 'w') as f:
+        f.write(f"Sample\t{ip_tag}\n")
+        f.write(f"Peak_caller\t{caller}\n")
+        f.write(f"Total_peaks\t{peak_count}\n")
+        f.write(f"Total_peak_length_bp\t{total_length}\n")
+        f.write(f"Average_peak_length_bp\t{avg_length:.1f}\n")
+        for label, n_total, n_peaks, frip_rep in frip_results:
+            f.write(f"Replicate\t{label}\n")
+            f.write(f"{label}_total_reads\t{n_total}\n")
+            f.write(f"{label}_reads_in_peaks\t{n_peaks}\n")
+            f.write(f"{label}_FRiP\t{frip_rep:.4f}\n")
+        f.write(f"Pooled_FRiP\t{frip_pooled:.4f}\n")
+    tee.write(f"QC report saved to: {qc_file}\n")
+
+
+def _run_macs3(ip_tags, control_tags,
                ip_tag, seq_strategy, genome_size, qvalue, pvalue, tee):
-    """Run MACS3 peak calling (+ optional bdgdiff for two groups)."""
+    """Run MACS3 peak calling and generate peak QC report."""
     fmt = "BAMPE" if seq_strategy == 'paired' else "BAM"
 
-    ip_bam = ' '.join(f"{t}.sorted.bam" for t in ip_tags)
-    ctrl_bam = ' '.join(f"{t}.sorted.bam" for t in control_tags) if control_tags else ""
+    ip_bam_list = [f"{t}.sorted.bam" for t in ip_tags]
+    ctrl_bam_list = [f"{t}.sorted.bam" for t in control_tags] if control_tags else []
+    ip_bam = ' '.join(ip_bam_list)
+    ctrl_bam = ' '.join(ctrl_bam_list) if ctrl_bam_list else ""
 
-    # Group 1 callpeak
-    tee.write(f"\nMACS3 callpeak — Group 1: {ip_tag}\n")
-    cmd1 = (
-        f"macs3 callpeak -t {ip_bam} "
-        f"-f {fmt} -g {genome_size} -n {ip_tag}"
-    )
+    # ── callpeak ─────────────────────────────────────────────────────────
+    tee.write(f"\nMACS3 callpeak — {ip_tag}\n")
+    cmd = f"macs3 callpeak -t {ip_bam} -f {fmt} -g {genome_size} -n {ip_tag}"
     if ctrl_bam:
-        cmd1 += f" -c {ctrl_bam}"
+        cmd += f" -c {ctrl_bam}"
     if qvalue < 1:
         tee.write(f"  Q-value threshold: {qvalue}\n")
-        cmd1 += f" -q {qvalue}"
+        cmd += f" -q {qvalue}"
     else:
         tee.write(f"  P-value threshold: {pvalue}\n")
-        cmd1 += f" -p {pvalue}"
-    cmd1 += " --bdg"
-    run_cmd(cmd1)
+        cmd += f" -p {pvalue}"
+    cmd += " --bdg"
+    run_cmd(cmd)
 
-    # Group 2 callpeak (if provided)
-    if ip2_tags:
-        ip2_bam = ' '.join(f"{t}.sorted.bam" for t in ip2_tags)
-        ctrl2_bam = ' '.join(f"{t}.sorted.bam" for t in control2_tags) if control2_tags else ""
-        ip2_tag = ip2_tags[0]
+    # ── Peak QC ──────────────────────────────────────────────────────────
+    _peak_qc(ip_tag, f"{ip_tag}_peaks.narrowPeak", ip_bam_list, tee, caller='MACS3')
 
-        tee.write(f"\nMACS3 callpeak — Group 2: {ip2_tag}\n")
-        cmd2 = (
-            f"macs3 callpeak -t {ip2_bam} "
-            f"-f {fmt} -g {genome_size} -n {ip2_tag}"
-        )
-        if ctrl2_bam:
-            cmd2 += f" -c {ctrl2_bam}"
-        if qvalue < 1:
-            cmd2 += f" -q {qvalue}"
-        else:
-            cmd2 += f" -p {pvalue}"
-        cmd2 += " --bdg"
-        run_cmd(cmd2)
+    # Cleanup bedGraph files
+    for pat in ["*_treat_pileup.bdg", "*_control_lambda.bdg"]:
+        for fname in globmod.glob(pat):
+            os.unlink(fname)
 
-        # bdgdiff
-        tee.write(f"\nMACS3 bdgdiff — {ip_tag} vs {ip2_tag}\n")
-        t1_bdg = f"{ip_tag}_treat_pileup.bdg"
-        c1_bdg = f"{ip_tag}_control_lambda.bdg"
-        t2_bdg = f"{ip2_tag}_treat_pileup.bdg"
-        c2_bdg = f"{ip2_tag}_control_lambda.bdg"
-
-        diff_prefix = f"diff_{ip_tag}_vs_{ip2_tag}"
-        diff_cmd = (
-            f"macs3 bdgdiff "
-            f"--t1 {t1_bdg} --c1 {c1_bdg} "
-            f"--t2 {t2_bdg} --c2 {c2_bdg} "
-            f"--o-prefix {diff_prefix}"
-        )
-        if qvalue < 1:
-            diff_cmd += f" -C {qvalue}"
-        diff_cmd += ""
-        run_cmd(diff_cmd)
-
-        tee.write(f"\nDifferential peaks output:\n")
-        tee.write(f"  {diff_prefix}_cond1.bed  (enriched in group1)\n")
-        tee.write(f"  {diff_prefix}_cond2.bed  (enriched in group2)\n")
-        tee.write(f"  {diff_prefix}_common.bed (common peaks)\n")
-    else:
-        tee.write(f"\nMACS3 peak calling complete.\n")
-        tee.write(f"Output: {ip_tag}_peaks.narrowPeak\n")
-
-    # Cleanup bedGraph files (keep only if bdgdiff was run)
-    if not ip2_tags:
-        for pat in ["*_treat_pileup.bdg", "*_control_lambda.bdg"]:
-            for fname in globmod.glob(pat):
-                os.unlink(fname)
+    tee.write(f"\nMACS3 peak calling and QC completed.\n")
 
 
 def _run_genrich(genrich_ip, genrich_input, ip_tag, seq_strategy, qvalue, pvalue, auc, tee):
-    """Run Genrich peak calling."""
+    """Run Genrich peak calling + QC."""
     command = f"Genrich -r -v {genrich_ip} {genrich_input} -o {ip_tag}.narrowPeak.txt"
 
     if seq_strategy == 'single':
@@ -292,3 +321,12 @@ def _run_genrich(genrich_ip, genrich_input, ip_tag, seq_strategy, qvalue, pvalue
         command += f" -p {pvalue}"
 
     run_cmd(command)
+
+    # ── Peak QC ──────────────────────────────────────────────────────────
+    # Reconstruct sorted.bam names from the genrich -t argument
+    ip_bam_list = []
+    for part in genrich_ip.replace('-t ', '').split(','):
+        base = part.strip().replace('.sorted.name.bam', '')
+        if base:
+            ip_bam_list.append(f"{base}.sorted.bam")
+    _peak_qc(ip_tag, f"{ip_tag}.narrowPeak.txt", ip_bam_list, tee, caller='Genrich')

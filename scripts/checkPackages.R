@@ -27,9 +27,16 @@ if(!suppressMessages(require("riboWaltz", character.only=T, quietly = TRUE))){
   devtools::install_github("LabTranslationalArchitectomics/riboWaltz", dependencies = TRUE)
 }
 
-if(!suppressMessages(require("NMF", character.only=T, quietly = TRUE))){
-  message("Installing NMF...")
+nmf_loaded <- suppressMessages(require("NMF", character.only=T, quietly = TRUE))
+if(!nmf_loaded){
+  message("Installing NMF (devel branch)...")
   devtools::install_github("renozao/NMF@devel", dependencies = TRUE)
+} else {
+  nmf_ref <- packageDescription("NMF")$GithubRef
+  if(is.null(nmf_ref) || nmf_ref != "devel"){
+    message("Updating NMF to devel branch...")
+    devtools::install_github("renozao/NMF@devel", dependencies = TRUE)
+  }
 }
 
 if(!suppressMessages(require("Seurat", character.only=T, quietly = TRUE))){

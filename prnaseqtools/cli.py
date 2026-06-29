@@ -171,10 +171,7 @@ def build_parser():
     p.add_argument('--pvalue', default=0.01, type=float, help='P-value threshold')
     p.add_argument('--seqstrategy', default='paired', dest='seq_strategy',
                    help='single or paired')
-    p.add_argument('--control2', default=None,
-                   help='Second input group for MACS3 bdgdiff: name=file1+file2...')
-    p.add_argument('--treatment2', default=None,
-                   help='Second IP group for MACS3 bdgdiff: name=file1+file2...')
+
 
     # atac
     p = sub.add_parser('atac', help='ATAC-seq analysis')
@@ -235,15 +232,35 @@ def build_parser():
 
     # tf
     p = sub.add_parser('tf', help='Two-factor DE analysis')
-    add_common_args(p)
-
+    p.add_argument('--outdir', '-o', default='./out', help='Output directory.')
+    p.add_argument('--genome', '-g', default='ath',
+                   help='Genome: ath, osa, b73, gma, smo, bra, w22')
+    p.add_argument('--thread', '-t', default=4, type=int, help='Threads.')
+    p.add_argument('--adaptor', '-a', default=None, help="3' adaptor sequence.")
+    p.add_argument('--control', '-c', default=None,
+                   help='groupName=label1,N1,label2,N2  '
+                        '(e.g. Col=0,2,7,2 for mrna/srna; '
+                        'WT=input,3,IP,3 for chip)')
+    p.add_argument('--treatment', '-p', default=None,
+                   help='groupName=label1,N1,label2,N2  '
+                        '(e.g. Mut=0,2,7,2 for mrna/srna; '
+                        'KO=input,3,IP,3 for chip)')
     p.add_argument('--foldchange', default=1.5, type=float, help='FC threshold')
     p.add_argument('--pvalue', default=0.05, type=float, help='P-value threshold')
-    p.add_argument('--mode_tf', default='mrna', dest='run_mode', help='mrna or srna')
+    p.add_argument('--mode_tf', default='mrna', dest='run_mode',
+                   help='mrna, srna, or chip')
     p.add_argument('--norm', default='rRNA,total', help='Normalization')
     p.add_argument('--binsize', default=100, type=int, help='Window size')
     p.add_argument('--deseq2norm', default='DESeq2', dest='deseq2_norm',
                    help='DESeq2 or RPM')
+    # ChIP bdgdiff options
+    p.add_argument('--genome-size', default=None,
+                   help='Effective genome size for MACS3 (e.g. 1.35e8 for ath)')
+    p.add_argument('--cutoff', default=3, type=float,
+                   help='log2 fold-change cutoff for bdgdiff (default: 3)')
+    p.add_argument('--qvalue', default=1.0, type=float, help='Q-value threshold')
+    p.add_argument('--seqstrategy', default='paired', dest='seq_strategy',
+                   help='single or paired')
 
     return parser
 

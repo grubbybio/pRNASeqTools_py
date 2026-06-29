@@ -25,18 +25,23 @@ def validate_options(opts):
     # Change to output directory
     os.chdir(outdir)
 
-    # Adaptor shortcuts
-    adaptor_map = {
-        '1': 'AGATCGGAAGAGC',
-        '2': 'TGGAATTCTCGGG',
-        '3': 'CTGTCTCTTATAC',
+    # Adaptor shortcuts (keep in sync with modes/srna.py ADAPTOR_ALIASES)
+    adaptor_aliases = {
+        'truseq':   'TGGAATTCTCGGG',   # TruSeq sRNA 3'
+        'illumina': 'TGGAATTCTCGGG',
+        'srna':     'TGGAATTCTCGGG',
+        'neb':      'AGATCGGAAGAGC',   # NEB small RNA
+        'nextera':  'CTGTCTCTTATAC',   # Nextera
     }
-    if opts.get('adaptor') and opts['adaptor'] in adaptor_map:
-        opts['adaptor'] = adaptor_map[opts['adaptor']]
+    adaptor = opts.get('adaptor')
+    if adaptor and adaptor.lower() in adaptor_aliases:
+        opts['adaptor'] = adaptor_aliases[adaptor.lower()]
 
-    if opts.get('adaptor2') and opts['adaptor2'] in adaptor_map:
-        opts['adaptor2'] = adaptor_map[opts['adaptor2']]
-    elif opts.get('adaptor2') == '3':
+    adaptor2 = opts.get('adaptor2')
+    if adaptor2 and adaptor2.lower() in adaptor_aliases:
+        opts['adaptor2'] = adaptor_aliases[adaptor2.lower()]
+    elif adaptor2 and adaptor2.lower() == 'nextera':
+        # adaptor2 uses a shorter version of the Nextera sequence
         opts['adaptor2'] = 'CTGTCTCTTATA'
 
     # Thread validation
