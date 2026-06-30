@@ -51,17 +51,25 @@ def run(opts):
         files.extend(i_files)
         genrich_input = "-c " + ','.join(f"{t}.sorted.name.bam" for t in i_tags)
 
-    # Parse IP (treatment)
+    # Parse IP (treatment) — 支持多组: -p group1=file1 -p group2=file2
+    treatment_groups = []
     ip_opt = opts.get('treatment', '')
-    if isinstance(ip_opt, list):
-        ip_opt = ip_opt[0] if ip_opt else ''
-    ip_dict = _parse_to_dict(ip_opt)
-    i_tags, i_files, i_pars = parse_input(ip_dict)
-    tags.extend(i_tags)
-    files.extend(i_files)
-    genrich_ip = "-t " + ','.join(f"{t}.sorted.name.bam" for t in i_tags)
-    ip_tag = i_tags[0] if i_tags else 'ip'
-    ip_tags = list(i_tags)
+    if isinstance(ip_opt, str):
+        ip_opt = [ip_opt]
+    if ip_opt:
+        for treat_str in ip_opt:
+            t_dict = _parse_to_dict(treat_str)
+            i_tags, i_files, i_pars = parse_input(t_dict)
+            treatment_groups.append({
+                'ip_tags': list(i_tags),
+                'ip_files': list(i_files),
+                'ip_tag': i_tags[0] if i_tags else 'ip',
+            })
+            tags.extend(i_tags)
+            files.extend(i_files)
+
+    if not treatment_groups:
+        sys.exit("At least one --treatment (-p) is required.")
 
     if not nomapping:
         tee.write("\nBuilding index...\n")
@@ -146,23 +154,26 @@ def run(opts):
             os.unlink("igv.log")
 
         if not mappingonly:
-            if peak_caller == 'macs3':
-                _run_macs3(ip_tags, control_tags,
-                           ip_tag, seq_strategy, genome_size,
-                           qvalue, pvalue, tee)
-            else:
-                if input_opt:
-                    _run_genrich(genrich_ip, genrich_input, ip_tag,
-                                 seq_strategy, qvalue, pvalue, auc, tee)
+            for g in treatment_groups:
+                if peak_caller == 'macs3':
+                    _run_macs3(g['ip_tags'], control_tags,
+                               g['ip_tag'], seq_strategy, genome_size,
+                               qvalue, pvalue, tee)
                 else:
-                    _run_genrich(genrich_ip, genrich_input, ip_tag,
+                    genrich_ip = "-t " + ','.join(
+                        f"{t}.sorted.name.bam" for t in g['ip_tags'])
+                    _run_genrich(genrich_ip, genrich_input, g['ip_tag'],
                                  seq_strategy, qvalue, pvalue, auc, tee)
 
     else:
         for pre in tags:
             os.symlink(f"../{pre}.sorted.name.bam", f"{pre}.sorted.name.bam")
 
-        _run_genrich(genrich_ip, genrich_input, ip_tag, seq_strategy, qvalue, pvalue, auc, tee)
+        for g in treatment_groups:
+            genrich_ip = "-t " + ','.join(
+                f"{t}.sorted.name.bam" for t in g['ip_tags'])
+            _run_genrich(genrich_ip, genrich_input, g['ip_tag'],
+                         seq_strategy, qvalue, pvalue, auc, tee)
 
         for pre in tags:
             if os.path.exists(f"{pre}.sorted.name.bam"):
