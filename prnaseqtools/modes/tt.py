@@ -6,6 +6,8 @@ bowtie alignment with iterative mismatches → read categorization → bubble pl
 
 import os
 import sys
+import glob
+import shutil
 import subprocess
 from pathlib import Path
 from collections import defaultdict
@@ -56,7 +58,10 @@ def run(opts):
             run_cmd(
                 f"cutadapt -j {thread} -m 14 -M 42 --discard-untrimmed --trim-n "
                 f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq")
-            os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+            if os.path.exists(f"{tag}_trimmed.fastq"):
+                os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+            else:
+                tee.write(f"Warning: cutadapt did not produce trimmed file for {tag}\n")
 
         # Iterative bowtie mapping with increasing mismatches
         ref_idx = os.path.join(prefix, "reference", f"{genome}_chr_all")
@@ -90,7 +95,12 @@ def run(opts):
                 f"--al {tag}.mapped_{p}.fastq {ref_idx} tmp.fastq {tag}.out")
 
         # Concatenate mapped reads
-        run_cmd(f"cat {tag}.mapped*.fastq > {tag}_edited.fastq")
+        mapped_files = glob.glob(f"{tag}.mapped*.fastq")
+        if mapped_files:
+            run_cmd(f"cat {' '.join(mapped_files)} > {tag}_edited.fastq")
+        else:
+            tee.write(f"Warning: no mapped files found for {tag}, creating empty _edited.fastq\n")
+            open(f"{tag}_edited.fastq", 'w').close()
         for fname in ["tmp.fastq"]:
             if os.path.exists(fname):
                 os.unlink(fname)
@@ -107,7 +117,7 @@ def run(opts):
             f"awk '{{if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".edited.sam\")}}' {tag}")
         run_cmd(f"samtools view -Sb {tag}.edited.sam > {tag}.edited.bam")
 
-        run_cmd(f"rm -rf {tag}tmp", shell=True)
+        shutil.rmtree(f"{tag}tmp", ignore_errors=True)
         for fname in (f"{tag}_edited.fastq", f"{tag}.fastq", tag, f"{tag}.edited.sam"):
             if os.path.exists(fname):
                 os.unlink(fname)
@@ -119,11 +129,11 @@ def run(opts):
         # miRNA intersection
         mir_gff = os.path.join(prefix, "reference", f"{genome}_miRNA_miRNA_star.gff")
         run_cmd(
-            f"bedtools intersect -wo -s -a {mir_gff} -b {tag}.edited.bam > {tag}.out")
+            f"bedtools intersect -wo -s -a {mir_gff} -b {tag}.edited.bam > {tag}.bedtools.out")
 
         mir_data = ref.read_mirna_gff(prefix, genome)
 
-        with open(f"{tag}.out") as fh:
+        with open(f"{tag}.bedtools.out") as fh:
             for line in fh:
                 cols = line.strip().split('\t')
                 if len(cols) < 13:
@@ -144,18 +154,25 @@ def run(opts):
                 if mm not in mir_data or 'chromosome' not in mir_data.get(mm, {}):
                     continue
                 mdata = mir_data[mm]
-                lim1 = mdata['start'] - flank
-                lim2 = mdata['end'] + flank
+                chr_seq = fas.get(mdata['chromosome'], '')
+                if not chr_seq:
+                    tee.write(f"Warning: chromosome {mdata['chromosome']} not found in reference for {mm}\n")
+                    continue
+
+                lim1 = max(0, mdata['start'] - flank)
+                lim2 = min(mdata['end'] + flank, len(chr_seq) - 1)
                 length = mdata['end'] - mdata['start'] + 1
-                refseq = fas.get(mdata['chromosome'], '')[lim1:lim2 + 1]
-                miseq = fas.get(mdata['chromosome'], '')[mdata['start'] - 1:mdata['end']]
+                refseq = chr_seq[lim1:lim2 + 1]
+                miseq = chr_seq[mdata['start'] - 1:mdata['end']]
+                left_dots = mdata['start'] - lim1 - 1
+                right_dots = lim2 - mdata['end'] + 1
 
                 if mdata['strand'] == '+':
-                    fh_out.write(f"{refseq}\t{mm}\n{'.' * (flank - 1)}{miseq}{'.' * (flank + 1)}\tREF\n")
+                    fh_out.write(f"{refseq}\t{mm}\n{'.' * left_dots}{miseq}{'.' * right_dots}\tREF\n")
                 else:
                     refseq = revcomp(refseq)
                     miseq = revcomp(miseq)
-                    fh_out.write(f"{refseq}\t{mm}\n{'.' * (flank + 1)}{miseq}{'.' * (flank - 1)}\tREF\n")
+                    fh_out.write(f"{refseq}\t{mm}\n{'.' * right_dots}{miseq}{'.' * left_dots}\tREF\n")
 
                 for read_key, rcount in mdata.get('read', {}).items():
                     features = read_key.split('_')
@@ -163,8 +180,12 @@ def run(opts):
                     fstart = int(features[0])
                     fend = int(features[1])
 
+                    # Clamp read coordinates to chromosome bounds
+                    fstart = max(0, min(fstart, len(chr_seq)))
+                    fend = max(0, min(fend, len(chr_seq)))
+
                     if mdata['strand'] == '+':
-                        seq = fas.get(mdata['chromosome'], '')[fstart:fend]
+                        seq = chr_seq[fstart:fend]
                         flank1 = fstart - lim1
                         flank2 = lim2 - fend - len(ftail)
 
@@ -174,7 +195,7 @@ def run(opts):
                             else:
                                 out_data[mm][len(ftail)][length - fend + fstart] += rcount
                     else:
-                        seq = revcomp(fas.get(mdata['chromosome'], '')[fstart:fend])
+                        seq = revcomp(chr_seq[fstart:fend])
                         flank1 = lim2 - fend + 1
                         flank2 = fstart - lim1 - len(ftail) - 1
 
@@ -196,6 +217,11 @@ def run(opts):
 
         # Also process MIR GFF
         _process_mir(prefix, genome, tag, fas)
+
+        # Clean up bedtools intermediate file
+        bedtools_out = f"{tag}.bedtools.out"
+        if os.path.exists(bedtools_out):
+            os.unlink(bedtools_out)
 
     par_str = ' '.join(map(str, pars))
     run_cmd(
@@ -248,14 +274,20 @@ def _process_mir(prefix, genome, tag, fas):
             miR_data[cols[8]]['read'][key] += 1
 
     flank = 25
+    tee = _tee()
     with open(f"{tag}.seq.out2", 'w') as fh_out:
         for mm in sorted(miR_data.keys()):
             if mm not in miR_data:
                 continue
             mdata = miR_data[mm]
-            lim1 = mdata['start'] - flank
-            lim2 = mdata['end'] + flank
-            refseq = fas.get(mdata['chromosome'], '')[lim1:lim2 + 1]
+            chr_seq = fas.get(mdata['chromosome'], '')
+            if not chr_seq:
+                tee.write(f"Warning: chromosome {mdata['chromosome']} not found in reference for {mm}\n")
+                continue
+
+            lim1 = max(0, mdata['start'] - flank)
+            lim2 = min(mdata['end'] + flank, len(chr_seq) - 1)
+            refseq = chr_seq[lim1:lim2 + 1]
 
             # Find miRNA positions within MIR
             locs = []
@@ -265,8 +297,12 @@ def _process_mir(prefix, genome, tag, fas):
                     locs.append(mir_data[mip]['end'])
             locs = sorted(set(locs))
 
-            miseq1 = fas.get(mdata['chromosome'], '')[locs[0] - 1:locs[1]]
-            miseq2 = fas.get(mdata['chromosome'], '')[locs[2] - 1:locs[3]] if len(locs) > 2 else ''
+            if len(locs) < 2:
+                tee.write(f"Warning: no miRNA positions found within MIR {mm}, skipping\n")
+                continue
+
+            miseq1 = chr_seq[locs[0] - 1:locs[1]]
+            miseq2 = chr_seq[locs[2] - 1:locs[3]] if len(locs) > 2 else ''
 
             if mdata['strand'] == '+':
                 if len(locs) > 2:
@@ -290,12 +326,16 @@ def _process_mir(prefix, genome, tag, fas):
                 fstart = int(features[0])
                 fend = int(features[1])
 
+                # Clamp read coordinates to chromosome bounds
+                fstart = max(0, min(fstart, len(chr_seq)))
+                fend = max(0, min(fend, len(chr_seq)))
+
                 if mdata['strand'] == '+':
-                    seq = fas.get(mdata['chromosome'], '')[fstart:fend]
+                    seq = chr_seq[fstart:fend]
                     flank1 = fstart - lim1
                     flank2 = lim2 - fend - len(ftail)
                 else:
-                    seq = revcomp(fas.get(mdata['chromosome'], '')[fstart:fend])
+                    seq = revcomp(chr_seq[fstart:fend])
                     flank1 = lim2 - fend + 1
                     flank2 = fstart - lim1 - len(ftail) - 1
 

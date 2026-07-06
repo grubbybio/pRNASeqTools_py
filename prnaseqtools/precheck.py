@@ -218,20 +218,11 @@ def check_dependencies(auto_install=True, mode=None, interactive=True):
             missing = still_missing
 
     # ── Phase 3: check R packages ─────────────────────────────────────
-    rscript_path = os.path.join(prefix, "scripts", "checkPackages.R")
-    if os.path.exists(rscript_path):
-        # The bundled R script handles its own installation
-        try:
-            subprocess.run(
-                f"Rscript --vanilla {rscript_path}",
-                shell=True, timeout=1800
-            )
-        except subprocess.TimeoutExpired:
-            tee.write("Warning: R package check timed out\n")
-        except Exception:
-            tee.write("Warning: R package check failed\n")
-    else:
-        tee.write("Warning: scripts/checkPackages.R not found\n")
+    from prnaseqtools.auto_install import install_r_packages
+    try:
+        install_r_packages(prefix, mode=mode, tee=tee)
+    except Exception:
+        tee.write("Warning: R package check failed\n")
 
     # ── Phase 4: fail on remaining required missing ───────────────────
     if missing:

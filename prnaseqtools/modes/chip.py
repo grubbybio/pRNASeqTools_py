@@ -34,6 +34,7 @@ def run(opts):
     nomapping = opts.get('no_mapping', False)
     mappingonly = opts.get('mapping_only', False)
     seq_strategy = opts.get('seq_strategy', 'paired')
+    tss_distance = opts.get('tss_distance', 3000)
 
     tags = []
     files = []
@@ -158,12 +159,16 @@ def run(opts):
                 if peak_caller == 'macs3':
                     _run_macs3(g['ip_tags'], control_tags,
                                g['ip_tag'], seq_strategy, genome_size,
-                               qvalue, pvalue, tee)
+                               qvalue, pvalue, tee,
+                               genome=genome, prefix=prefix,
+                               tss_distance=tss_distance)
                 else:
                     genrich_ip = "-t " + ','.join(
                         f"{t}.sorted.name.bam" for t in g['ip_tags'])
                     _run_genrich(genrich_ip, genrich_input, g['ip_tag'],
-                                 seq_strategy, qvalue, pvalue, auc, tee)
+                                 seq_strategy, qvalue, pvalue, auc, tee,
+                                 genome=genome, prefix=prefix,
+                                 tss_distance=tss_distance)
 
     else:
         for pre in tags:
@@ -173,7 +178,9 @@ def run(opts):
             genrich_ip = "-t " + ','.join(
                 f"{t}.sorted.name.bam" for t in g['ip_tags'])
             _run_genrich(genrich_ip, genrich_input, g['ip_tag'],
-                         seq_strategy, qvalue, pvalue, auc, tee)
+                         seq_strategy, qvalue, pvalue, auc, tee,
+                         genome=genome, prefix=prefix,
+                         tss_distance=tss_distance)
 
         for pre in tags:
             if os.path.exists(f"{pre}.sorted.name.bam"):
@@ -282,7 +289,8 @@ def _peak_qc(ip_tag, narrow_file, ip_bam_list, tee, caller='MACS3'):
 
 
 def _run_macs3(ip_tags, control_tags,
-               ip_tag, seq_strategy, genome_size, qvalue, pvalue, tee):
+               ip_tag, seq_strategy, genome_size, qvalue, pvalue, tee,
+               genome=None, prefix=None, tss_distance=3000):
     """Run MACS3 peak calling and generate peak QC report."""
     fmt = "BAMPE" if seq_strategy == 'paired' else "BAM"
 
@@ -313,10 +321,15 @@ def _run_macs3(ip_tags, control_tags,
         for fname in globmod.glob(pat):
             os.unlink(fname)
 
+    # ── ChIPseeker annotation ─────────────────────────────────────────────
+    _run_chipseeker(genome, prefix, f"{ip_tag}_peaks.narrowPeak",
+                    f"{ip_tag}_peaks", tee, tss_distance)
+
     tee.write(f"\nMACS3 peak calling and QC completed.\n")
 
 
-def _run_genrich(genrich_ip, genrich_input, ip_tag, seq_strategy, qvalue, pvalue, auc, tee):
+def _run_genrich(genrich_ip, genrich_input, ip_tag, seq_strategy, qvalue, pvalue, auc, tee,
+                 genome=None, prefix=None, tss_distance=3000):
     """Run Genrich peak calling + QC."""
     command = f"Genrich -r -v {genrich_ip} {genrich_input} -o {ip_tag}.narrowPeak.txt"
 
@@ -341,3 +354,23 @@ def _run_genrich(genrich_ip, genrich_input, ip_tag, seq_strategy, qvalue, pvalue
         if base:
             ip_bam_list.append(f"{base}.sorted.bam")
     _peak_qc(ip_tag, f"{ip_tag}.narrowPeak.txt", ip_bam_list, tee, caller='Genrich')
+
+    # ── ChIPseeker annotation ─────────────────────────────────────────────
+    _run_chipseeker(genome, prefix, f"{ip_tag}.narrowPeak.txt",
+                    f"{ip_tag}_peaks", tee, tss_distance)
+
+
+def _run_chipseeker(genome, prefix, peak_file, peak_name, tee, tss_distance=3000):
+    """Call chipseeker.R for peak annotation and GO enrichment on a single peak set."""
+    gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
+    if not os.path.exists(gff_path):
+        tee.write(f"  GFF not found: {gff_path}, skipping ChIPseeker annotation.\n")
+        return
+    chipseeker_r = os.path.join(prefix, "scripts", "chipseeker.R")
+    if not os.path.exists(chipseeker_r):
+        tee.write(f"  Script not found: {chipseeker_r}, skipping.\n")
+        return
+    run_cmd(
+        f"Rscript --vanilla {chipseeker_r} "
+        f"{genome} {prefix} {peak_file} {peak_name} {tss_distance}"
+    )

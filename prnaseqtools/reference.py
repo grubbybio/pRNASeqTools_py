@@ -5,27 +5,10 @@ Provides: GFF parsing, FASTA reading, exon extraction, annotation, etc.
 """
 
 import os
+import re
 import subprocess
-import sys
+import tempfile
 from collections import defaultdict
-from pathlib import Path
-
-from prnaseqtools.functions import revcomp
-
-
-def _tee():
-    try:
-        from prnaseqtools.cli import TEE
-        if TEE:
-            return TEE
-    except (ImportError, AttributeError):
-        pass
-    return sys.stderr
-
-
-def _prefix():
-    """Get the package root directory."""
-    return str(Path(__file__).resolve().parent.parent)
 
 
 def read_gff(prefix, genome):
@@ -54,7 +37,7 @@ def read_gff(prefix, genome):
                 continue
 
             if 'gene' in feature:
-                m = __import__('re').search(r'^ID=([^;]+);', cols[8])
+                m = re.search(r'^ID=([^;]+);', cols[8])
                 if m:
                     current_id = m.group(1)
                     ind = int(cols[3]) // 100000
@@ -110,37 +93,38 @@ def read_exons(prefix, genome):
     exons_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
     gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
 
-    subprocess.run(
-        f"gffread -O -w exons.fa -g {exons_path} {gff_path}",
-        shell=True, check=True
-    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        exons_fa = os.path.join(tmpdir, "exons.fa")
+        subprocess.run(
+            f"gffread -O -w {exons_fa} -g {exons_path} {gff_path}",
+            shell=True, check=True, timeout=600
+        )
 
-    exon_data = defaultdict(lambda: defaultdict(str))
-    gene = None
-    tran = 0
+        exon_data = defaultdict(lambda: defaultdict(str))
+        gene = None
+        tran = 0
 
-    with open("exons.fa") as fh:
-        chunks = []
-        for line in fh:
-            line = line.strip()
-            if line.startswith('>'):
-                if gene is not None:
-                    exon_data[gene][tran] = "".join(chunks)
-                    chunks = []
-                header = line[1:]
-                m = __import__('re').match(r'(\w+)\.(\d+)', header)
-                if m:
-                    gene = m.group(1)
-                    tran = m.group(2)
+        with open(exons_fa) as fh:
+            chunks = []
+            for line in fh:
+                line = line.strip()
+                if line.startswith('>'):
+                    if gene is not None:
+                        exon_data[gene][tran] = "".join(chunks)
+                        chunks = []
+                    header = line[1:]
+                    m = re.match(r'(\w+)\.(\d+)', header)
+                    if m:
+                        gene = m.group(1)
+                        tran = m.group(2)
+                    else:
+                        gene = header
+                        tran = 0
                 else:
-                    gene = header
-                    tran = 0
-            else:
-                chunks.append(line)
-        if gene is not None:
-            exon_data[gene][tran] = "".join(chunks)
+                    chunks.append(line)
+            if gene is not None:
+                exon_data[gene][tran] = "".join(chunks)
 
-    os.unlink("exons.fa")
     return dict(exon_data)
 
 
@@ -200,17 +184,23 @@ def read_mirna_gff(prefix, genome):
     return mir_data
 
 
-def split_gff(prefix, genome, promoter_length=1000):
+def split_gff(prefix, genome, promoter_length=1000, workdir=None):
     """
     Split GFF into gene.gff, te.gff, promoter.gff.
+
+    Args:
+        workdir: output directory (None = current working directory)
     """
     gene_gff = os.path.join(prefix, "reference", f"{genome}_genes.gff")
     te_gff = os.path.join(prefix, "reference", f"{genome}_transposons.gff")
 
+    def _path(name):
+        return os.path.join(workdir, name) if workdir else name
+
     # Process genes
     with open(gene_gff) as fh_in, \
-         open("gene.gff", 'w') as fh_gene, \
-         open("promoter.gff", 'w') as fh_prom:
+         open(_path("gene.gff"), 'w') as fh_gene, \
+         open(_path("promoter.gff"), 'w') as fh_prom:
 
         for line in fh_in:
             line = line.strip()
@@ -219,7 +209,7 @@ def split_gff(prefix, genome, promoter_length=1000):
             cols = line.split('\t')
 
             if 'gene' in cols[2]:
-                m = __import__('re').search(r'ID=([A-Za-z0-9_.]+);', cols[8])
+                m = re.search(r'ID=([A-Za-z0-9_.]+);', cols[8])
                 if not m:
                     continue
                 name = m.group(1)
@@ -246,7 +236,7 @@ def split_gff(prefix, genome, promoter_length=1000):
 
     # Process TEs
     if os.path.exists(te_gff):
-        with open(te_gff) as fh_in, open("te.gff", 'w') as fh_te:
+        with open(te_gff) as fh_in, open(_path("te.gff"), 'w') as fh_te:
             for line in fh_in:
                 line = line.strip()
                 if not line:
@@ -254,7 +244,7 @@ def split_gff(prefix, genome, promoter_length=1000):
                 cols = line.split('\t')
 
                 if 'transposable_element' in cols[2]:
-                    m = __import__('re').search(r'ID=([A-Za-z0-9_.]+);', cols[8])
+                    m = re.search(r'ID=([A-Za-z0-9_.]+);', cols[8])
                     if m:
                         cols[8] = m.group(1)
                         fh_te.write('\t'.join(cols) + '\n')
@@ -278,27 +268,14 @@ def build_annotation(prefix, genome, binsize=100, promoter_length=1000):
                 ann[cols[0]] = '\t'.join(cols[1:])
         return ann
 
-    # Build from scratch
-    split_gff(prefix, genome, promoter_length)
+    # Build from scratch (temp files managed by TemporaryDirectory)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        split_gff(prefix, genome, promoter_length, workdir=tmpdir)
 
-    ann = defaultdict(str)
+        ann = defaultdict(str)
 
-    # Gene annotations
-    with open("gene.gff") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            cols = line.split('\t')
-            start_bin = int(cols[3]) // binsize
-            end_bin = int(cols[4]) // binsize
-            for i in range(start_bin, end_bin + 1):
-                bin_id = f"{cols[0]}_{i}"
-                ann[bin_id] += f"GENE:{cols[8]};"
-
-    # TE annotations
-    if os.path.exists("te.gff"):
-        with open("te.gff") as fh:
+        # Gene annotations
+        with open(os.path.join(tmpdir, "gene.gff")) as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -308,49 +285,60 @@ def build_annotation(prefix, genome, binsize=100, promoter_length=1000):
                 end_bin = int(cols[4]) // binsize
                 for i in range(start_bin, end_bin + 1):
                     bin_id = f"{cols[0]}_{i}"
-                    ann[bin_id] += f"TE:{cols[8]};"
+                    ann[bin_id] += f"GENE:{cols[8]};"
 
-    # miRNA annotations
-    mir_gff = os.path.join(prefix, "reference", f"{genome}_miRNA_miRNA_star.gff")
-    if os.path.exists(mir_gff):
-        with open(mir_gff) as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                cols = line.split('\t')
-                start_bin = int(cols[3]) // binsize
-                end_bin = int(cols[4]) // binsize
-                for i in range(start_bin, end_bin + 1):
-                    bin_id = f"{cols[0]}_{i}"
-                    ann[bin_id] += f"{cols[8]};"
+        # TE annotations
+        te_gff = os.path.join(tmpdir, "te.gff")
+        if os.path.exists(te_gff):
+            with open(te_gff) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    cols = line.split('\t')
+                    start_bin = int(cols[3]) // binsize
+                    end_bin = int(cols[4]) // binsize
+                    for i in range(start_bin, end_bin + 1):
+                        bin_id = f"{cols[0]}_{i}"
+                        ann[bin_id] += f"TE:{cols[8]};"
 
-    # Promoter annotations
-    if os.path.exists("promoter.gff"):
-        with open("promoter.gff") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                cols = line.split('\t')
-                start_bin = int(cols[3]) // binsize
-                end_bin = int(cols[4]) // binsize
-                for i in range(start_bin, end_bin + 1):
-                    bin_id = f"{cols[0]}_{i}"
-                    ann[bin_id] += f"PROMOTER:{cols[8]};"
+        # miRNA annotations
+        mir_gff = os.path.join(prefix, "reference", f"{genome}_miRNA_miRNA_star.gff")
+        if os.path.exists(mir_gff):
+            with open(mir_gff) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    cols = line.split('\t')
+                    start_bin = int(cols[3]) // binsize
+                    end_bin = int(cols[4]) // binsize
+                    for i in range(start_bin, end_bin + 1):
+                        bin_id = f"{cols[0]}_{i}"
+                        ann[bin_id] += f"{cols[8]};"
 
-    # Clean up temp files
-    for f in ("gene.gff", "te.gff", "promoter.gff"):
-        if os.path.exists(f):
-            os.unlink(f)
+        # Promoter annotations
+        prom_gff = os.path.join(tmpdir, "promoter.gff")
+        if os.path.exists(prom_gff):
+            with open(prom_gff) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    cols = line.split('\t')
+                    start_bin = int(cols[3]) // binsize
+                    end_bin = int(cols[4]) // binsize
+                    for i in range(start_bin, end_bin + 1):
+                        bin_id = f"{cols[0]}_{i}"
+                        ann[bin_id] += f"PROMOTER:{cols[8]};"
 
-    # Strip trailing semicolons and write cache
-    result = {}
-    with open(ann_path, 'w') as fh_out:
-        for bin_id in sorted(ann.keys()):
-            ann_str = ann[bin_id].rstrip(';')
-            result[bin_id] = ann_str
-            fh_out.write(f"{bin_id}\t{ann_str}\n")
+        # Write cache (outside tmpdir so it persists)
+        result = {}
+        with open(ann_path, 'w') as fh_out:
+            for bin_id in sorted(ann.keys()):
+                ann_str = ann[bin_id].rstrip(';')
+                result[bin_id] = ann_str
+                fh_out.write(f"{bin_id}\t{ann_str}\n")
 
     return result
 
@@ -411,7 +399,7 @@ def read_gene_annotation(prefix, genome):
                 if j < len(cols) and cols[j] == "":
                     cols[j] = "NA"
 
-            m = __import__('re').match(r'(\w+)\.1$', cols[0])
+            m = re.match(r'(\w+)\.1$', cols[0])
             if m:
                 gene_id = m.group(1)
                 ann_str = f',"{cols[1]}","{cols[2]}","{cols[3]}","{cols[4]}"'
@@ -429,23 +417,24 @@ def primary_transcript(prefix, genome):
     """
     script = os.path.join(prefix, "scripts", "getPrimaryTranscript.py")
     gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
-    output_file = f"{genome}.PrimaryTranscript.txt"
 
-    subprocess.run(
-        f"python3 {script} {gff_path} > {output_file}",
-        shell=True, check=True
-    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_file = os.path.join(tmpdir, f"{genome}.PrimaryTranscript.txt")
+        subprocess.run(
+            f"python3 {script} {gff_path} > {output_file}",
+            shell=True, check=True, timeout=600
+        )
 
-    # Parse primary transcript list
-    primary = set()
-    with open(output_file) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            cols = line.split('\t')
-            if len(cols) >= 2:
-                primary.add(cols[1])
+        # Parse primary transcript list
+        primary = set()
+        with open(output_file) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                cols = line.split('\t')
+                if len(cols) >= 2:
+                    primary.add(cols[1])
 
     # Filter GTF to primary transcripts
     gtf_file = f"{genome}.gtf"
@@ -463,8 +452,6 @@ def primary_transcript(prefix, genome):
             if len(cols) < 9:
                 continue
 
-            m = __import__('re').search(r'transcript_id "(\w+\.\d+)"', cols[8])
+            m = re.search(r'transcript_id "(\w+\.\d+)"', cols[8])
             if m and m.group(1) in primary:
                 fh_out.write(line + '\n')
-
-    os.unlink(output_file)

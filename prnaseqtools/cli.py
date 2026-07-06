@@ -171,6 +171,8 @@ def build_parser():
     p.add_argument('--pvalue', default=0.01, type=float, help='P-value threshold')
     p.add_argument('--seqstrategy', default='paired', dest='seq_strategy',
                    help='single or paired')
+    p.add_argument('--tss-distance', default=3000, type=int,
+                   help='TSS distance for ChIPseeker annotation (default: 3000)')
 
 
     # atac
@@ -186,6 +188,8 @@ def build_parser():
     p.add_argument('--pvalue', default=0.01, type=float, help='P-value threshold')
     p.add_argument('--treatment2', default=None,
                    help='Second ATAC group for MACS3 bdgdiff: name=file1+file2...')
+    p.add_argument('--tss-distance', default=3000, type=int,
+                   help='TSS distance for ChIPseeker annotation (default: 3000)')
 
     # wgbs
     p = sub.add_parser('wgbs', help='WGBS-seq analysis')
@@ -261,6 +265,8 @@ def build_parser():
     p.add_argument('--qvalue', default=1.0, type=float, help='Q-value threshold')
     p.add_argument('--seqstrategy', default='paired', dest='seq_strategy',
                    help='single or paired')
+    p.add_argument('--tss-distance', default=3000, type=int,
+                   help='TSS distance for ChIPseeker annotation (default: 3000)')
 
     return parser
 

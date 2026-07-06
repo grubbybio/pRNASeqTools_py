@@ -32,6 +32,7 @@ def run(opts):
     pvalue = opts.get('pvalue', 0.01)
     nomapping = opts.get('no_mapping', False)
     mappingonly = opts.get('mapping_only', False)
+    tss_distance = opts.get('tss_distance', 3000)
 
     tags = []
     files = []
@@ -74,7 +75,7 @@ def run(opts):
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
         os.symlink(fasta_path, f"{genome}_chr_all.fasta")
         run_cmd(
-            f"bowtie2-build -q {genome}_chr_all.fasta {genome}_chr_all")
+            f"bowtie2-build --threads {thread} -q {genome}_chr_all.fasta {genome}_chr_all")
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -152,20 +153,21 @@ def run(opts):
         if not mappingonly:
             if peak_caller == 'macs3':
                 _run_macs3(ip_tags, ip2_tags, ip_tag, genome_size,
-                           qvalue, pvalue, tee)
+                           qvalue, pvalue, tee,
+                           genome=genome, prefix=prefix,
+                           tss_distance=tss_distance)
             else:
-                if input_opt:
-                    _run_genrich(genrich_ip, genrich_input, ip_tag,
-                                 qvalue, pvalue, auc, tee)
-                else:
-                    _run_genrich(genrich_ip, genrich_input, ip_tag,
-                                 qvalue, pvalue, auc, tee)
+                _run_genrich(genrich_ip, genrich_input, ip_tag,
+                             qvalue, pvalue, auc, tee,
+                             genome=genome, prefix=prefix,
+                             tss_distance=tss_distance)
 
     else:
         for pre in tags:
             os.symlink(f"../{pre}.sorted.name.bam", f"{pre}.sorted.name.bam")
 
-        _run_genrich(genrich_ip, genrich_input, ip_tag, qvalue, pvalue, auc, tee)
+        _run_genrich(genrich_ip, genrich_input, ip_tag, qvalue, pvalue, auc, tee,
+                     genome=genome, prefix=prefix, tss_distance=tss_distance)
 
         for pre in tags:
             if os.path.exists(f"{pre}.sorted.name.bam"):
@@ -179,7 +181,25 @@ def _parse_to_dict(arg_str):
     return {}
 
 
-def _run_macs3(ip_tags, ip2_tags, ip_tag, genome_size, qvalue, pvalue, tee):
+def _peak_stats(peak_file, label, tee):
+    """Print basic peak count and length stats for a peak file."""
+    if not os.path.exists(peak_file):
+        return
+    count = 0
+    total_bp = 0
+    with open(peak_file) as f:
+        for line in f:
+            cols = line.strip().split('\t')
+            if len(cols) >= 3:
+                s, e = int(cols[1]), int(cols[2])
+                total_bp += e - s
+                count += 1
+    if count > 0:
+        tee.write(f"  {label}: {count:,} peaks, avg {total_bp/count:.0f} bp\n")
+
+
+def _run_macs3(ip_tags, ip2_tags, ip_tag, genome_size, qvalue, pvalue, tee,
+               genome=None, prefix=None, tss_distance=3000):
     """Run MACS3 peak calling for ATAC-seq (+ optional bdgdiff)."""
     ip_bam = ' '.join(f"{t}.sorted.bam" for t in ip_tags)
 
@@ -233,26 +253,54 @@ def _run_macs3(ip_tags, ip2_tags, ip_tag, genome_size, qvalue, pvalue, tee):
         )
         if qvalue < 1:
             diff_cmd += f" -C {qvalue}"
-        diff_cmd += ""
         run_cmd(diff_cmd)
 
         tee.write(f"\nDifferential peaks output:\n")
         tee.write(f"  {diff_prefix}_cond1.bed  (enriched in group1)\n")
         tee.write(f"  {diff_prefix}_cond2.bed  (enriched in group2)\n")
         tee.write(f"  {diff_prefix}_common.bed (common peaks)\n")
+
+        # ── Peak stats ────────────────────────────────────────────────────
+        _peak_stats(f"{ip_tag}_peaks.narrowPeak", ip_tag, tee)
+        _peak_stats(f"{ip2_tag}_peaks.narrowPeak", ip2_tag, tee)
+        _peak_stats(f"{diff_prefix}_cond1.bed", f"diff_{ip_tag}_enriched", tee)
+        _peak_stats(f"{diff_prefix}_cond2.bed", f"diff_{ip2_tag}_enriched", tee)
+        _peak_stats(f"{diff_prefix}_common.bed", "diff_common", tee)
+
+        # ── ChIPseeker annotation ─────────────────────────────────────────
+        diff_peaks = [
+            (f"{ip_tag}_peaks.narrowPeak",   f"{ip_tag}_peaks"),
+            (f"{ip2_tag}_peaks.narrowPeak",  f"{ip2_tag}_peaks"),
+            (f"{diff_prefix}_cond1.bed",     f"diff_{ip_tag}_enriched"),
+            (f"{diff_prefix}_cond2.bed",     f"diff_{ip2_tag}_enriched"),
+            (f"{diff_prefix}_common.bed",    "diff_common"),
+        ]
+        for pf, pn in diff_peaks:
+            if os.path.exists(pf):
+                _run_chipseeker(genome, prefix, pf, pn, tee, tss_distance)
+        # Cleanup bedGraph files
+        for pat in ["*_treat_pileup.bdg", "*_control_lambda.bdg"]:
+            for fname in globmod.glob(pat):
+                os.unlink(fname)
     else:
         tee.write(f"\nMACS3 peak calling complete.\n")
         tee.write(f"Output: {ip_tag}_peaks.narrowPeak\n")
+        # ── Peak stats ────────────────────────────────────────────────────
+        _peak_stats(f"{ip_tag}_peaks.narrowPeak", ip_tag, tee)
+        # ── ChIPseeker annotation ─────────────────────────────────────────
+        _run_chipseeker(genome, prefix, f"{ip_tag}_peaks.narrowPeak",
+                        f"{ip_tag}_peaks", tee, tss_distance)
         # Cleanup bedGraph files
         for pat in ["*_treat_pileup.bdg", "*_control_lambda.bdg"]:
             for fname in globmod.glob(pat):
                 os.unlink(fname)
 
 
-def _run_genrich(genrich_ip, genrich_input, ip_tag, qvalue, pvalue, auc, tee):
+def _run_genrich(genrich_ip, genrich_input, ip_tag, qvalue, pvalue, auc, tee,
+                 genome=None, prefix=None, tss_distance=3000):
     """Run Genrich for ATAC peak calling."""
     command = (
-        f"Genrich -j -y -r -v -a 20 -e chrC,chrM {genrich_ip} {genrich_input} "
+        f"Genrich -j -y -r -v -a {auc} -e chrC,chrM {genrich_ip} {genrich_input} "
         f"-o {ip_tag}.ATAC.narrowPeak.txt"
     )
 
@@ -263,4 +311,27 @@ def _run_genrich(genrich_ip, genrich_input, ip_tag, qvalue, pvalue, auc, tee):
         tee.write(f"\nFinding peaks...\nAUC\t{auc}\tP Value\t{pvalue}\n")
         command += f" -p {pvalue}"
 
-    run_cmd(command + "")
+    run_cmd(command)
+
+    # ── Peak stats ────────────────────────────────────────────────────────
+    _peak_stats(f"{ip_tag}.ATAC.narrowPeak.txt", ip_tag, tee)
+
+    # ── ChIPseeker annotation ─────────────────────────────────────────────
+    _run_chipseeker(genome, prefix, f"{ip_tag}.ATAC.narrowPeak.txt",
+                    f"{ip_tag}_peaks", tee, tss_distance)
+
+
+def _run_chipseeker(genome, prefix, peak_file, peak_name, tee, tss_distance=3000):
+    """Call chipseeker.R for peak annotation and GO enrichment on a single peak set."""
+    gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
+    if not os.path.exists(gff_path):
+        tee.write(f"  GFF not found: {gff_path}, skipping ChIPseeker annotation.\n")
+        return
+    chipseeker_r = os.path.join(prefix, "scripts", "chipseeker.R")
+    if not os.path.exists(chipseeker_r):
+        tee.write(f"  Script not found: {chipseeker_r}, skipping.\n")
+        return
+    run_cmd(
+        f"Rscript --vanilla {chipseeker_r} "
+        f"{genome} {prefix} {peak_file} {peak_name} {tss_distance}"
+    )

@@ -1,48 +1,119 @@
-message("\nChecking R packages...")
-options(repos=structure(c(CRAN="https://cloud.r-project.org")))
+# ── Parse command-line arguments ────────────────────────────────────────────
+# Usage:
+#   Rscript checkPackages.R                        # install ALL R packages
+#   Rscript checkPackages.R --packages pkg1,pkg2   # install only listed packages
+args <- commandArgs(trailingOnly = TRUE)
 
-if(!requireNamespace("BiocManager", quietly = TRUE)){
-  install.packages("BiocManager")
-}
-if (!requireNamespace("devtools", quietly = TRUE)){
-  install.packages("devtools")
-}
-if (!requireNamespace("dplyr", quietly = TRUE)){
-  install.packages("dplyr")
-}
-
-packages <- c("DESeq2", "pheatmap", "DMRcaller", "RNAmodR.RiboMethSeq")
-package.check <- lapply(
-  packages,
-  FUN = function(x) {
-    if(!suppressMessages(require(x, character.only=T, quietly = TRUE))){
-      message(paste("Installing ",x,"...",sep=""))
-      BiocManager::install(x)
+pkg_list <- NULL
+if (length(args) > 0) {
+  for (i in seq_along(args)) {
+    if (args[i] == "--packages" && i < length(args)) {
+      pkg_list <- strsplit(args[i + 1], ",")[[1]]
+      pkg_list <- trimws(pkg_list)
+      break
     }
   }
-)
-
-if(!suppressMessages(require("riboWaltz", character.only=T, quietly = TRUE))){
-  message("Installing riboWaltz...")
-  devtools::install_github("LabTranslationalArchitectomics/riboWaltz", dependencies = TRUE)
 }
 
-nmf_loaded <- suppressMessages(require("NMF", character.only=T, quietly = TRUE))
-if(!nmf_loaded){
-  message("Installing NMF (devel branch)...")
-  devtools::install_github("renozao/NMF@devel", dependencies = TRUE)
+if (is.null(pkg_list)) {
+  message("\nChecking R packages (all)...")
 } else {
-  nmf_ref <- packageDescription("NMF")$GithubRef
-  if(is.null(nmf_ref) || nmf_ref != "devel"){
-    message("Updating NMF to devel branch...")
-    devtools::install_github("renozao/NMF@devel", dependencies = TRUE)
+  message(paste("\nChecking R packages:", paste(pkg_list, collapse = ", ")))
+}
+
+# ── Bootstrap prerequisites ────────────────────────────────────────────────
+options(repos = structure(c(CRAN = "https://cloud.r-project.org")))
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+if (!requireNamespace("devtools", quietly = TRUE)) {
+  install.packages("devtools")
+}
+
+# ── Install dispatch ───────────────────────────────────────────────────────
+# Each function receives a package name and returns invisibly.
+# Returns FALSE (invisibly) if the package was already installed.
+
+install_bioconductor <- function(pkg) {
+  if (!suppressMessages(require(pkg, character.only = TRUE, quietly = TRUE))) {
+    message(paste("Installing", pkg, "(Bioconductor)..."))
+    BiocManager::install(pkg, update = FALSE, ask = FALSE)
+  } else {
+    message(paste(pkg, "already installed"))
   }
 }
 
-if(!suppressMessages(require("Seurat", character.only=T, quietly = TRUE))){
-  message("Installing Seurat...")
-  remotes::install_github("satijalab/seurat")
-  remotes::install_github("jlmelville/uwot")
+install_github <- function(pkg, repo, ref = NULL, extra = NULL) {
+  if (!suppressMessages(require(pkg, character.only = TRUE, quietly = TRUE))) {
+    message(paste("Installing", pkg, "(GitHub:", repo, ")..."))
+    devtools::install_github(repo, ref = ref, dependencies = TRUE)
+  } else {
+    # Version check for packages that require a specific branch
+    if (!is.null(ref)) {
+      current_ref <- packageDescription(pkg)$GithubRef
+      if (is.null(current_ref) || current_ref != ref) {
+        message(paste("Updating", pkg, "to", ref, "branch..."))
+        devtools::install_github(repo, ref = ref, dependencies = TRUE)
+      } else {
+        message(paste(pkg, "already installed (", ref, "branch)"))
+      }
+    } else {
+      message(paste(pkg, "already installed"))
+    }
+  }
+  # Install extra companion packages
+  if (!is.null(extra)) {
+    for (ep in extra) {
+      if (!suppressMessages(require(ep, character.only = TRUE, quietly = TRUE))) {
+        message(paste("Installing companion package:", ep, "..."))
+        # uwot is on CRAN
+        install.packages(ep)
+      }
+    }
+  }
 }
 
-message("All R packages are installed!")
+install_cran <- function(pkg) {
+  if (!suppressMessages(require(pkg, character.only = TRUE, quietly = TRUE))) {
+    message(paste("Installing", pkg, "(CRAN)..."))
+    install.packages(pkg)
+  } else {
+    message(paste(pkg, "already installed"))
+  }
+}
+
+# ── Single-package dispatcher ──────────────────────────────────────────────
+install_one <- function(pkg) {
+  switch(pkg,
+    "dplyr"                   = install_cran("dplyr"),
+    "DESeq2"                  = install_bioconductor("DESeq2"),
+    "DMRcaller"               = install_bioconductor("DMRcaller"),
+    "ORFik"                   = install_bioconductor("ORFik"),
+    "pheatmap"                = install_bioconductor("pheatmap"),
+    "RNAmodR.RiboMethSeq"     = install_bioconductor("RNAmodR.RiboMethSeq"),
+    "NMF"                     = install_github("NMF", "renozao/NMF", ref = "devel"),
+    "riboWaltz"               = install_github("riboWaltz", "LabTranslationalArchitectomics/riboWaltz"),
+    "Seurat"                  = install_github("Seurat", "satijalab/seurat", extra = c("uwot")),
+    {
+      message(paste("Unknown package:", pkg, "- skipping"))
+    }
+  )
+}
+
+# ── Main ───────────────────────────────────────────────────────────────────
+if (is.null(pkg_list)) {
+  # Install all known packages
+  all_pkgs <- c("dplyr", "DESeq2", "DMRcaller", "ORFik", "pheatmap",
+                 "RNAmodR.RiboMethSeq", "NMF", "riboWaltz", "Seurat")
+  pkg_list <- all_pkgs
+}
+
+for (pkg in pkg_list) {
+  tryCatch(
+    install_one(pkg),
+    error = function(e) message(paste("ERROR installing", pkg, ":", e$message))
+  )
+}
+
+message("R package check completed!")

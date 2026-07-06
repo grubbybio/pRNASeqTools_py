@@ -10,8 +10,7 @@ Installation sources per tool:
                stringtie, gffcompare, rsem, htslib, numpy, scipy
   conda-forge — r-base, r-essentials, bioconductor-*
   pip         — clipper (CLIPper), numpy, scipy (fallback)
-  R           — DESeq2, DMRcaller, riboWaltz (degradome), NMF, Seurat,
-               pheatmap, RNAmodR.RiboMethSeq
+  R           — batch install via checkPackages.R (BiocManager/devtools)
   git+make    — CLIPper (last resort)
   manual      — RiboTaper (GitHub: hsinyenwu/RiboTaper)
 """
@@ -20,8 +19,6 @@ import subprocess
 import sys
 import os
 import shutil
-import re
-from pathlib import Path
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -53,7 +50,7 @@ def _pm_install(pm, packages, channel=None):
     try:
         subprocess.run(cmd, check=True, timeout=600)
         return True
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
 
 
@@ -62,13 +59,12 @@ def _pm_install(pm, packages, channel=None):
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # Each entry keys on the binary name.  Fields:
-#   pkg         — conda-forge / bioconda package name (may differ from binary)
-#   channel     — conda channel
-#   pip         — PyPI package name (for pip fallback)
-#   r_pkg       — R package name (for BiocManager::install)
-#   github      — GitHub URL for manual clone+install
-#   mode_only   — list of modes that need this tool; None means always needed
-#   install_msg — shown to user before installing
+#   pkg            — conda-forge / bioconda package name (may differ from binary)
+#   channel        — conda channel
+#   pip            — PyPI package name (for pip fallback)
+#   github         — GitHub URL for manual clone+install
+#   mode_only      — list of modes that need this tool; None means always needed
+#   install_msg    — shown to user before installing
 
 DEPENDENCY_REGISTRY = {
     # ── Core tools (always required) ───────────────────────────────────
@@ -190,46 +186,90 @@ DEPENDENCY_REGISTRY = {
         'install_msg': 'Scientific Python (sPARTA)',
     },
 
-    # ── R packages (checked separately) ───────────────────────────────
-    'R::DESeq2': {
-        'r_pkg': 'DESeq2',
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 2b. R package registry — single source of truth for R package installs
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Each entry keys on the R package name.  Fields:
+#   pkg            — R package name (required)
+#   source         — 'bioconductor', 'github', or 'cran'
+#   github_repo    — GitHub repo path (source=github)
+#   github_ref     — branch/tag (optional, e.g. 'devel')
+#   extra          — additional packages to install alongside
+#   mode_only      — list of modes that need this package; None = all modes
+#   install_msg    — shown to user
+
+R_PACKAGE_REGISTRY = {
+    'dplyr': {
+        'pkg': 'dplyr',
+        'source': 'cran',
+        'install_msg': 'Data manipulation (R/CRAN)',
+    },
+    'DESeq2': {
+        'pkg': 'DESeq2',
+        'source': 'bioconductor',
         'install_msg': 'Differential expression (R/Bioconductor)',
     },
-    'R::DMRcaller': {
-        'r_pkg': 'DMRcaller',
+    'DMRcaller': {
+        'pkg': 'DMRcaller',
+        'source': 'bioconductor',
         'install_msg': 'Differential methylation (R/Bioconductor)',
     },
-    'R::pheatmap': {
-        'r_pkg': 'pheatmap',
+    'pheatmap': {
+        'pkg': 'pheatmap',
+        'source': 'bioconductor',
         'install_msg': 'Heatmap plotting (R)',
     },
-    'R::RNAmodR.RiboMethSeq': {
-        'r_pkg': 'RNAmodR.RiboMethSeq',
+    'RNAmodR.RiboMethSeq': {
+        'pkg': 'RNAmodR.RiboMethSeq',
+        'source': 'bioconductor',
         'install_msg': 'RiboMeth-seq analysis (R/Bioconductor)',
     },
-    'R::riboWaltz': {
-        'r_pkg': 'riboWaltz',
-        'github': 'https://github.com/LabTranslationalArchitectomics/riboWaltz',
+    'riboWaltz': {
+        'pkg': 'riboWaltz',
+        'source': 'github',
+        'github_repo': 'LabTranslationalArchitectomics/riboWaltz',
         'install_msg': 'Degradome CRI analysis (R/GitHub)',
         'mode_only': ['degradome'],
     },
-    # ── CiPS uORF analysis R packages ────────────────────────────────
-    'R::ORFik': {
-        'r_pkg': 'ORFik',
+    'ORFik': {
+        'pkg': 'ORFik',
+        'source': 'bioconductor',
         'install_msg': 'uORF detection & analysis (R/Bioconductor)',
         'mode_only': ['cips'],
     },
-    'R::NMF': {
-        'r_pkg': 'NMF',
-        'github': 'https://github.com/renozao/NMF',
+    'NMF': {
+        'pkg': 'NMF',
+        'source': 'github',
+        'github_repo': 'renozao/NMF',
+        'github_ref': 'devel',
         'install_msg': 'Non-negative matrix factorization (R)',
     },
-    'R::Seurat': {
-        'r_pkg': 'Seurat',
-        'github': 'https://github.com/satijalab/seurat',
+    'Seurat': {
+        'pkg': 'Seurat',
+        'source': 'github',
+        'github_repo': 'satijalab/seurat',
+        'extra': ['uwot'],
         'install_msg': 'Single-cell analysis (R/GitHub)',
     },
 }
+
+
+def get_r_packages_for_mode(mode=None):
+    """
+    Return list of (pkg_name, info) tuples for the given mode.
+    If mode is None, returns ALL registered R packages.
+    """
+    pkgs = []
+    for name, info in R_PACKAGE_REGISTRY.items():
+        mode_only = info.get('mode_only')
+        if mode_only and mode not in mode_only:
+            continue
+        pkgs.append((name, info))
+    return pkgs
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -239,7 +279,7 @@ DEPENDENCY_REGISTRY = {
 def install_tool(name, info, tee=None):
     """
     Install a single missing tool.
-    Tries in order: mamba/conda → pip → R → GitHub clone.
+    Tries in order: mamba/conda → pip → GitHub clone.
     Returns True if installation succeeded.
     """
     if tee is None:
@@ -267,62 +307,32 @@ def install_tool(name, info, tee=None):
             )
             tee.write(f"  {name} installed via pip\n")
             return True
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             pass
 
-    # 3. Try R / Bioconductor
-    if info.get('r_pkg'):
-        r_pkg = info['r_pkg']
-        tee.write(f"  Trying R BiocManager::install('{r_pkg}')...\n")
-        try:
-            r_cmd = (
-                f'Rscript -e \'if(!require("{r_pkg}", quietly=TRUE))'
-                f'{{BiocManager::install("{r_pkg}", update=FALSE, ask=FALSE)}}\''
-            )
-            # Handle GitHub-hosted R packages
-            if info.get('github') and 'riboWaltz' in r_pkg:
-                r_cmd = (
-                    f'Rscript -e \'if(!require("{r_pkg}", quietly=TRUE))'
-                    f'{{devtools::install_github("LabTranslationalArchitectomics/riboWaltz", '
-                    f'dependencies=TRUE)}}\''
-                )
-            elif info.get('github') and 'NMF' in r_pkg:
-                r_cmd = (
-                    f'Rscript -e \'if(!require("{r_pkg}", quietly=TRUE))'
-                    f'{{devtools::install_github("renozao/NMF@devel", '
-                    f'dependencies=TRUE)}}\''
-                )
-            elif info.get('github') and 'Seurat' in r_pkg:
-                r_cmd = (
-                    f'Rscript -e \'if(!require("{r_pkg}", quietly=TRUE))'
-                    f'{{remotes::install_github("satijalab/seurat")}}\''
-                )
-
-            subprocess.run(r_cmd, shell=True, check=True, timeout=600)
-            tee.write(f"  {name} installed via R\n")
-            return True
-        except subprocess.CalledProcessError:
-            pass
-
-    # 4. Try GitHub clone + manual install (CLIPper)
+    # 3. Try GitHub clone + manual install (CLIPper)
     github_url = info.get('github')
-    if github_url and info.get('pkg') is None and not info.get('r_pkg'):
+    if github_url and info.get('pkg') is None:
         tee.write(f"  Cloning {github_url}...\n")
         repo_name = github_url.rstrip('/').split('/')[-1].replace('.git', '')
+        clone_dir = os.path.join('/tmp', repo_name)
+        if os.path.exists(clone_dir):
+            shutil.rmtree(clone_dir, ignore_errors=True)
         try:
             subprocess.run(
-                ['git', 'clone', '--depth', '1', github_url, f'/tmp/{repo_name}'],
+                ['git', 'clone', '--depth', '1', github_url, clone_dir],
                 check=True, timeout=120
             )
             subprocess.run(
                 [sys.executable, 'setup.py', 'install'],
-                cwd=f'/tmp/{repo_name}', check=True, timeout=120
+                cwd=clone_dir, check=True, timeout=120
             )
-            subprocess.run(['rm', '-rf', f'/tmp/{repo_name}'], check=False)
             tee.write(f"  {name} installed from GitHub\n")
             return True
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             pass
+        finally:
+            shutil.rmtree(clone_dir, ignore_errors=True)
 
     tee.write(f"  Failed to auto-install {name}\n")
     return False
@@ -380,10 +390,18 @@ def install_missing(missing_list, tee=None, interactive=True):
 # 4. R package batch install (with retry)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def install_r_packages(prefix, tee=None):
+def install_r_packages(prefix, mode=None, tee=None):
     """
-    Run the bundled checkPackages.R to install all missing R packages.
-    This is the most reliable way — it uses BiocManager + devtools.
+    Run the bundled checkPackages.R to install missing R packages.
+    Filters by analysis mode for efficient, targeted installation.
+
+    Args:
+        prefix: project root (contains scripts/checkPackages.R)
+        mode:   current analysis mode (e.g. 'srna', 'cips'); None = install all
+        tee:    output handle
+
+    Returns:
+        True if all packages installed successfully, False otherwise.
     """
     if tee is None:
         tee = sys.stderr
@@ -393,14 +411,20 @@ def install_r_packages(prefix, tee=None):
         tee.write("Warning: scripts/checkPackages.R not found\n")
         return False
 
+    pkgs = get_r_packages_for_mode(mode)
+    if not pkgs:
+        tee.write("\nNo R packages required for this mode.\n")
+        return True
+
+    pkg_names = ','.join(name for name, _ in pkgs)
     tee.write("\nInstalling R packages (this may take several minutes)...\n")
     try:
         subprocess.run(
-            f"Rscript --vanilla {rscript_path}",
+            f"Rscript --vanilla {rscript_path} --packages {pkg_names}",
             shell=True, check=True, timeout=1800
         )
         tee.write("R packages installed successfully\n")
         return True
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         tee.write("Some R packages could not be installed automatically\n")
         return False

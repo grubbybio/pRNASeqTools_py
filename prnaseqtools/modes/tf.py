@@ -188,9 +188,8 @@ def run(opts):
         if not genome_size:
             sys.exit("--genome-size is required for ChIP bdgdiff (e.g. 1.35e8 for ath)")
 
-        qvalue = opts.get('qvalue', 1.0)
-        pvalue = opts.get('pvalue', 0.05)
         seq_strategy = opts.get('seq_strategy', 'paired')
+        tss_distance = opts.get('tss_distance', 3000)
         fmt = "BAMPE" if seq_strategy == 'paired' else "BAM"
 
         # ── 解析 --control / --treatment ─────────────────────────────────
@@ -305,18 +304,10 @@ def run(opts):
             for line in lines:
                 if 'fragments after filtering in control' in line:
                     parts = line.strip().split()
-                    for i, p in enumerate(parts):
-                        if 'fragments' in p and 'after' in parts[i+1:i+2]:
-                            num_str = parts[-1].replace(',', '')
-                            try:
-                                return int(num_str)
-                            except ValueError:
-                                continue
-                    # Fallback: take last field
                     try:
                         return int(parts[-1].replace(',', ''))
                     except ValueError:
-                        pass
+                        continue
             return None
 
         fragments1 = _parse_control_fragments(out1)
@@ -353,7 +344,7 @@ def run(opts):
             f"--t1 {t1_bdg} --c1 {c1_bdg} "
             f"--t2 {t2_bdg} --c2 {c2_bdg} "
             f"--d1 {d1:.2f} --d2 {d2:.2f} "
-            f"-C {diff_cutoff} "
+            f"-C {diff_cutoff:.1f} "
             f"--o-prefix {diff_prefix}"
         )
         run_cmd(diff_cmd)
@@ -453,6 +444,29 @@ def run(opts):
                 ('common', 'diff_common', g1_ip_tags + g2_ip_tags)]:
             bed = f"{diff_prefix}_{diff_suffix}_{suffix}.bed"
             _qc_peak_set(label, bed, ip_tags, 'MACS3_bdgdiff')
+
+        # ── ChIPseeker Peak Annotation & GO Enrichment (逐 peak 文件调用) ──
+        tee.write(f"\n{'='*60}\n")
+        tee.write("ChIPseeker Peak Annotation & GO Enrichment\n")
+        tee.write(f"{'='*60}\n")
+        gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
+        if not os.path.exists(gff_path):
+            tee.write(f"  GFF not found: {gff_path}, skipping annotation.\n")
+        else:
+            chipseeker_r = os.path.join(prefix, "scripts", "chipseeker.R")
+            peak_calls = [
+                (f"{group1_name}_peaks.narrowPeak", f"{group1_name}_peaks"),
+                (f"{group2_name}_peaks.narrowPeak", f"{group2_name}_peaks"),
+                (f"{diff_prefix}_{diff_suffix}_cond1.bed", f"diff_{group1_name}_enriched"),
+                (f"{diff_prefix}_{diff_suffix}_cond2.bed", f"diff_{group2_name}_enriched"),
+                (f"{diff_prefix}_{diff_suffix}_common.bed", "diff_common"),
+            ]
+            for peak_file, peak_name in peak_calls:
+                if os.path.exists(peak_file):
+                    run_cmd(
+                        f"Rscript --vanilla {chipseeker_r} "
+                        f"{genome} {prefix} {peak_file} {peak_name} {tss_distance}"
+                    )
 
         # ── Cleanup bedGraph 文件和替身 BAM ─────────────────────────────
         for pat in ["*_treat_pileup.bdg", "*_control_lambda.bdg"]:
