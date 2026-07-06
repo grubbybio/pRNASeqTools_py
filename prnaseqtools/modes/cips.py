@@ -73,10 +73,8 @@ def run(opts):
         if not os.path.exists(fpath):
             sys.exit(f"{label} not found: {fpath}")
 
-    fai_file = f"{fasta_path}.fai"
-    if not os.path.exists(fai_file):
-        tee.write("Indexing FASTA...\n")
-        run_cmd(f"samtools faidx {fasta_path}")
+    from prnaseqtools.reference import check_and_build_indices
+    check_and_build_indices(prefix, genome=genome, tee=tee)
 
     # ── Build Rscript command ─────────────────────────────────────────
     r_script = os.path.join(prefix, "scripts", "cips_uORF.R")

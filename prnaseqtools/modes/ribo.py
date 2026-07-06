@@ -535,10 +535,8 @@ def run(opts):
     if not os.path.exists(create_anno_script):
         sys.exit(f"RIBO Taper script not found: {create_anno_script}")
 
-    # Ensure genome fasta is indexed (fai)
-    fai_file = f"{fasta_path}.fai"
-    if not os.path.exists(fai_file):
-        run_cmd(f"samtools faidx {fasta_path}")
+    from prnaseqtools.reference import check_and_build_indices
+    check_and_build_indices(prefix, genome=genome, tee=tee)
 
     run_cmd(
         f"bash {create_anno_script} {expressed_gtf} {fasta_path} "

@@ -66,6 +66,11 @@ def read_fasta(prefix, genome):
     Returns dict: {chromosome_name: sequence}
     """
     fas_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
+    if not os.path.exists(fas_path):
+        raise FileNotFoundError(
+            f"Reference FASTA not found: {fas_path}\n"
+            f"Please place the genome file in reference/{genome}_chr_all.fasta"
+        )
     fas = {}
     current_name = None
     chunks = []
@@ -131,13 +136,20 @@ def read_exons(prefix, genome):
 def get_gene_info(prefix, genome):
     """
     Get gene length info (longest transcript per gene).
-    Writes 'transcripts.fa'.
+    Writes 'transcripts.fa' in CWD for downstream pipeline use.
     Returns dict: {gene: length}
     """
     exon_data = read_exons(prefix, genome)
     gene_info = {}
 
-    with open("transcripts.fa", 'w') as tra_fh:
+    try:
+        fh = open("transcripts.fa", 'w')
+    except IOError:
+        raise IOError(
+            "Cannot write transcripts.fa to current directory. "
+            "Ensure you have write permission in the working directory."
+        )
+    with fh as tra_fh:
         for gene in sorted(exon_data.keys()):
             longest = 0
             longest_seq = ""
@@ -164,6 +176,11 @@ def read_mirna_gff(prefix, genome):
     Returns dict: {mirna_id: {chromosome, strand, start, end}}
     """
     gff_path = os.path.join(prefix, "reference", f"{genome}_miRNA_miRNA_star.gff")
+    if not os.path.exists(gff_path):
+        raise FileNotFoundError(
+            f"miRNA GFF not found: {gff_path}\n"
+            f"Please place the miRNA annotation in reference/{genome}_miRNA_miRNA_star.gff"
+        )
     mir_data = {}
 
     with open(gff_path) as fh:
@@ -349,6 +366,17 @@ def read_chromosome_lengths(prefix, genome, binsize=100):
     Returns dict: {chromosome: num_bins}
     """
     fai_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta.fai")
+    if not os.path.exists(fai_path):
+        # Try auto-building .fai index
+        fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
+        if not os.path.exists(fasta_path):
+            raise FileNotFoundError(
+                f"Reference FASTA not found: {fasta_path}"
+            )
+        subprocess.run(
+            f"samtools faidx {fasta_path}",
+            shell=True, check=True, timeout=300
+        )
     lengths = {}
 
     with open(fai_path) as fh:
@@ -455,3 +483,118 @@ def primary_transcript(prefix, genome):
             m = re.search(r'transcript_id "(\w+\.\d+)"', cols[8])
             if m and m.group(1) in primary:
                 fh_out.write(line + '\n')
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Mapping index management — auto-detect and build missing indices
+# ═══════════════════════════════════════════════════════════════════════════
+
+INDEX_BUILDERS = {
+    'fai': {
+        'name': 'Samtools FAI index',
+        'build_cmd': 'samtools faidx {fasta}',
+        'check_file': '{fasta}.fai',
+        'location': 'reference',
+        'modes': None,  # all modes
+    },
+    'lsu_rrna': {
+        'name': 'LSU rRNA Bowtie1 index',
+        'build_cmd': 'bowtie-build -q {prefix}/reference/{genome}_lsu_rrna.fasta '
+                     '{prefix}/reference/lsu_rrna',
+        'check_file': '{prefix}/reference/lsu_rrna.1.ebwt',
+        'location': 'reference',
+        'modes': ['srna', 'phasi'],
+    },
+    'bowtie1_genome': {
+        'name': 'Bowtie1 genome index',
+        'build_cmd': 'bowtie-build -q {prefix}/reference/{genome}_chr_all.fasta '
+                     '{prefix}/reference/{genome}_chr_all',
+        'check_file': '{prefix}/reference/{genome}_chr_all.1.ebwt',
+        'location': 'reference',
+        'modes': ['tt'],
+    },
+}
+
+
+def _detect_genomes(prefix):
+    """Discover available genomes in the reference directory.
+    Returns list of genome names (e.g. ['ath', 'osa'])."""
+    ref_dir = os.path.join(prefix, "reference")
+    genomes = set()
+    if not os.path.isdir(ref_dir):
+        return []
+    pat = re.compile(r'^(.+)_chr_all\.fasta$')
+    for fname in os.listdir(ref_dir):
+        m = pat.match(fname)
+        if m:
+            genomes.add(m.group(1))
+    return sorted(genomes)
+
+
+def check_and_build_indices(prefix, genome=None, mode=None, tee=None):
+    """
+    Check and auto-build missing mapping indices.
+
+    Args:
+        prefix: project root directory
+        genome: genome name (e.g. 'ath'); None = auto-detect all genomes in reference/
+        mode:   analysis mode (e.g. 'srna', 'chip'); None = check all indices
+        tee:    output handle (defaults to stderr)
+
+    Returns:
+        dict: {genome: {index_name: bool}} or {index_name: bool} if single genome
+    """
+    if tee is None:
+        import sys
+        tee = sys.stderr
+
+    if genome:
+        genomes = [genome]
+    else:
+        genomes = _detect_genomes(prefix)
+
+    if not genomes:
+        tee.write("  No reference genomes found in reference/ (expected *_chr_all.fasta)\n")
+        return {}
+
+    tee.write(f"\nChecking mapping indices for: {', '.join(genomes)}\n")
+
+    all_results = {}
+    for g in genomes:
+        ref_dir = os.path.join(prefix, "reference")
+        fasta = os.path.join(ref_dir, f"{g}_chr_all.fasta")
+
+        if not os.path.exists(fasta):
+            tee.write(f"  {g}: genome FASTA not found, skipping index build\n")
+            continue
+
+        results = {}
+        for key, cfg in INDEX_BUILDERS.items():
+            mode_list = cfg.get('modes')
+            if mode and mode_list and mode not in mode_list:
+                continue
+
+            check_file = cfg['check_file'].format(prefix=prefix, genome=g,
+                                                   fasta=fasta)
+            if os.path.exists(check_file):
+                tee.write(f"  [{g}] {cfg['name']}: found\n")
+                results[key] = True
+                continue
+
+            tee.write(f"  [{g}] {cfg['name']}: not found, building...\n")
+            try:
+                cmd = cfg['build_cmd'].format(prefix=prefix, genome=g,
+                                               fasta=fasta)
+                subprocess.run(cmd, shell=True, check=True, timeout=3600)
+                tee.write(f"  [{g}] {cfg['name']}: built successfully\n")
+                results[key] = True
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                tee.write(f"  [{g}] {cfg['name']}: build failed ({e})\n")
+                results[key] = False
+
+        all_results[g] = results
+
+    # Flatten if single genome
+    if genome and genome in all_results:
+        return all_results[genome]
+    return all_results

@@ -5,6 +5,7 @@ ShortStack alignment → BAM processing → counting → DESeq2 DE analysis.
 """
 
 import os
+import re
 import sys
 import glob as globmod
 import subprocess
@@ -72,7 +73,25 @@ def run(opts):
     par_str = ' '.join(pars)
 
     if not nomapping:
+        # Core dependency: gene annotation GFF must exist
+        gene_gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
+        if not os.path.exists(gene_gff_path):
+            tee.write(f"ERROR: Gene annotation GFF not found: {gene_gff_path}\n"
+                      f"  The sRNA pipeline requires {genome}_genes.gff to proceed. Aborting.\n")
+            return
+
         ref.split_gff(prefix, genome, promoter_length)
+
+        # Detect optional resources
+        has_mirna = os.path.exists(
+            os.path.join(prefix, "reference", f"{genome}_miRNA_miRNA_star.gff"))
+        has_lsu_rrna = os.path.exists(
+            os.path.join(prefix, "reference", "lsu_rrna.1.ebwt"))
+
+        if not has_mirna:
+            tee.write("Note: miRNA GFF not found, miRNA analysis will be skipped.\n")
+        if not has_lsu_rrna:
+            tee.write("Note: LSU rRNA Bowtie index not found, rRNA filtering will be skipped.\n")
 
         # Mask setup
         if mask:
@@ -164,19 +183,23 @@ def run(opts):
                 tee.write("\nStart mapping...\n")
 
                 # rRNA filtering
-                lsu_rRNA = os.path.join(prefix, "reference", "lsu_rrna")
-                run_cmd(
-                    f"bowtie -v 2 -a -p {thread} -t {lsu_rRNA} "
-                    f"{tag}.fastq {tag}.rRNA.out"
-                )
-                subprocess.run(
-                    f"awk -F \"\\t\" 'BEGIN{{x=0;y=0;z=0}}"
-                    f"{{if($2==\"+\"){{if(/{genome}_LSU/){{x++}};"
-                    f"if(/{genome}_SSU/){{y++}};if(/{genome}_U6/){{z++}}}}}}"
-                    f"END{{print \"rRNA\\t\"x\"\\nSSU\\t\"y\"\\nU6\\t\"z}}' "
-                    f"{tag}.rRNA.out > {tag}.nf",
-                    shell=True, check=True
-                )
+                if has_lsu_rrna:
+                    lsu_rRNA = os.path.join(prefix, "reference", "lsu_rrna")
+                    run_cmd(
+                        f"bowtie -v 2 -a -p {thread} -t {lsu_rRNA} "
+                        f"{tag}.fastq {tag}.rRNA.out"
+                    )
+                    subprocess.run(
+                        f"awk -F \"\\t\" 'BEGIN{{x=0;y=0;z=0}}"
+                        f"{{if($2==\"+\"){{if(/{genome}_LSU/){{x++}};"
+                        f"if(/{genome}_SSU/){{y++}};if(/{genome}_U6/){{z++}}}}}}"
+                        f"END{{print \"rRNA\\t\"x\"\\nSSU\\t\"y\"\\nU6\\t\"z}}' "
+                        f"{tag}.rRNA.out > {tag}.nf",
+                        shell=True, check=True
+                    )
+                else:
+                    with open(f"{tag}.nf", 'w') as nf_fh:
+                        nf_fh.write("rRNA\t0\n")
 
                 # ShortStack alignment
                 run_cmd(
@@ -254,27 +277,28 @@ def run(opts):
                         normhash[parts[0]] = int(parts[1])
 
             # Pre-compute miRNA raw counts and load reference (once)
-            mir_gff = os.path.join(prefix, "reference",
-                                   f"{genome}_miRNA_miRNA_star.gff")
             mir_raw = {}
-            run_cmd(
-                f"bedtools intersect -a {mir_gff} -b {tag}.bed "
-                f"-wa -f 1 -r -c | "
-                f"awk '{{print $9\"\\t\"$10}}' > {tag}.miRNA.tmp"
-            )
-            with open(f"{tag}.miRNA.tmp") as fh:
-                for line in fh:
-                    cols = line.strip().split('\t')
-                    if len(cols) >= 2:
-                        mir_raw[cols[0]] = int(cols[1])
-            os.unlink(f"{tag}.miRNA.tmp")
+            mir_gff_inner = None
+            if has_mirna:
+                mir_gff_path = os.path.join(prefix, "reference",
+                                             f"{genome}_miRNA_miRNA_star.gff")
+                run_cmd(
+                    f"bedtools intersect -a {mir_gff_path} -b {tag}.bed "
+                    f"-wa -f 1 -r -c | "
+                    f"awk '{{print $9\"\\t\"$10}}' > {tag}.miRNA.tmp"
+                )
+                with open(f"{tag}.miRNA.tmp") as fh:
+                    for line in fh:
+                        cols = line.strip().split('\t')
+                        if len(cols) >= 2:
+                            mir_raw[cols[0]] = int(cols[1])
+                os.unlink(f"{tag}.miRNA.tmp")
+                mir_gff_inner = mir_gff_path
             fas = ref.read_fasta(prefix, genome)
 
             # Raw counting (once)
-            mir_gff_inner = os.path.join(prefix, "reference",
-                                          f"{genome}_miRNA_miRNA_star.gff")
             bed_files = _count(prefix, genome, binsize, tag, tee, fas,
-                               mir_raw, mir_gff_inner)
+                               mir_raw, mir_gff_inner, has_mirna)
 
             # Normalization per norm
             for mnorm in norms:
@@ -372,7 +396,7 @@ def _umi_dedup(tag):
                 )
 
 
-def _count(prefix, genome, binsize, tag, tee, fas, mir_raw, mir_gff):
+def _count(prefix, genome, binsize, tag, tee, fas, mir_raw, mir_gff, has_mirna=True):
     """Compute raw counts only (bins, genes, TEs, promoters, miRNAs)."""
     count_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(int))))
@@ -381,41 +405,43 @@ def _count(prefix, genome, binsize, tag, tee, fas, mir_raw, mir_gff):
     for mir_name, mir_count in mir_raw.items():
         count_data['mir_raw'][mir_name] = mir_count
 
-    # miRNA annotation counting
-    mirna_data = defaultdict(lambda: {'name': '', 'count': 0})
-    with open(mir_gff) as fh:
-        for line in fh:
-            cols = line.strip().split('\t')
-            if len(cols) < 9:
-                continue
-            miseq = fas.get(cols[0], "")[int(cols[3]) - 1:int(cols[4])]
-            if cols[6] == '-':
-                miseq = revcomp(miseq)
-            mirna_data[miseq]['name'] += cols[8] + ';'
-            mirna_data[miseq]['count'] += count_data['mir_raw'].get(cols[8], 0)
+    # miRNA annotation counting (only when GFF is available)
+    if has_mirna and mir_gff:
+        mirna_data = defaultdict(lambda: {'name': '', 'count': 0})
+        with open(mir_gff) as fh:
+            for line in fh:
+                cols = line.strip().split('\t')
+                if len(cols) < 9:
+                    continue
+                miseq = fas.get(cols[0], "")[int(cols[3]) - 1:int(cols[4])]
+                if cols[6] == '-':
+                    miseq = revcomp(miseq)
+                mirna_data[miseq]['name'] += cols[8] + ';'
+                mirna_data[miseq]['count'] += count_data['mir_raw'].get(cols[8], 0)
 
-    with open(f"{tag}.miRNA.annotated.count", 'w') as fh:
-        for miseq in sorted(mirna_data.keys()):
-            mirna_data[miseq]['name'] = mirna_data[miseq]['name'].rstrip(';')
-            fh.write(f"{mirna_data[miseq]['name']}\t{mirna_data[miseq]['count']}\n")
+        with open(f"{tag}.miRNA.annotated.count", 'w') as fh:
+            for miseq in sorted(mirna_data.keys()):
+                mirna_data[miseq]['name'] = mirna_data[miseq]['name'].rstrip(';')
+                fh.write(f"{mirna_data[miseq]['name']}\t{mirna_data[miseq]['count']}\n")
 
     # Process per-length BED files
     bed_files = [f for f in os.listdir('.') if f.startswith(tag) and f.endswith('.bed') and any(c.isdigit() for c in f.replace(tag, '').replace('.bed', ''))]
 
     for sbed in bed_files:
-        # miRNA counting per length (raw only)
-        run_cmd(
-            f"bedtools intersect -a {mir_gff} -b {sbed} -wa -f 0.95 -c | "
-            f"awk '{{print $9\"\\t\"$10}}' > {sbed}.tmp"
-        )
-        with open(f"{sbed}.tmp") as fh:
-            for line in fh:
-                cols = line.strip().split('\t')
-                if len(cols) >= 2:
-                    count_data['mir'][cols[0]][sbed]['r'] = int(cols[1])
+        # miRNA counting per length (only when GFF is available)
+        if has_mirna and mir_gff:
+            run_cmd(
+                f"bedtools intersect -a {mir_gff} -b {sbed} -wa -f 0.95 -c | "
+                f"awk '{{print $9\"\\t\"$10}}' > {sbed}.tmp"
+            )
+            with open(f"{sbed}.tmp") as fh:
+                for line in fh:
+                    cols = line.strip().split('\t')
+                    if len(cols) >= 2:
+                        count_data['mir'][cols[0]][sbed]['r'] = int(cols[1])
 
-        if os.path.exists(f"{sbed}.tmp"):
-            os.unlink(f"{sbed}.tmp")
+            if os.path.exists(f"{sbed}.tmp"):
+                os.unlink(f"{sbed}.tmp")
 
         # Bin counting
         with open(sbed) as fh:
@@ -474,7 +500,7 @@ def _count(prefix, genome, binsize, tag, tee, fas, mir_raw, mir_gff):
                 os.unlink(f"{sbed}.promoter.tmp")
 
     # Write raw count files
-    _write_raw_count_files(count_data, tag, bed_files, prefix, genome, fas, mir_gff)
+    _write_raw_count_files(count_data, tag, bed_files, prefix, genome, fas, mir_gff, has_mirna)
 
     return bed_files
 
@@ -516,7 +542,7 @@ def _make_bedgraph(sbed, prefix, genome, nrc, mnorm):
     os.unlink(bg_norm)
 
 
-def _write_raw_count_files(count_data, tag, bed_files, prefix, genome, fas, mir_gff):
+def _write_raw_count_files(count_data, tag, bed_files, prefix, genome, fas, mir_gff, has_mirna=True):
     """Write raw count files (no normalization)."""
     sbed_sorted = sorted(bed_files)
 
@@ -557,37 +583,40 @@ def _write_raw_count_files(count_data, tag, bed_files, prefix, genome, fas, mir_
                 fh.write(f"\t{r_val}")
             fh.write('\n')
 
-    # miRNA counts
-    mirna_data = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-    with open(mir_gff) as fh:
-        for line in fh:
-            cols = line.strip().split('\t')
-            if len(cols) < 9:
-                continue
-            miseq = fas.get(cols[0], "")[int(cols[3]) - 1:int(cols[4])]
-            if cols[6] == '-':
-                miseq = revcomp(miseq)
-            mirna_data[miseq]['name'] = cols[8]
-            for sbed in bed_files:
-                if cols[8] in count_data.get('mir', {}):
-                    mirna_data[miseq][sbed]['r'] += count_data['mir'][cols[8]].get(sbed, {}).get('r', 0)
+    # miRNA counts (only when GFF is available)
+    if has_mirna and mir_gff:
+        mirna_data = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+        with open(mir_gff) as fh:
+            for line in fh:
+                cols = line.strip().split('\t')
+                if len(cols) < 9:
+                    continue
+                miseq = fas.get(cols[0], "")[int(cols[3]) - 1:int(cols[4])]
+                if cols[6] == '-':
+                    miseq = revcomp(miseq)
+                mirna_data[miseq]['name'] = cols[8]
+                for sbed in bed_files:
+                    if cols[8] in count_data.get('mir', {}):
+                        mirna_data[miseq][sbed]['r'] += count_data['mir'][cols[8]].get(sbed, {}).get('r', 0)
 
-    with open(f"{tag}.miRNA.count", 'w') as fh:
-        for miseq in sorted(mirna_data.keys()):
-            mir_name = ""
-            for mir_id_data in mirna_data[miseq].values():
-                if isinstance(mir_id_data, str):
-                    mir_name += mir_id_data + ';'
-            mir_name = mir_name.rstrip(';')
-            fh.write(mir_name)
-            for sbed in sbed_sorted:
-                r_val = mirna_data[miseq].get(sbed, {}).get('r', 0)
-                fh.write(f"\t{r_val}")
-            fh.write('\n')
+        with open(f"{tag}.miRNA.count", 'w') as fh:
+            for miseq in sorted(mirna_data.keys()):
+                mir_name = ""
+                for mir_id_data in mirna_data[miseq].values():
+                    if isinstance(mir_id_data, str):
+                        mir_name += mir_id_data + ';'
+                mir_name = mir_name.rstrip(';')
+                fh.write(mir_name)
+                for sbed in sbed_sorted:
+                    r_val = mirna_data[miseq].get(sbed, {}).get('r', 0)
+                    fh.write(f"\t{r_val}")
+                fh.write('\n')
 
 
 def _make_normalized(rc, mnorm, tag, bed_files, prefix, genome):
     """Generate normalized counts and bedgraph/bigwig from raw counts."""
+    if rc == 0:
+        return
     nrc = 1000000.0 / rc
     sbed_sorted = sorted(bed_files)
 
@@ -621,6 +650,12 @@ def _stat_analysis(mnorm, prefix, genome, foldchange, pvalue, binsize,
     """Run statistical analyses via R scripts."""
     tee.write(f"\nDSR analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
 
+    # Detect optional resources
+    has_mirna = os.path.exists(
+        os.path.join(prefix, "reference", f"{genome}_miRNA_miRNA_star.gff"))
+    has_te = os.path.exists(
+        os.path.join(prefix, "reference", f"{genome}_transposons.gff"))
+
     run_cmd(
         f"Rscript --vanilla {prefix}/scripts/DSR.R {mnorm} {pvalue} {foldchange} {par_str}"
     )
@@ -640,7 +675,7 @@ def _stat_analysis(mnorm, prefix, genome, foldchange, pvalue, binsize,
                 cols = line.split(',')
                 if not cols:
                     continue
-                m = __import__('re').match(r'(\w+)_(\d+)', cols[0].strip('"'))
+                m = re.match(r'(\w+)_(\d+)', cols[0].strip('"'))
                 if m:
                     chr_name = m.group(1)
                     start = int(m.group(2)) * binsize
@@ -657,21 +692,28 @@ def _stat_analysis(mnorm, prefix, genome, foldchange, pvalue, binsize,
     for csv_file in csv_files:
         _annotate_csv(csv_file, ann)
 
-    # miRNA DE, gene DE, TE DE, promoter DE
-    tee.write(f"\nDE miRNA analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
-    run_cmd(
-        f"Rscript --vanilla {prefix}/scripts/DEM.R {mnorm} {pvalue} {foldchange} {par_str}"
-    )
+    # miRNA DE (only when GFF is available)
+    if has_mirna:
+        tee.write(f"\nDE miRNA analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
+        run_cmd(
+            f"Rscript --vanilla {prefix}/scripts/DEM.R {mnorm} {pvalue} {foldchange} {par_str}"
+        )
+    else:
+        tee.write("\nDE miRNA analysis skipped (miRNA GFF not found)\n")
 
     tee.write(f"\nDS gene analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
     run_cmd(
         f"Rscript --vanilla {prefix}/scripts/DSG.R {mnorm} {pvalue} {foldchange} {par_str}"
     )
 
-    tee.write(f"\nDS TE analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
-    run_cmd(
-        f"Rscript --vanilla {prefix}/scripts/DST.R {mnorm} {pvalue} {foldchange} {par_str}"
-    )
+    # TE DE (only when transposon GFF is available)
+    if has_te:
+        tee.write(f"\nDS TE analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
+        run_cmd(
+            f"Rscript --vanilla {prefix}/scripts/DST.R {mnorm} {pvalue} {foldchange} {par_str}"
+        )
+    else:
+        tee.write("\nDS TE analysis skipped (transposon GFF not found)\n")
 
     tee.write(f"\nDS Promoter analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")
     run_cmd(

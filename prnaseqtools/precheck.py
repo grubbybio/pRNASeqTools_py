@@ -224,6 +224,13 @@ def check_dependencies(auto_install=True, mode=None, interactive=True):
     except Exception:
         tee.write("Warning: R package check failed\n")
 
+    # ── Phase 3.5: ensure mapping indices exist ───────────────────────
+    from prnaseqtools.reference import check_and_build_indices
+    try:
+        check_and_build_indices(prefix, mode=mode, tee=tee)
+    except Exception:
+        tee.write("Warning: Index check failed\n")
+
     # ── Phase 4: fail on remaining required missing ───────────────────
     if missing:
         required_missing = [name for name, cfg in missing if cfg.get('required', True)]
