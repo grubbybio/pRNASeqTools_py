@@ -33,9 +33,8 @@ def run(opts):
 
     # Parse control
     control_dict = _parse_to_dict(opts.get('control', ''))
-    tags, files, _ = parse_input(control_dict)
+    tags, files, pars = parse_input(control_dict)
 
-    pars_list = []
     treatment = opts.get('treatment')
     if treatment:
         for t in (treatment if isinstance(treatment, list) else [treatment]):
@@ -43,9 +42,9 @@ def run(opts):
             t_tags, t_files, t_pars = parse_input(treatment_dict)
             tags.extend(t_tags)
             files.extend(t_files)
-            pars_list = t_pars
+            pars.extend(t_pars)
 
-    par_str = ' '.join(tags)
+    par_str = ' '.join(pars)
 
     if not nomapping:
         ref.get_gene_info(prefix, genome)
@@ -56,7 +55,7 @@ def run(opts):
 
         # Build transcriptome index
         if os.path.exists("Genome"):
-            run_cmd("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome")
         os.makedirs("Genome", exist_ok=True)
         run_cmd(
             f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
@@ -64,7 +63,7 @@ def run(opts):
 
         # Build genome index
         if os.path.exists("Genome2"):
-            run_cmd("rm -rf Genome2", shell=True)
+            run_cmd("rm -rf Genome2")
         os.makedirs("Genome2", exist_ok=True)
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
         run_cmd(
@@ -160,7 +159,7 @@ def run(opts):
                 os.unlink(fname)
         for d in ("Genome", "Genome2"):
             if os.path.exists(d):
-                run_cmd(f"rm -rf {d}", shell=True)
+                run_cmd(f"rm -rf {d}")
 
     else:
         # No mapping mode
@@ -295,4 +294,4 @@ def _find_peaks(thread, prefix, genome, sirna, tags):
         os.rmdir("output")
 
     os.chdir("..")
-    run_cmd("rm -rf sparta", shell=True)
+    run_cmd("rm -rf sparta")

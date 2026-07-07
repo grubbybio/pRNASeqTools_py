@@ -117,7 +117,7 @@ def run(opts):
                 if os.path.exists(fname):
                     os.unlink(fname)
             if os.path.exists(f"ShortStack_{tag}"):
-                run_cmd(f"rm -rf ShortStack_{tag}", shell=True)
+                run_cmd(f"rm -rf ShortStack_{tag}")
 
         _phasi_analysis(pars, period, norms, prefix, genome, binsize, phasing_score_cutoff, tee)
     else:

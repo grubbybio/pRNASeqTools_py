@@ -42,7 +42,7 @@ def run(opts):
         adaptor = ADAPTOR_ALIASES[adaptor.lower()]
     prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
     mmap = opts.get('mmap', 'u')
-    control = opts.get('control')
+    control = opts.get('control', '')
     treatment = opts.get('treatment')
     nomapping = opts.get('no_mapping', False)
     mappingonly = opts.get('mapping_only', False)

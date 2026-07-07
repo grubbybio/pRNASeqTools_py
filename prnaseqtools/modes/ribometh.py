@@ -4,6 +4,7 @@ STAR alignment to transcriptome → RNAmodR analysis.
 """
 
 import os
+import re
 import sys
 import glob as globmod
 import subprocess
@@ -58,7 +59,7 @@ def run(opts):
                 for line in fh:
                     line = line.strip()
                     if line.startswith('>'):
-                        m = __import__('re').match(r'(\w+)\.(\d+)', line[1:])
+                        m = re.match(r'(\w+)\.(\d+)', line[1:])
                         if m:
                             gene_id = m.group(1)
                             gene_seq[gene_id]['transcriptID'] = m.group(2)
@@ -69,8 +70,8 @@ def run(opts):
             os.unlink("transcripts.fa")
         else:
             ref_path = _resolve_path(reference)
-            os.symlink(f"{ref_path}.fa" if os.path.exists(f"{ref_path}.fa") else ref_path, "reference.fa")
-            with open("reference.fa") as fh:
+            src = f"{ref_path}.fa" if os.path.exists(f"{ref_path}.fa") else ref_path
+            with open(src) as fh:
                 for line in fh:
                     line = line.strip()
                     if line.startswith('>'):
@@ -94,7 +95,7 @@ def run(opts):
 
         # STAR index
         if os.path.exists("Genome"):
-            run_cmd("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome")
         os.makedirs("Genome", exist_ok=True)
 
         run_cmd(
@@ -121,7 +122,7 @@ def run(opts):
                         os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
                     run_cmd(
                         f"STAR --genomeDir Genome --seedSearchStartLmax 15 "
-                        f"--outSAMtype SAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
+                        f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
                         f"--readFilesIn {tag}.fastq")
@@ -140,7 +141,7 @@ def run(opts):
                         os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                     run_cmd(
                         f"STAR --genomeDir Genome --seedSearchStartLmax 15 "
-                        f"--outSAMtype SAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
+                        f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
                         f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
@@ -212,21 +213,21 @@ def run(opts):
                         continue
 
                     cigar = cols[5]
-                    m = __import__('re').match(r'^(\d+)M$', cigar)
+                    m = re.match(r'^(\d+)M$', cigar)
                     if not m:
                         continue
                     map_len = int(m.group(1))
                     flag = cols[1]
                     pos = int(cols[3])
 
-                    if not flag or flag == '0':
+                    if int(flag) & 16 == 0:
                         ends[ref_name][pos] += 1
                         if map_len < read_length:
                             ends[ref_name][pos + map_len] += 1
                     else:
                         ends[ref_name][pos + map_len] += 1
                         if map_len < read_length:
-                            ends[ref_name][pos - 1] += 1
+                            ends[ref_name][max(pos - 1, 1)] += 1
 
                     fh_out.write(line)
 
@@ -252,11 +253,11 @@ def run(opts):
         for fname in ("reference.fa", "reference.gff"):
             if os.path.exists(fname):
                 os.unlink(fname)
-        for fname in globmod.glob("*.bt2") + globmod.glob("Log.*") + ["SJ.out.tab"]:
+        for fname in globmod.glob("Log.*") + ["SJ.out.tab"]:
             if os.path.exists(fname):
                 os.unlink(fname)
         if os.path.exists("Genome"):
-            run_cmd("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome")
 
 
 def _parse_to_dict(arg_str):

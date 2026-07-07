@@ -48,7 +48,7 @@ def run(opts):
 
         tee.write("\nBuilding STAR genome index ...\n")
         if os.path.exists("Genome"):
-            run_cmd("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome")
         os.makedirs("Genome", exist_ok=True)
 
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
@@ -147,7 +147,7 @@ def run(opts):
             if os.path.exists(fname):
                 os.unlink(fname)
         if os.path.exists("Genome"):
-            run_cmd("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome")
 
         if not mappingonly and len(pars) > 1:
             _differential_analysis(pars, prefix, pvalue, foldchange, tee)

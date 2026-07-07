@@ -28,7 +28,7 @@ def run(opts):
     pvalue = opts.get('pvalue', 0.01)
     fdr = opts.get('fdr', 1.0)
     run_mode = opts.get('run_mode', 1)
-    control = opts.get('control')
+    control = opts.get('control', '')
     treatment = opts.get('treatment')
     norm = opts.get('deseq2_norm', 'DESeq2')
     mask = opts.get('mask')
@@ -64,7 +64,7 @@ def run(opts):
         tee.write("\nBuilding STAR genome index ...\n")
 
         if os.path.exists("Genome"):
-            run_cmd("rm -rf Genome", shell=True)
+            run_cmd("rm -rf Genome")
         os.makedirs("Genome", exist_ok=True)
 
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")

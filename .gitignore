@@ -51,6 +51,7 @@ Thumbs.db
 # ── IDE / Editor ─────────────────────────────────────────────────────
 .vscode/
 .idea/
+.codebuddy/
 *.swp
 *.swo
 *~

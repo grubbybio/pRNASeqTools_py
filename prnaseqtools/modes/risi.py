@@ -97,7 +97,7 @@ def run(opts):
                     if os.path.exists(fname):
                         os.unlink(fname)
                 if os.path.exists(f"ShortStack_{tag}"):
-                    run_cmd(f"rm -rf ShortStack_{tag}", shell=True)
+                    run_cmd(f"rm -rf ShortStack_{tag}")
             else:
                 # BAM input: detect condensed format
                 condensed = bam_is_condensed(f"{tag}.bam")

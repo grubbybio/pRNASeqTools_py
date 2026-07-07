@@ -231,7 +231,7 @@ def run(opts):
     # Build STAR genome index for RNA-seq
     star_rna_index = "STAR_RNA_index"
     if os.path.exists(star_rna_index):
-        run_cmd(f"rm -rf {star_rna_index}", shell=True)
+        run_cmd(f"rm -rf {star_rna_index}")
     os.makedirs(star_rna_index, exist_ok=True)
 
     run_cmd(
