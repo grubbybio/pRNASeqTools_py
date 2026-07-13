@@ -71,11 +71,6 @@ def validate_options(opts):
     if mmap is not None and mmap not in 'ufrn':
         sys.exit('Please use a supported strategy for mapping!')
 
-    # Length validation
-    length = opts.get('length')
-    if length is not None and (length < 18 or length > 42):
-        sys.exit('Please specify an appropriate length of preferred small RNAs!')
-
     # nomapping + mappingonly conflict
     if opts.get('no_mapping') and opts.get('mapping_only'):
         sys.exit('Parameter conflict: nomapping and mappingonly!')
@@ -99,11 +94,6 @@ def validate_options(opts):
     spike_in = opts.get('spike_in')
     if spike_in is not None and not spike_in.endswith(('.fasta', '.fa')):
         sys.exit('Please specify a fasta file for spike-in!')
-
-    # Style validation
-    style = opts.get('style')
-    if style is not None and style not in ('histone', 'factor', 'tss'):
-        sys.exit('Please select the correct style!')
 
     # Targets validation
     targets = opts.get('targets')

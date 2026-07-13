@@ -8,6 +8,8 @@ import subprocess
 import sys
 import os
 import re
+import json
+import hashlib
 from pathlib import Path
 
 
@@ -29,6 +31,75 @@ def _get_version(cmd, pattern=None):
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. Check definitions — maps binary name → version check + install info
 # ═══════════════════════════════════════════════════════════════════════════
+
+_CACHE_DIR = Path(__file__).resolve().parent.parent / '.cache'
+_CACHE_FILE = _CACHE_DIR / 'precheck_cache.json'
+
+
+def _get_cache_key(mode):
+    """Generate a cache key based on environment and mode."""
+    env_info = []
+    
+    env_info.append(os.environ.get('PATH', ''))
+    env_info.append(os.environ.get('CONDA_PREFIX', ''))
+    env_info.append(os.environ.get('VIRTUAL_ENV', ''))
+    env_info.append(sys.executable)
+    
+    key = hashlib.md5(('|'.join(env_info) + f'|{mode}').encode()).hexdigest()
+    return key
+
+
+def _load_cache():
+    """Load cached dependency check results."""
+    if not _CACHE_FILE.exists():
+        return {}
+    try:
+        with open(_CACHE_FILE, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_cache(cache):
+    """Save dependency check results to cache."""
+    _CACHE_DIR.mkdir(exist_ok=True)
+    with open(_CACHE_FILE, 'w') as f:
+        json.dump(cache, f)
+
+
+def _get_conda_packages():
+    """Get list of installed packages in current conda environment."""
+    conda_prefix = os.environ.get('CONDA_PREFIX', '')
+    if not conda_prefix:
+        return ''
+    
+    try:
+        result = subprocess.run(
+            ['conda', 'list', '--prefix', conda_prefix, '--json'],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            pkgs = json.loads(result.stdout)
+            pkg_list = [f"{p['name']}={p['version']}" for p in pkgs]
+            pkg_list.sort()
+            return '\n'.join(pkg_list)
+    except Exception:
+        pass
+    
+    return ''
+
+
+def _get_env_fingerprint():
+    """Generate a fingerprint of the current environment."""
+    parts = []
+    parts.append(os.environ.get('PATH', ''))
+    parts.append(os.environ.get('CONDA_PREFIX', ''))
+    parts.append(os.environ.get('VIRTUAL_ENV', ''))
+    parts.append(sys.executable)
+    parts.append(_get_conda_packages())
+    
+    return hashlib.md5('|'.join(parts).encode()).hexdigest()
+
 
 _CHECK_DEFS = {
     'cutadapt': {
@@ -166,6 +237,17 @@ def check_dependencies(auto_install=True, mode=None, interactive=True):
 
     prefix = str(Path(__file__).resolve().parent.parent)
 
+    cache_key = _get_cache_key(mode)
+    cache = _load_cache()
+    
+    if cache_key in cache:
+        cached_env = cache[cache_key].get('env_fingerprint')
+        current_env = _get_env_fingerprint()
+        if cached_env == current_env:
+            tee.write("\nSkipping dependency check (cache valid)...\n")
+            tee.write("Precheck completed!\n\n")
+            return
+
     tee.write("\nChecking dependent software...\n")
 
     # ── Phase 1: check all tools, collect missing ─────────────────────
@@ -241,5 +323,11 @@ def check_dependencies(auto_install=True, mode=None, interactive=True):
             )
             tee.write("Install them manually or run with --auto-install\n")
             sys.exit(1)
+
+    cache[cache_key] = {
+        'env_fingerprint': _get_env_fingerprint(),
+        'mode': mode,
+    }
+    _save_cache(cache)
 
     tee.write("Precheck completed!\n\n")

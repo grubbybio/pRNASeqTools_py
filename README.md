@@ -94,9 +94,8 @@ python pRNASeqTools_run.py ribo \
 python pRNASeqTools_run.py chip --treatment "IP=data/ip.bam" --control "Input=data/input.bam"
 
 # ChIP-seq (MACS3 + bdgdiff — two-group differential peaks)
-python pRNASeqTools_run.py chip --peak-caller macs3 --genome-size 1.35e8 \
-  --control  "Input_WT=SRR111"  --treatment  "IP_WT=SRR222" \
-  --control2 "Input_mut=SRR333" --treatment2 "IP_mut=SRR444"
+python pRNASeqTools_run.py tf -c "WT=input,3,IP,3" -p "KO=input,3,IP,3" \
+  --mode_tf chip --genome-size 1.35e8
 
 # ATAC-seq (MACS3)
 python pRNASeqTools_run.py atac --peak-caller macs3 --genome-size 1.35e8 \
@@ -161,11 +160,11 @@ STAR-based mRNA-seq with featureCounts quantification and DESeq2 differential ex
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--run_mode` | `1` | 1=full, 2=alignment+count, 3=BAM→DE, 4=count-table→DE |
-| `--seq_strategy` | — | `single` or `paired` |
+| `--mode_mrna` | `1` | 1=full, 2=alignment+count, 3=BAM→DE, 4=count-table→DE |
+| `--seqstrategy` | — | `single` or `paired` |
 | `--total` | — | Total RNA mode (include ncRNA in GTF) |
-| `--genome_size` | `10` | STAR genomeSAindexNbases |
-| `--deseq2_norm` | `DESeq2` | Normalization: `DESeq2` or `RPM` |
+| `--genomesize` | `10` | STAR genomeSAindexNbases |
+| `--deseq2norm` | `DESeq2` | Normalization: `DESeq2` or `RPM` |
 | `--foldchange` | `2.0` | Fold-change cutoff |
 | `--fdr` | `1.0` | FDR cutoff |
 | `--mask` | — | Mask FASTA for filtering |
@@ -210,6 +209,7 @@ Identifies phased secondary siRNA (phasiRNA) loci with phasing score calculation
 | `--mmap` | `u` | ShortStack multimap strategy |
 | `--norm` | `rRNA,total` | Normalization |
 | `--binsize` | `100` | Window size |
+| `--no-mapping` | — | Skip alignment |
 
 ---
 
@@ -309,7 +309,6 @@ BAM → macs3 callpeak (per group, ATAC-specific params) → macs3 bdgdiff → d
 | `--auc` | `20` | AUC threshold (Genrich) |
 | `--qvalue` | `1.0` | Q-value cutoff |
 | `--pvalue` | `0.01` | P-value cutoff |
-| `--seq_strategy` | `paired` | `single` or `paired` |
 | `--tss-distance` | `3000` | TSS distance for ChIPseeker annotation |
 | `--no-mapping` | — | Skip alignment |
 | `--mapping-only` | — | Alignment only |
