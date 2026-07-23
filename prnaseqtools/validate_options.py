@@ -6,7 +6,8 @@ Mirrors the Perl validate_options.pm module.
 import os
 import sys
 import shutil
-from pathlib import Path
+
+from prnaseqtools.input_parser import ADAPTOR_ALIASES
 
 
 def validate_options(opts):
@@ -25,24 +26,14 @@ def validate_options(opts):
     # Change to output directory
     os.chdir(outdir)
 
-    # Adaptor shortcuts (keep in sync with modes/srna.py ADAPTOR_ALIASES)
-    adaptor_aliases = {
-        'truseq':   'TGGAATTCTCGGG',   # TruSeq sRNA 3'
-        'illumina': 'TGGAATTCTCGGG',
-        'srna':     'TGGAATTCTCGGG',
-        'neb':      'AGATCGGAAGAGC',   # NEB small RNA
-        'nextera':  'CTGTCTCTTATAC',   # Nextera
-    }
+    # Adaptor shortcuts (ADAPTOR_ALIASES shared from input_parser)
     adaptor = opts.get('adaptor')
-    if adaptor and adaptor.lower() in adaptor_aliases:
-        opts['adaptor'] = adaptor_aliases[adaptor.lower()]
+    if adaptor and adaptor.lower() in ADAPTOR_ALIASES:
+        opts['adaptor'] = ADAPTOR_ALIASES[adaptor.lower()]
 
     adaptor2 = opts.get('adaptor2')
-    if adaptor2 and adaptor2.lower() in adaptor_aliases:
-        opts['adaptor2'] = adaptor_aliases[adaptor2.lower()]
-    elif adaptor2 and adaptor2.lower() == 'nextera':
-        # adaptor2 uses a shorter version of the Nextera sequence
-        opts['adaptor2'] = 'CTGTCTCTTATA'
+    if adaptor2 and adaptor2.lower() in ADAPTOR_ALIASES:
+        opts['adaptor2'] = ADAPTOR_ALIASES[adaptor2.lower()]
 
     # Thread validation
     thread = opts.get('thread')
@@ -102,16 +93,12 @@ def validate_options(opts):
 
     # BAM mode requires seq strategy
     run_mode = opts.get('run_mode')
-    if run_mode == 3 and not opts.get('seq_strategy'):
+    if run_mode == 'bam' and not opts.get('seq_strategy'):
         sys.exit('Please provide the library type when input files are in the bam format!')
 
     # siRNA validation
     si_rnas = opts.get('si_rnas')
     if si_rnas is not None and si_rnas != 'none' and not os.path.exists(si_rnas):
         sys.exit('Cannot find the siRNA list in fasta format!')
-
-    # Store start_time for use by downstream code
-    from prnaseqtools.cli import START_TIME
-    opts['_start_time'] = START_TIME
 
     return opts

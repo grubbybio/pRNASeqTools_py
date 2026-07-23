@@ -2,11 +2,47 @@
 Input file parser for pRNASeqTools.
 Parses control/treatment sample specifications into tags, file paths, and replicate counts.
 Mirrors the Perl input.pm module.
+
+Also hosts shared helpers used across mode scripts:
+  - parse_input: sample dict → tags/files/pars
+  - _parse_to_dict: 'name=value' arg → {name: value}
+  - _resolve_path: resolve ~ and relative paths (relative to parent of outdir)
+  - ADAPTOR_ALIASES: adaptor shortcut table (shared with validate_options)
 """
 
 import os
 import re
 from pathlib import Path
+
+
+# ── Adaptor alias table (all ≥ 13 nt for cutadapt specificity) ──────────
+# Single source of truth — imported by validate_options.py and modes/srna.py.
+ADAPTOR_ALIASES = {
+    'truseq':   'TGGAATTCTCGGG',   # TruSeq sRNA 3'
+    'illumina': 'TGGAATTCTCGGG',
+    'srna':     'TGGAATTCTCGGG',
+    'neb':      'AGATCGGAAGAGC',   # NEB small RNA
+    'nextera':  'CTGTCTCTTATAC',   # Nextera
+}
+
+
+def _parse_to_dict(arg_str):
+    """Parse 'name=value' string to dict. Empty/missing → {}."""
+    parts = arg_str.split('=')
+    if len(parts) == 2:
+        return {parts[0]: parts[1]}
+    return {}
+
+
+def _resolve_path(filepath):
+    """Resolve file path: expand ~, treat relative paths as relative to
+    the parent of the current working directory (i.e. the project root
+    when running inside an output dir)."""
+    if filepath.startswith('~/'):
+        return os.path.expanduser(filepath)
+    elif not filepath.startswith('/'):
+        return os.path.abspath(os.path.join('..', filepath))
+    return filepath
 
 
 def parse_input(sample_dict):

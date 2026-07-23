@@ -80,8 +80,10 @@ def build_parser():
     p = sub.add_parser('mrna', help='mRNA-seq analysis')
     add_common_args(p)
     p.add_argument('--total', action='store_true', help='Total RNA-seq (incl. ncRNA)')
-    p.add_argument('--mode_mrna', default=1, type=int, dest='run_mode',
-                   help='1=fastq, 2=mapping+count, 3=bam, 4=count-table')
+    p.add_argument('--mode_mrna', default='whole', dest='run_mode',
+                   choices=['whole', 'mapping-only', 'bam', 'count-table'],
+                   help='whole=mapping+count+DE, mapping-only=mapping+count, '
+                        'bam=from BAM, count-table=from count table')
     p.add_argument('--foldchange', default=2.0, type=float, help='FC threshold')
     p.add_argument('--pvalue', default=0.01, type=float, help='P-value threshold')
     p.add_argument('--fdr', default=1.0, type=float, help='FDR threshold')

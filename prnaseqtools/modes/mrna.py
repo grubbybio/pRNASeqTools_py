@@ -11,7 +11,8 @@ import subprocess
 from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
-from prnaseqtools.input_parser import parse_input
+from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
+                                        _resolve_path)
 from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
 
 
@@ -27,7 +28,7 @@ def run(opts):
     foldchange = opts.get('foldchange', 2.0)
     pvalue = opts.get('pvalue', 0.01)
     fdr = opts.get('fdr', 1.0)
-    run_mode = opts.get('run_mode', 1)
+    run_mode = opts.get('run_mode', 'whole')
     control = opts.get('control', '')
     treatment = opts.get('treatment')
     norm = opts.get('deseq2_norm', 'DESeq2')
@@ -36,9 +37,9 @@ def run(opts):
     seq_strategy = opts.get('seq_strategy')
     genome_size = opts.get('genome_size', 10)
 
-    mapping = run_mode not in (3, 4)
-    do_count = run_mode != 4
-    do_de = run_mode != 2
+    mapping = run_mode in ('whole', 'mapping-only')
+    do_count = run_mode != 'count-table'
+    do_de = run_mode != 'mapping-only'
 
     # Parse inputs
     control_dict = _parse_to_dict(control)
@@ -247,21 +248,6 @@ def run(opts):
         else:
             for fname in globmod.glob("*_?.txt"):
                 os.unlink(fname)
-
-
-def _parse_to_dict(arg_str):
-    parts = arg_str.split('=')
-    if len(parts) == 2:
-        return {parts[0]: parts[1]}
-    return {}
-
-
-def _resolve_path(filepath):
-    if filepath.startswith('~/'):
-        return os.path.expanduser(filepath)
-    elif not filepath.startswith('/'):
-        return os.path.abspath(os.path.join('..', filepath))
-    return filepath
 
 
 def _count_bam(tag, thread, seq_strategy, prefix, genome):

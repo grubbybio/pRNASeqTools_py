@@ -11,7 +11,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
-from prnaseqtools.input_parser import parse_input
+from prnaseqtools.input_parser import parse_input, _parse_to_dict
 from prnaseqtools.functions import (download_sra, unzip_file, _tee,
                                      bam_is_condensed, expand_bed_by_xw,
                                      run_cmd)
@@ -39,14 +39,12 @@ def run(opts):
     tags, files, pars = parse_input(control_dict)
 
     if opts.get('treatment'):
-        treatment_opt = opts.get('treatment', '')
-        if isinstance(treatment_opt, list):
-            treatment_opt = treatment_opt[0] if treatment_opt else ''
-        treatment_dict = _parse_to_dict(treatment_opt)
-        t_tags, t_files, t_pars = parse_input(treatment_dict)
-        tags.extend(t_tags)
-        files.extend(t_files)
-        pars.extend(t_pars)
+        for t in (opts['treatment'] if isinstance(opts['treatment'], list) else [opts['treatment']]):
+            treatment_dict = _parse_to_dict(t)
+            t_tags, t_files, t_pars = parse_input(treatment_dict)
+            tags.extend(t_tags)
+            files.extend(t_files)
+            pars.extend(t_pars)
 
     par_str = ' '.join(pars)
 
@@ -161,13 +159,6 @@ def run(opts):
 
     for fname in globmod.glob("*.gff"):
         os.unlink(fname)
-
-
-def _parse_to_dict(arg_str):
-    parts = arg_str.split('=')
-    if len(parts) == 2:
-        return {parts[0]: parts[1]}
-    return {}
 
 
 def _count_risi(mnorm, rc, prefix, genome, binsize, tag, tee):

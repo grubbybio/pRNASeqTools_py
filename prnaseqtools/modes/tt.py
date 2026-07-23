@@ -13,7 +13,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
-from prnaseqtools.input_parser import parse_input
+from prnaseqtools.input_parser import parse_input, _parse_to_dict
 from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee, run_cmd
 from prnaseqtools import reference as ref
 
@@ -33,14 +33,12 @@ def run(opts):
     tags, files, pars = parse_input(control_dict)
 
     if opts.get('treatment'):
-        treatment_opt = opts.get('treatment', '')
-        if isinstance(treatment_opt, list):
-            treatment_opt = treatment_opt[0] if treatment_opt else ''
-        treatment_dict = _parse_to_dict(treatment_opt)
-        t_tags, t_files, t_pars = parse_input(treatment_dict)
-        tags.extend(t_tags)
-        files.extend(t_files)
-        pars.extend(t_pars)
+        for t in (opts['treatment'] if isinstance(opts['treatment'], list) else [opts['treatment']]):
+            treatment_dict = _parse_to_dict(t)
+            t_tags, t_files, t_pars = parse_input(treatment_dict)
+            tags.extend(t_tags)
+            files.extend(t_files)
+            pars.extend(t_pars)
 
     fas = ref.read_fasta(prefix, genome)
 
@@ -226,13 +224,6 @@ def run(opts):
     par_str = ' '.join(map(str, pars))
     run_cmd(
         f"Rscript --vanilla {prefix}/scripts/bubble_plot.R {par_str}")
-
-
-def _parse_to_dict(arg_str):
-    parts = arg_str.split('=')
-    if len(parts) == 2:
-        return {parts[0]: parts[1]}
-    return {}
 
 
 def _process_mir(prefix, genome, tag, fas):

@@ -77,7 +77,7 @@ python pRNASeqTools_run.py mrna -c "WT=SRR111111" -t "mut=SRR222222"
 
 # mRNA-seq — start from BAM files
 python pRNASeqTools_run.py mrna -c "WT=data/WT.bam" -t "mut=data/mut.bam" \
-  --mode_mrna 3 --seqstrategy paired
+  --mode_mrna bam --seqstrategy paired
 
 # Degradome-seq — miRNA target cleavage analysis
 python pRNASeqTools_run.py degradome -c "WT=data/degradome.fq" \
@@ -160,7 +160,7 @@ STAR-based mRNA-seq with featureCounts quantification and DESeq2 differential ex
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--mode_mrna` | `1` | 1=full, 2=alignment+count, 3=BAM→DE, 4=count-table→DE |
+| `--mode_mrna` | `whole` | `whole`=full pipeline, `mapping-only`=alignment+count, `bam`=BAM→DE, `count-table`=count-table→DE |
 | `--seqstrategy` | — | `single` or `paired` |
 | `--total` | — | Total RNA mode (include ncRNA in GTF) |
 | `--genomesize` | `10` | STAR genomeSAindexNbases |

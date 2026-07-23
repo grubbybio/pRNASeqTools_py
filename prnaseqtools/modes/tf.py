@@ -10,19 +10,14 @@ import subprocess
 from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
+from prnaseqtools.functions import _tee, run_cmd
 from prnaseqtools import reference as ref
 
 
 def run(opts):
     """Main entry point for two-factor DE analysis."""
     opts = validate_options(opts)
-    tee = sys.stderr
-
-    try:
-        from prnaseqtools.functions import _tee, run_cmd
-        tee = _tee()
-    except Exception:
-        pass
+    tee = _tee()
 
     prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
     foldchange = opts.get('foldchange', 1.5)

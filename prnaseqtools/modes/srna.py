@@ -13,21 +13,12 @@ from pathlib import Path
 from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
-from prnaseqtools.input_parser import parse_input
+from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
+                                        _resolve_path, ADAPTOR_ALIASES)
 from prnaseqtools.functions import (download_sra, unzip_file, revcomp, _tee,
                                      bam_is_condensed, expand_bed_by_xw,
                                      run_cmd)
 from prnaseqtools import reference as ref
-
-
-# ── Adaptor alias table (all ≥ 13 nt for cutadapt specificity) ──────────
-ADAPTOR_ALIASES = {
-    'truseq':    'TGGAATTCTCGGG',   # TruSeq sRNA 3'
-    'illumina':  'TGGAATTCTCGGG',
-    'srna':      'TGGAATTCTCGGG',
-    'neb':       'AGATCGGAAGAGC',   # NEB small RNA
-    'nextera':   'CTGTCTCTTATAC',   # Nextera
-}
 
 
 def run(opts):
@@ -347,23 +338,6 @@ def run(opts):
     for fname in globmod.glob("*.gff"):
         if fname not in ("gene.gff", "te.gff", "promoter.gff"):
             os.unlink(fname)
-
-
-def _parse_to_dict(arg_str):
-    """Parse 'name=value' string to dict."""
-    parts = arg_str.split('=')
-    if len(parts) == 2:
-        return {parts[0]: parts[1]}
-    return {}
-
-
-def _resolve_path(filepath):
-    """Resolve file path (handle ~, relative paths)."""
-    if filepath.startswith('~/'):
-        return os.path.expanduser(filepath)
-    elif not filepath.startswith('/'):
-        return os.path.abspath(os.path.join('..', filepath))
-    return filepath
 
 
 def _umi_dedup(tag):

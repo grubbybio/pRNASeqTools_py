@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
-from prnaseqtools.input_parser import parse_input
+from prnaseqtools.input_parser import parse_input, _parse_to_dict
 from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
 
 
@@ -185,13 +185,6 @@ def run(opts):
         for pre in tags:
             if os.path.exists(f"{pre}.sorted.name.bam"):
                 os.unlink(f"{pre}.sorted.name.bam")
-
-
-def _parse_to_dict(arg_str):
-    parts = arg_str.split('=')
-    if len(parts) == 2:
-        return {parts[0]: parts[1]}
-    return {}
 
 
 def _peak_qc(ip_tag, narrow_file, ip_bam_list, tee, caller='MACS3'):

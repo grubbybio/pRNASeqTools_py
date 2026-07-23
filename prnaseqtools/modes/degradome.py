@@ -12,7 +12,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
-from prnaseqtools.input_parser import parse_input
+from prnaseqtools.input_parser import parse_input, _parse_to_dict
 from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee, run_cmd
 from prnaseqtools import reference as ref
 
@@ -188,13 +188,6 @@ def run(opts):
                 os.unlink(fname)
         for fname in globmod.glob("*.bam"):
             os.unlink(fname)
-
-
-def _parse_to_dict(arg_str):
-    parts = arg_str.split('=')
-    if len(parts) == 2:
-        return {parts[0]: parts[1]}
-    return {}
 
 
 def _calculate_cri(tags, targets):

@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
-from prnaseqtools.input_parser import parse_input
+from prnaseqtools.input_parser import parse_input, _parse_to_dict
 from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
 
 
@@ -48,16 +48,19 @@ def run(opts):
         files.extend(i_files)
         genrich_input = "-c " + ','.join(f"{t}.sorted.name.bam" for t in i_tags)
 
+    # Parse IP (treatment) — pool all --treatment entries as one IP group
     ip_opt = opts.get('treatment', '')
-    if isinstance(ip_opt, list):
-        ip_opt = ip_opt[0] if ip_opt else ''
-    ip_dict = _parse_to_dict(ip_opt)
-    i_tags, i_files, _ = parse_input(ip_dict)
-    tags.extend(i_tags)
-    files.extend(i_files)
-    genrich_ip = "-t " + ','.join(f"{t}.sorted.name.bam" for t in i_tags)
-    ip_tag = i_tags[0] if i_tags else 'ip'
-    ip_tags = list(i_tags)
+    if isinstance(ip_opt, str):
+        ip_opt = [ip_opt] if ip_opt else []
+    ip_tags = []
+    for ip_str in ip_opt:
+        ip_dict = _parse_to_dict(ip_str)
+        i_tags, i_files, _ = parse_input(ip_dict)
+        ip_tags.extend(i_tags)
+        tags.extend(i_tags)
+        files.extend(i_files)
+    genrich_ip = "-t " + ','.join(f"{t}.sorted.name.bam" for t in ip_tags) if ip_tags else ""
+    ip_tag = ip_tags[0] if ip_tags else 'ip'
 
     # Parse group2 for MACS3 bdgdiff
     ip2_tags = []
@@ -172,13 +175,6 @@ def run(opts):
         for pre in tags:
             if os.path.exists(f"{pre}.sorted.name.bam"):
                 os.unlink(f"{pre}.sorted.name.bam")
-
-
-def _parse_to_dict(arg_str):
-    parts = arg_str.split('=')
-    if len(parts) == 2:
-        return {parts[0]: parts[1]}
-    return {}
 
 
 def _peak_stats(peak_file, label, tee):

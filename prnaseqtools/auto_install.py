@@ -115,6 +115,12 @@ DEPENDENCY_REGISTRY = {
     'bgzip': {
         'pkg': 'htslib', 'channel': 'bioconda',
         'install_msg': 'Tabix/BGZip compression (WGBS)',
+        'mode_only': ['wgbs'],
+    },
+    'tabix': {
+        'pkg': 'htslib', 'channel': 'bioconda',
+        'install_msg': 'Tabix indexing (WGBS)',
+        'mode_only': ['wgbs'],
     },
 
     # ── Mode-specific tools ────────────────────────────────────────────
@@ -153,8 +159,8 @@ DEPENDENCY_REGISTRY = {
     # ── Peak callers ────────────────────────────────────────────────
     'macs3': {
         'pkg': 'macs3', 'channel': 'bioconda',
-        'install_msg': 'MACS3 peak caller (ChIP/ATAC)',
-        'mode_only': ['chip', 'atac'],
+        'install_msg': 'MACS3 peak caller (ChIP/ATAC/TF)',
+        'mode_only': ['chip', 'atac', 'tf'],
     },
 
     # ── RIBO Taper / Ribo-seq tools ──────────────────────────────────

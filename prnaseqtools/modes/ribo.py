@@ -22,7 +22,7 @@ import subprocess
 from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
-from prnaseqtools.input_parser import parse_input
+from prnaseqtools.input_parser import parse_input, _parse_to_dict
 from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
 
 
@@ -622,14 +622,6 @@ def run(opts):
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
-
-def _parse_to_dict(arg_str):
-    """Parse 'name=value' string to dict."""
-    parts = arg_str.split('=')
-    if len(parts) == 2:
-        return {parts[0]: parts[1]}
-    return {}
-
 
 def _find_ribotaper(prefix):
     """Locate RIBO Taper installation directory."""

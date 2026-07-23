@@ -12,7 +12,7 @@ import math
 from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
-from prnaseqtools.input_parser import parse_input
+from prnaseqtools.input_parser import parse_input, _parse_to_dict
 from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
 
 
@@ -34,14 +34,12 @@ def run(opts):
     tags, files, pars = parse_input(control_dict)
 
     if opts.get('treatment'):
-        treatment_opt = opts.get('treatment', '')
-        if isinstance(treatment_opt, list):
-            treatment_opt = treatment_opt[0] if treatment_opt else ''
-        treatment_dict = _parse_to_dict(treatment_opt)
-        t_tags, t_files, t_pars = parse_input(treatment_dict)
-        tags.extend(t_tags)
-        files.extend(t_files)
-        pars.extend(t_pars)
+        for t in (opts['treatment'] if isinstance(opts['treatment'], list) else [opts['treatment']]):
+            treatment_dict = _parse_to_dict(t)
+            t_tags, t_files, t_pars = parse_input(treatment_dict)
+            tags.extend(t_tags)
+            files.extend(t_files)
+            pars.extend(t_pars)
 
     par_str = ' '.join(pars)
 
@@ -196,13 +194,6 @@ def run(opts):
             f"Rscript --vanilla {prefix}/scripts/DMRcaller.R {thread} {par_str}")
         for fname in globmod.glob("*.CX_report.txt.gz"):
             os.unlink(fname)
-
-
-def _parse_to_dict(arg_str):
-    parts = arg_str.split('=')
-    if len(parts) == 2:
-        return {parts[0]: parts[1]}
-    return {}
 
 
 def _bin_methylation(tag, binsize, min_c, tee):
