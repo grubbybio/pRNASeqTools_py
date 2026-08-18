@@ -120,18 +120,27 @@ def run(opts):
 
         tee.write(f"\n  --- Ribo-seq sample: {tag} ---\n")
 
-        # Download / unzip
-        sra_results = download_sra(fpath, thread)
-        is_paired = len(sra_results) > 1
+        if ',' not in fpath:
+            # Download / unzip (SRA or single file)
+            sra_results = download_sra(fpath, thread)
+            is_paired = len(sra_results) > 1
 
-        if is_paired:
-            unzip_file(sra_results[0], f"{tag}_r1")
-            unzip_file(sra_results[1], f"{tag}_r2")
+            if is_paired:
+                unzip_file(sra_results[0], f"{tag}_r1")
+                unzip_file(sra_results[1], f"{tag}_r2")
+                r1_fq = f"{tag}_r1.fastq"
+                r2_fq = f"{tag}_r2.fastq"
+            else:
+                unzip_file(sra_results[0], tag)
+                r1_fq = f"{tag}.fastq"
+        else:
+            # Explicit paired-end (file1,file2)
+            is_paired = True
+            f1, f2 = fpath.split(',')
+            unzip_file(f1, f"{tag}_r1")
+            unzip_file(f2, f"{tag}_r2")
             r1_fq = f"{tag}_r1.fastq"
             r2_fq = f"{tag}_r2.fastq"
-        else:
-            unzip_file(sra_results[0], tag)
-            r1_fq = f"{tag}.fastq"
 
         # Adaptor trimming
         if adaptor:
@@ -258,19 +267,29 @@ def run(opts):
     for tag, fpath in zip(rna_tags, rna_files):
         tee.write(f"\n  --- RNA-seq STAR 1st pass: {tag} ---\n")
 
-        sra_r = download_sra(fpath, thread)
-        rna_paired = len(sra_r) > 1
+        if ',' not in fpath:
+            sra_r = download_sra(fpath, thread)
+            rna_paired = len(sra_r) > 1
 
-        if rna_paired:
-            unzip_file(sra_r[0], f"{tag}_r1")
-            unzip_file(sra_r[1], f"{tag}_r2")
+            if rna_paired:
+                unzip_file(sra_r[0], f"{tag}_r1")
+                unzip_file(sra_r[1], f"{tag}_r2")
+                run_cmd(f"gzip -f {tag}_r1.fastq")
+                run_cmd(f"gzip -f {tag}_r2.fastq")
+                read_files = f"{tag}_r1.fastq.gz {tag}_r2.fastq.gz"
+            else:
+                unzip_file(sra_r[0], tag)
+                run_cmd(f"gzip -f {tag}.fastq")
+                read_files = f"{tag}.fastq.gz"
+        else:
+            # Explicit paired-end (file1,file2)
+            rna_paired = True
+            f1, f2 = fpath.split(',')
+            unzip_file(f1, f"{tag}_r1")
+            unzip_file(f2, f"{tag}_r2")
             run_cmd(f"gzip -f {tag}_r1.fastq")
             run_cmd(f"gzip -f {tag}_r2.fastq")
             read_files = f"{tag}_r1.fastq.gz {tag}_r2.fastq.gz"
-        else:
-            unzip_file(sra_r[0], tag)
-            run_cmd(f"gzip -f {tag}.fastq")
-            read_files = f"{tag}.fastq.gz"
 
         star_out_1st = f"star_{tag}_1st"
         os.makedirs(star_out_1st, exist_ok=True)
