@@ -90,6 +90,14 @@ python pRNASeqTools_run.py ribo \
   --contam "rRNA.fasta,tRNA.fasta,snRNA.fasta" \
   --ribotaper ~/RiboTaper_v1.3
 
+# Ribo-seq — multiple treatment groups
+python pRNASeqTools_run.py ribo \
+  --rna-control "WT=SRR111111" \
+  --rna-treatment "mutA=SRR222222" --rna-treatment "mutB=SRR333333" \
+  --ribo-control "Ribo=SRR444444" \
+  --ribo-treatment "RmutA=SRR555555" --ribo-treatment "RmutB=SRR666666" \
+  --contam "rRNA.fasta,tRNA.fasta"
+
 # ChIP-seq (Genrich, default)
 python pRNASeqTools_run.py chip --treatment "IP=data/ip.bam" --control "Input=data/input.bam"
 
@@ -247,9 +255,9 @@ Full RIBO Taper workflow for translated ORF detection from Ribo-seq data.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--rna-control` | *(required)* | RNA-seq control: `name=file1+file2...` |
-| `--rna-treatment` | — | RNA-seq treatment: `name=file1+file2...` |
+| `--rna-treatment` | — | RNA-seq treatment: `name=file1+file2...` (repeatable) |
 | `--ribo-control` | *(required)* | Ribo-seq control: `name=file1+file2...` |
-| `--ribo-treatment` | — | Ribo-seq treatment: `name=file1+file2...` |
+| `--ribo-treatment` | — | Ribo-seq treatment: `name=file1+file2...` (repeatable) |
 | `--contam` | *(required)* | Contamination FASTA for Bowtie2 index |
 | `--ribo-len` | `24,25,26,27,28` | Ribo-seq read lengths |
 | `--cutoffs` | `8,9,10,11,12` | RIBO Taper cutoffs |

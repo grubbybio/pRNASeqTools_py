@@ -122,12 +122,12 @@ def build_parser():
     add_common_args(p, control_required=False)
     p.add_argument('--rna-control', '-rc', required=True,
                    help='RNA-seq control: name=file1+file2...')
-    p.add_argument('--rna-treatment', '-rt', default=None,
-                   help='RNA-seq treatment: name=file1+file2...')
+    p.add_argument('--rna-treatment', '-rt', default=None, action='append',
+                   help='RNA-seq treatment: name=file1+file2... (repeatable)')
     p.add_argument('--ribo-control', '-bc', required=True,
                    help='Ribo-seq control: name=file1+file2...')
-    p.add_argument('--ribo-treatment', '-bt', default=None,
-                   help='Ribo-seq treatment: name=file1+file2...')
+    p.add_argument('--ribo-treatment', '-bt', default=None, action='append',
+                   help='Ribo-seq treatment: name=file1+file2... (repeatable)')
     p.add_argument('--contam', required=True,
                    help='Contamination fasta file(s) for Bowtie2 index')
     p.add_argument('--ribo-len', default='24,25,26,27,28',

@@ -40,8 +40,8 @@ def run(opts):
 
     # ── RIBO Taper-specific options ──────────────────────────────────
     contam = opts.get('contam')                # contamination fasta
-    ribo_len = opts.get('ribo_len', '24,25,26,27,28')
-    cutoffs = opts.get('cutoffs', '8,9,10,11,12')
+    ribo_len = opts.get('ribo_len', '24,25,26,27,28,29,30,31')
+    cutoffs = opts.get('cutoffs', '8,9,10,11,12,13,14,15')
     tpm_threshold = opts.get('tpm_threshold', 0)
     ribotaper_path = opts.get('ribotaper')
     if not ribotaper_path:
@@ -53,10 +53,13 @@ def run(opts):
 
     rna_trt = opts.get('rna_treatment')
     if rna_trt:
-        trt_dict = _parse_to_dict(rna_trt)
-        rt_tags, rt_files, _ = parse_input(trt_dict)
-        rna_tags.extend(rt_tags)
-        rna_files.extend(rt_files)
+        if isinstance(rna_trt, str):
+            rna_trt = [rna_trt]
+        for trt_str in rna_trt:
+            trt_dict = _parse_to_dict(trt_str)
+            rt_tags, rt_files, _ = parse_input(trt_dict)
+            rna_tags.extend(rt_tags)
+            rna_files.extend(rt_files)
 
     all_rna_tags = list(rna_tags)
 
@@ -66,10 +69,13 @@ def run(opts):
 
     ribo_trt = opts.get('ribo_treatment')
     if ribo_trt:
-        rbt_dict = _parse_to_dict(ribo_trt)
-        rbt_tags, rbt_files, _ = parse_input(rbt_dict)
-        ribo_tags.extend(rbt_tags)
-        ribo_files.extend(rbt_files)
+        if isinstance(ribo_trt, str):
+            ribo_trt = [ribo_trt]
+        for rbt_str in ribo_trt:
+            rbt_dict = _parse_to_dict(rbt_str)
+            rbt_tags, rbt_files, _ = parse_input(rbt_dict)
+            ribo_tags.extend(rbt_tags)
+            ribo_files.extend(rbt_files)
 
     all_ribo_tags = list(ribo_tags)
 
