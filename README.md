@@ -87,8 +87,7 @@ python pRNASeqTools_run.py degradome -c "WT=data/degradome.fq" \
 python pRNASeqTools_run.py ribo \
   --rna-control "WT=SRR111111" \
   --ribo-control "Ribo=SRR333333" \
-  --contam "rRNA.fasta,tRNA.fasta,snRNA.fasta" \
-  --ribotaper ~/RiboTaper_v1.3
+  --contam "rRNA.fasta,tRNA.fasta,snRNA.fasta"
 
 # Ribo-seq — multiple treatment groups
 python pRNASeqTools_run.py ribo \
@@ -262,7 +261,8 @@ Full RIBO Taper workflow for translated ORF detection from Ribo-seq data.
 | `--ribo-len` | `24,25,26,27,28` | Ribo-seq read lengths |
 | `--cutoffs` | `8,9,10,11,12` | RIBO Taper cutoffs |
 | `--tpm-threshold` | `0` | Mean TPM threshold |
-| `--ribotaper` | *(auto-detect)* | Path to RIBO Taper installation |
+| `--ribotaper` | `~/software/ribotaper/bin` | Path to RIBO Taper installation |
+| `--ribotaper-env` | `ribotaper` | Conda environment for RIBO Taper |
 
 **Additional dependency:** [RiboTaper](https://github.com/hsinyenwu/RiboTaper) (manual install)
 

@@ -44,8 +44,13 @@ def run(opts):
     cutoffs = opts.get('cutoffs', '8,9,10,11,12,13,14,15')
     tpm_threshold = opts.get('tpm_threshold', 0)
     ribotaper_path = opts.get('ribotaper')
-    if not ribotaper_path:
-        ribotaper_path = _find_ribotaper(prefix)
+    ribotaper_env = opts.get('ribotaper_env')
+
+    def _ribo_bash(cmd):
+        """Wrap a bash command with conda run if ribotaper_env is set."""
+        if ribotaper_env:
+            return f"conda run -n {ribotaper_env} bash {cmd}"
+        return f"bash {cmd}"
 
     # ── Parse RNA-seq inputs ─────────────────────────────────────────
     rna_ctrl_dict = _parse_to_dict(opts.get('rna_control', ''))
@@ -536,7 +541,7 @@ def run(opts):
     os.makedirs(ribo_anno_dir, exist_ok=True)
 
     create_anno_script = os.path.join(
-        ribotaper_path, "scripts", "create_annotations_files.bash"
+        ribotaper_path, "create_annotations_files.bash"
     )
     if not os.path.exists(create_anno_script):
         sys.exit(f"RIBO Taper script not found: {create_anno_script}")
@@ -545,9 +550,9 @@ def run(opts):
     check_and_build_indices(prefix, genome=genome, tee=tee)
 
     run_cmd(
-        f"bash {create_anno_script} {expressed_gtf} {fasta_path} "
+        _ribo_bash(f"{create_anno_script} {expressed_gtf} {fasta_path} "
         f"false false {ribo_anno_dir} {bedtools_bin} "
-        f"{ribotaper_path}/scripts/")
+        f"{ribotaper_path}/"))
     tee.write("  RIBO Taper annotation created.\n")
 
     # ==================================================================
@@ -593,14 +598,14 @@ def run(opts):
 
     # Run RIBO Taper
     tee.write("\n  Running RIBO Taper ORF detection...\n")
-    ribotaper_script = os.path.join(ribotaper_path, "scripts", "Ribotaper.sh")
+    ribotaper_script = os.path.join(ribotaper_path, "Ribotaper.sh")
     if not os.path.exists(ribotaper_script):
         sys.exit(f"RIBO Taper script not found: {ribotaper_script}")
 
     run_cmd(
-        f"bash {ribotaper_script} {ribo_merged} {rna_merged} "
+        _ribo_bash(f"{ribotaper_script} {ribo_merged} {rna_merged} "
         f"{ribo_anno_dir} {ribo_len} {cutoffs} "
-        f"{ribotaper_path}/scripts/ {bedtools_bin} {thread}")
+        f"{ribotaper_path}/ {bedtools_bin} {thread}"))
 
     tee.write("\n  RIBO Taper analysis complete.\n")
 
@@ -629,21 +634,4 @@ def run(opts):
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-def _find_ribotaper(prefix):
-    """Locate RIBO Taper installation directory."""
-    candidates = [
-        os.path.join(prefix, "RiboTaper_v1.3"),
-        os.path.expanduser("~/RiboTaper_v1.3"),
-        os.path.expanduser("~/Software/RiboTaper_v1.3"),
-        os.path.expanduser("~/software/RiboTaper_v1.3"),
-    ]
-    for cand in candidates:
-        script = os.path.join(cand, "scripts", "Ribotaper.sh")
-        if os.path.exists(script):
-            return cand
 
-    sys.exit(
-        "Cannot find RIBO Taper installation.\n"
-        "Please specify --ribotaper PATH or install RIBO Taper from:\n"
-        "  https://github.com/hsinyenwu/RiboTaper"
-    )

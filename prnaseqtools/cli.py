@@ -134,8 +134,10 @@ def build_parser():
                    help='Ribo-seq read lengths (comma-separated)')
     p.add_argument('--cutoffs', default='8,9,10,11,12',
                    help='RIBO Taper cutoffs (comma-separated)')
-    p.add_argument('--ribotaper', default=None,
+    p.add_argument('--ribotaper', default=os.path.expanduser('~/software/ribotaper/bin'),
                    help='Path to RIBO Taper installation directory')
+    p.add_argument('--ribotaper-env', default='ribotaper',
+                   help='Conda environment name for RIBO Taper')
     p.add_argument('--tpm-threshold', default=0, type=float,
                    help='Mean TPM threshold for isoform filtering (default: 0)')
     add_mapping_args(p)
