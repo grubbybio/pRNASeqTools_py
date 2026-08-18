@@ -89,6 +89,20 @@ python pRNASeqTools_run.py ribo \
   --ribo-control "Ribo=SRR333333" \
   --contam "rRNA.fasta,tRNA.fasta,snRNA.fasta"
 
+# Ribo-seq — paired-end data
+python pRNASeqTools_run.py ribo \
+  --rna-control "WT=WT_r1.fq,WT_r2.fq" \
+  --ribo-control "Ribo=Ribo_r1.fq,Ribo_r2.fq" \
+  --contam "rRNA.fasta,tRNA.fasta"
+
+# Ribo-seq — paired-end with multiple replicates
+python pRNASeqTools_run.py ribo \
+  --rna-control "WT=WT_r1_1.fq,WT_r2_1.fq+WT_r1_2.fq,WT_r2_2.fq" \
+  --rna-treatment "mut=mut_r1_1.fq,mut_r2_1.fq+mut_r1_2.fq,mut_r2_2.fq" \
+  --ribo-control "Ribo=Ribo_r1.fq,Ribo_r2.fq" \
+  --ribo-treatment "Rmut=Rmut_r1.fq,Rmut_r2.fq" \
+  --contam "rRNA.fasta,tRNA.fasta"
+
 # Ribo-seq — multiple treatment groups
 python pRNASeqTools_run.py ribo \
   --rna-control "WT=SRR111111" \

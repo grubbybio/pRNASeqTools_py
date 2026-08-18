@@ -579,16 +579,25 @@ def run(opts):
     os.rename("RNA_merged_sorted.bam", rna_merged)
     run_cmd(f"samtools index {rna_merged}")
 
-    # Merge Ribo-seq BAMs
+    # Merge Ribo-seq BAMs (R1 only for RIBO Taper)
     tee.write("  Merging Ribo-seq BAMs...\n")
     ribo_bam_list = [
         f"{ribo_map_dir}/star_{tag}_Aligned.sortedByCoord.out.bam"
         for tag in all_ribo_tags
     ]
     ribo_bam_list = [b for b in ribo_bam_list if os.path.exists(b)]
-    ribo_bams_arg = ' '.join(ribo_bam_list)
+
+    ribo_r1_bams = []
+    for bam in ribo_bam_list:
+        r1_bam = bam.replace('.bam', '_r1.bam')
+        run_cmd(
+            f"samtools view -h -b -F 128 {bam} | "
+            f"samtools sort -o {r1_bam}")
+        run_cmd(f"samtools index {r1_bam}")
+        ribo_r1_bams.append(r1_bam)
 
     ribo_merged = "Ribo_merged.bam"
+    ribo_bams_arg = ' '.join(ribo_r1_bams)
     run_cmd(
         f"samtools merge -f {ribo_merged} {ribo_bams_arg}")
     run_cmd(
