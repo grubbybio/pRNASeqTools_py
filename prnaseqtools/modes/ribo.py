@@ -16,6 +16,7 @@ Requires: Bowtie2, STAR, samtools, bedtools, StringTie, gffcompare, RSEM,
 
 import os
 import sys
+import re
 import glob as globmod
 import shutil
 import subprocess
@@ -24,6 +25,35 @@ from pathlib import Path
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
 from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
+
+
+# ── Helper: detect last completed step from log ────────────────────────────
+
+def _detect_last_step():
+    """Detect the last completed step from log files in the current directory.
+
+    Returns:
+        tuple: (last_step, log_path) where last_step is int (0 if none found),
+               log_path is the file path or None
+    """
+    log_files = globmod.glob(os.path.join(os.getcwd(), "log_*.txt"))
+    if not log_files:
+        return (0, None)
+
+    # Find the most recently modified log file
+    log_files.sort(key=os.path.getmtime, reverse=True)
+    latest_log = log_files[0]
+
+    last_step = 0
+    with open(latest_log) as f:
+        for line in f:
+            match = re.search(r'STEP\s+(\d+):', line)
+            if match:
+                step = int(match.group(1))
+                if step > last_step:
+                    last_step = step
+
+    return (last_step, latest_log)
 
 
 # ── Main entry point ─────────────────────────────────────────────────────
@@ -110,10 +140,6 @@ def run(opts):
     # ── Utility: find bedtools ───────────────────────────────────────
     bedtools_bin = shutil.which("bedtools") or "bedtools"
 
-    # ── Mode flags ───────────────────────────────────────────────────
-    nomapping = opts.get('no_mapping', False)
-    mappingonly = opts.get('mapping_only', False)
-
     # ── Shared directory variables ───────────────────────────────────
     expressed_gtf = f"{genome}_expressed.gtf"
     updated_gtf = f"{genome}_updated.gtf"
@@ -122,58 +148,25 @@ def run(opts):
     star_rna_new_map = "STAR_RNA_map_new"
     contam_index = "Contam"
 
-    if nomapping:
-        tee.write("\n" + "=" * 60 + "\n")
-        tee.write("NO-MAPPING MODE: Using existing BAM files from step 6\n")
-        tee.write("=" * 60 + "\n")
+    # ── Auto-detect last completed step from log ─────────────────────
+    last_step, resume_log = _detect_last_step()
+    if last_step > 0:
+        tee.write(f"\n  Resuming from step {last_step + 1} (last completed: step {last_step})\n")
+        tee.write(f"  Log file: {resume_log}\n\n")
+    else:
+        tee.write("  No previous log found, starting from step 1.\n\n")
 
+    # ── Verify intermediate files if resuming from step 6+ ──
+    if last_step >= 6:
         if not os.path.exists(expressed_gtf):
-            if os.path.exists(f"../{expressed_gtf}"):
-                os.symlink(f"../{expressed_gtf}", expressed_gtf)
-            else:
-                sys.exit(f"no-mapping mode requires {expressed_gtf} in current or parent directory")
+            tee.write(f"  WARNING: {expressed_gtf} not found - steps 4-5 may need to be re-run\n")
+        if not os.path.exists(updated_gtf):
+            tee.write(f"  WARNING: {updated_gtf} not found - steps 4-5 may need to be re-run\n")
 
-        if not os.path.exists(updated_gtf) and os.path.exists(f"../{updated_gtf}"):
-            os.symlink(f"../{updated_gtf}", updated_gtf)
-
-        # Symlink Ribo-seq BAMs -> STAR_Ribo_map/
-        os.makedirs(ribo_map_dir, exist_ok=True)
-        for tag, fpath in zip(ribo_tags, ribo_files):
-            bam_src = fpath if fpath.endswith('.bam') else None
-            if bam_src and os.path.exists(bam_src):
-                bam_dst = os.path.join(ribo_map_dir, f"star_{tag}_Aligned.sortedByCoord.out.bam")
-                if not os.path.exists(bam_dst):
-                    os.symlink(os.path.abspath(bam_src), bam_dst)
-                bai_src = bam_src + '.bai'
-                if os.path.exists(bai_src):
-                    os.symlink(os.path.abspath(bai_src), bam_dst + '.bai')
-            elif os.path.exists(f"../star_{tag}_Aligned.sortedByCoord.out.bam"):
-                bam_dst = os.path.join(ribo_map_dir, f"star_{tag}_Aligned.sortedByCoord.out.bam")
-                if not os.path.exists(bam_dst):
-                    os.symlink(os.path.abspath(f"../star_{tag}_Aligned.sortedByCoord.out.bam"), bam_dst)
-
-        # Symlink RNA-seq BAMs -> STAR_RNA_map_new/
-        os.makedirs(star_rna_new_map, exist_ok=True)
-        for tag, fpath in zip(rna_tags, rna_files):
-            bam_src = fpath if fpath.endswith('.bam') else None
-            if bam_src and os.path.exists(bam_src):
-                bam_dst = os.path.join(star_rna_new_map, f"star_{tag}_Aligned.sortedByCoord.out.bam")
-                if not os.path.exists(bam_dst):
-                    os.symlink(os.path.abspath(bam_src), bam_dst)
-                bai_src = bam_src + '.bai'
-                if os.path.exists(bai_src):
-                    os.symlink(os.path.abspath(bai_src), bam_dst + '.bai')
-            elif os.path.exists(f"../star_{tag}_Aligned.sortedByCoord.out.bam"):
-                bam_dst = os.path.join(star_rna_new_map, f"star_{tag}_Aligned.sortedByCoord.out.bam")
-                if not os.path.exists(bam_dst):
-                    os.symlink(os.path.abspath(f"../star_{tag}_Aligned.sortedByCoord.out.bam"), bam_dst)
-
-        tee.write("  BAM files prepared.\n")
-
-    if not nomapping:
-        # ==================================================================
-        # STEP 1 — Build Bowtie2 contamination index
-        # ==================================================================
+    # ==================================================================
+    # STEP 1 — Build Bowtie2 contamination index
+    # ==================================================================
+    if last_step < 1:
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 1: Building Bowtie2 contamination index\n")
         tee.write("=" * 60 + "\n")
@@ -182,9 +175,10 @@ def run(opts):
             f"bowtie2-build {contam} {contam_index}")
         tee.write("  Contamination index built.\n")
 
-        # ==================================================================
-        # STEP 2 — Preprocess Ribo-seq reads (decontamination)
-        # ==================================================================
+    # ==================================================================
+    # STEP 2 — Preprocess Ribo-seq reads (decontamination)
+    # ==================================================================
+    if last_step < 2:
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 2: Preprocessing Ribo-seq reads\n")
         tee.write("=" * 60 + "\n")
@@ -316,9 +310,10 @@ def run(opts):
 
         tee.write("\n  Ribo-seq decontamination complete.\n")
 
-        # ==================================================================
-        # STEP 3 — RNA-seq STAR mapping + StringTie transcriptome assembly
-        # ==================================================================
+    # ==================================================================
+    # STEP 3 — RNA-seq STAR mapping + StringTie transcriptome assembly
+    # ==================================================================
+    if last_step < 3:
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 3: RNA-seq transcriptome assembly (STAR + StringTie)\n")
         tee.write("=" * 60 + "\n")
@@ -464,9 +459,10 @@ def run(opts):
         run_cmd(
             f"gffcompare -V -r {anno_path} -o {gffcomp_prefix} {merged_gtf}")
 
-        # ==================================================================
-        # STEP 4 — R: Filter novel transcripts + add gene_biotype
-        # ==================================================================
+    # ==================================================================
+    # STEP 4 — R: Filter novel transcripts + add gene_biotype
+    # ==================================================================
+    if last_step < 4:
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 4: Filtering novel transcripts + gene_biotype annotation\n")
         tee.write("=" * 60 + "\n")
@@ -487,9 +483,10 @@ def run(opts):
             f"{annotated_gtf} {anno_path} {updated_gtf}")
         tee.write(f"  Updated GTF written to: {updated_gtf}\n")
 
-        # ==================================================================
-        # STEP 5 — RSEM quantification + filter expressed isoforms
-        # ==================================================================
+    # ==================================================================
+    # STEP 5 — RSEM quantification + filter expressed isoforms
+    # ==================================================================
+    if last_step < 5:
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 5: RSEM quantification + expressed isoform filtering\n")
         tee.write("=" * 60 + "\n")
@@ -542,9 +539,10 @@ def run(opts):
             f"{updated_gtf} {expressed_gtf} {tpm_threshold} {rsem_files_arg}")
         tee.write(f"  Expressed GTF written to: {expressed_gtf}\n")
 
-        # ==================================================================
-        # STEP 6 — STAR re-mapping with expressed annotation
-        # ==================================================================
+    # ==================================================================
+    # STEP 6 — STAR re-mapping with expressed annotation
+    # ==================================================================
+    if last_step < 6:
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 6: STAR re-mapping with expressed annotation\n")
         tee.write("=" * 60 + "\n")
@@ -589,18 +587,27 @@ def run(opts):
                 f"--outMultimapperOrder Random "
                 f"--outFileNamePrefix {ribo_map_dir}/star_{tag}_ ")
 
-    # ── Plot Ribo-seq read length distributions (always runs) ──
-    tee.write("\n  Plotting Ribo-seq read length distributions...\n")
-    try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        from matplotlib.backends.backend_pdf import PdfPages
-        _plot_ribo_lengths(ribo_map_dir, all_ribo_tags, tee)
-    except ImportError:
-        tee.write("  Warning: matplotlib not available, skipping length distribution plots\n")
+    # ── Plot Ribo-seq read length distributions (always runs when BAMs exist) ──
+    _ribo_bam_files = [
+        os.path.join(ribo_map_dir, f"star_{tag}_Aligned.sortedByCoord.out.bam")
+        for tag in all_ribo_tags
+    ]
+    _ribo_bam_files = [b for b in _ribo_bam_files if os.path.exists(b)]
+    if _ribo_bam_files:
+        tee.write("\n  Plotting Ribo-seq read length distributions...\n")
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from matplotlib.backends.backend_pdf import PdfPages
+            _plot_ribo_lengths(ribo_map_dir, all_ribo_tags, tee)
+        except ImportError:
+            tee.write("  Warning: matplotlib not available, skipping length distribution plots\n")
+    else:
+        tee.write(f"\n  No Ribo-seq BAMs found in {ribo_map_dir}, skipping length distribution plots.\n")
 
-    if not nomapping:
+    # ── STEP 6b: RNA-seq STAR mapping ──
+    if last_step < 6:
         # 6b — Build updated RNA-seq STAR index
         star_rna_new_idx = "STAR_RNA_index_new"
         os.makedirs(star_rna_new_idx, exist_ok=True)
@@ -636,10 +643,10 @@ def run(opts):
                 f"--outMultimapperOrder Random "
                 f"--outFileNamePrefix {star_rna_new_map}/star_{tag}_ ")
 
-    if not mappingonly:
-        # ==================================================================
-        # STEP 7 — RIBO Taper annotation
-        # ==================================================================
+    # ==================================================================
+    # STEP 7 — RIBO Taper annotation
+    # ==================================================================
+    if last_step < 7:
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 7: Creating RIBO Taper annotation files\n")
         tee.write("=" * 60 + "\n")
@@ -662,9 +669,10 @@ def run(opts):
             f"{ribotaper_path}/"))
         tee.write("  RIBO Taper annotation created.\n")
 
-        # ==================================================================
-        # STEP 8 — Merge BAMs + Run RIBO Taper
-        # ==================================================================
+    # ==================================================================
+    # STEP 8 — Merge BAMs + Run RIBO Taper
+    # ==================================================================
+    if last_step < 8:
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 8: Merging BAMs + Running RIBO Taper\n")
         tee.write("=" * 60 + "\n")
@@ -725,18 +733,20 @@ def run(opts):
 
         tee.write("\n  RIBO Taper analysis complete.\n")
 
-        # ==================================================================
-        # STEP 9 — P-site analysis & visualization
-        # ==================================================================
+    # ==================================================================
+    # STEP 9 — P-site analysis & visualization
+    # ==================================================================
+    if last_step < 9:
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 9: P-site analysis & visualization\n")
         tee.write("=" * 60 + "\n")
 
         _plot_psite_analysis(ribo_map_dir, all_ribo_tags, ribo_anno_dir, ribo_files, tee, thread)
 
-        # ==================================================================
-        # STEP 10 — Final output summary
-        # ==================================================================
+    # ==================================================================
+    # STEP 10 — Final output summary
+    # ==================================================================
+    if last_step < 10:
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 10: Pipeline complete\n")
         tee.write("=" * 60 + "\n")

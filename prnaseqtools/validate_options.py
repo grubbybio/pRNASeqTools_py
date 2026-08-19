@@ -14,8 +14,25 @@ def validate_options(opts):
     """Validate and normalize command-line options. Raises SystemExit on error."""
 
     outdir = opts.get('outdir', './out')
+    mode = opts.get('mode', '')
     if os.path.exists(outdir):
-        sys.exit('Output directory exists! Please specify another output directory!')
+        if mode == 'ribo':
+            # Ribo-seq auto-resume: allow reusing existing output dir.
+            # The _detect_last_step() helper reads log files and resumes
+            # from the last completed step.
+            import time
+            print(
+                f"Output directory '{outdir}' already exists.\n"
+                f"  Ribo-seq auto-resume will start from the last completed step.\n"
+                f"  Press Ctrl+C now to abort, or wait 5 seconds to continue...",
+                flush=True
+            )
+            try:
+                time.sleep(5)
+            except KeyboardInterrupt:
+                sys.exit("Aborted by user.")
+        else:
+            sys.exit('Output directory exists! Please specify another output directory!')
     os.makedirs(outdir, exist_ok=True)
 
     # Move log file to output directory
@@ -62,8 +79,8 @@ def validate_options(opts):
     if mmap is not None and mmap not in 'ufrn':
         sys.exit('Please use a supported strategy for mapping!')
 
-    # nomapping + mappingonly conflict
-    if opts.get('no_mapping') and opts.get('mapping_only'):
+    # nomapping + mappingonly conflict (ribo mode uses auto-resume instead)
+    if mode != 'ribo' and opts.get('no_mapping') and opts.get('mapping_only'):
         sys.exit('Parameter conflict: nomapping and mappingonly!')
 
     # DESeq2Norm validation

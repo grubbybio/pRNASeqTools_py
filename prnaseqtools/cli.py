@@ -140,7 +140,6 @@ def build_parser():
                    help='Conda environment name for RIBO Taper')
     p.add_argument('--tpm-threshold', default=0, type=float,
                    help='Mean TPM threshold for isoform filtering (default: 0)')
-    add_mapping_args(p)
 
     # cips (CiPS uORF analysis)
     p = sub.add_parser('cips', help='CiPS uORF analysis (translated uORF detection)')
