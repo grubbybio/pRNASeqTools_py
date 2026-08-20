@@ -513,6 +513,14 @@ INDEX_BUILDERS = {
         'location': 'reference',
         'modes': ['tt'],
     },
+    'bowtie2_genome': {
+        'name': 'Bowtie2 genome index',
+        'build_cmd': 'bowtie2-build {prefix}/reference/{genome}_chr_all.fasta '
+                     '{prefix}/reference/{genome}_chr_all',
+        'check_file': '{prefix}/reference/{genome}_chr_all.1.bt2',
+        'location': 'reference',
+        'modes': ['ribo'],
+    },
 }
 
 

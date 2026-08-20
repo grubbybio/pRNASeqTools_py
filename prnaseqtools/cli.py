@@ -128,8 +128,9 @@ def build_parser():
                    help='Ribo-seq control: name=file1+file2...')
     p.add_argument('--ribo-treatment', '-bt', default=None, action='append',
                    help='Ribo-seq treatment: name=file1+file2... (repeatable)')
-    p.add_argument('--contam', required=True,
-                   help='Contamination fasta file(s) for Bowtie2 index')
+    p.add_argument('--contam', default=None,
+                   help='Contamination fasta file(s) for Bowtie2 index '
+                        '(default: reference/{genome}_contam4.fa)')
     p.add_argument('--ribo-len', default='24,25,26,27,28',
                    help='Ribo-seq read lengths (comma-separated)')
     p.add_argument('--cutoffs', default='8,9,10,11,12',

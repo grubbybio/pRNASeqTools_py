@@ -29,25 +29,37 @@ from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
 
 # ── Helper: detect last completed step from log ────────────────────────────
 
-def _detect_last_step():
-    """Detect the last completed step from log files in the current directory.
+def _detect_last_step(search_dir=None, exclude_log=None):
+    """Detect the last completed step from log files.
+
+    Args:
+        search_dir: Directory to scan (defaults to os.getcwd()).
+        exclude_log: Log filename to skip (the current run's log).
+                     Pass log_{start_time}.txt to avoid reading the
+                     current (almost empty) log as the resume source.
 
     Returns:
         tuple: (last_step, log_path) where last_step is int (0 if none found),
                log_path is the file path or None
     """
-    log_files = globmod.glob(os.path.join(os.getcwd(), "log_*.txt"))
+    search_dir = search_dir or os.getcwd()
+    log_files = globmod.glob(os.path.join(search_dir, "log_*.txt"))
     if not log_files:
         return (0, None)
 
-    # Find the most recently modified log file
-    log_files.sort(key=os.path.getmtime, reverse=True)
-    latest_log = log_files[0]
+    # Exclude the current run's log so we find the PREVIOUS run
+    candidates = [f for f in log_files if os.path.basename(f) != exclude_log] if exclude_log else log_files
+    if not candidates:
+        return (0, None)
+
+    # Find the most recently modified log file (among previous runs)
+    candidates.sort(key=os.path.getmtime, reverse=True)
+    latest_log = candidates[0]
 
     last_step = 0
     with open(latest_log) as f:
         for line in f:
-            match = re.search(r'STEP\s+(\d+):', line)
+            match = re.search(r'STEP\s+(\d+)\s+COMPLETE', line)
             if match:
                 step = int(match.group(1))
                 if step > last_step:
@@ -70,6 +82,14 @@ def run(opts):
 
     # ── RIBO Taper-specific options ──────────────────────────────────
     contam = opts.get('contam')                # contamination fasta
+    if not contam:
+        contam = os.path.join(prefix, "reference", f"{genome}_contam4.fa")
+        if not os.path.exists(contam):
+            sys.exit(
+                f"Contamination file not found: {contam}\n"
+                f"  Please provide --contam or place {genome}_contam4.fa "
+                f"in the reference directory."
+            )
     ribo_len = opts.get('ribo_len', '24,25,26,27,28,29,30,31')
     cutoffs = opts.get('cutoffs', '8,9,10,11,12,13,14,15')
     tpm_threshold = opts.get('tpm_threshold', 0)
@@ -149,7 +169,9 @@ def run(opts):
     contam_index = "Contam"
 
     # ── Auto-detect last completed step from log ─────────────────────
-    last_step, resume_log = _detect_last_step()
+    _start_time = opts.get('_start_time', 0)
+    current_log = f"log_{_start_time}.txt"
+    last_step, resume_log = _detect_last_step(exclude_log=current_log)
     if last_step > 0:
         tee.write(f"\n  Resuming from step {last_step + 1} (last completed: step {last_step})\n")
         tee.write(f"  Log file: {resume_log}\n\n")
@@ -171,9 +193,15 @@ def run(opts):
         tee.write("STEP 1: Building Bowtie2 contamination index\n")
         tee.write("=" * 60 + "\n")
 
+        # Cleanup previous incomplete step 1
+        for pat in [f"{contam_index}*.ebwt", f"{contam_index}*.bt2"]:
+            for fname in globmod.glob(pat):
+                os.unlink(fname)
+
         run_cmd(
             f"bowtie2-build {contam} {contam_index}")
         tee.write("  Contamination index built.\n")
+        tee.write("  STEP 1 COMPLETE\n")
 
     # ==================================================================
     # STEP 2 — Preprocess Ribo-seq reads (decontamination)
@@ -182,6 +210,14 @@ def run(opts):
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 2: Preprocessing Ribo-seq reads\n")
         tee.write("=" * 60 + "\n")
+
+        # Cleanup previous incomplete step 2 outputs
+        for tag in all_ribo_tags:
+            for pat in [f"{tag}.noContam*", f"{tag}.mapped_and_unmapped*",
+                         f"{tag}.bothEndsUnmapped*", f"{tag}.unmapped*"]:
+                for fname in globmod.glob(pat):
+                    if os.path.exists(fname):
+                        os.unlink(fname)
 
         for i in range(len(ribo_tags)):
             tag = ribo_tags[i]
@@ -309,6 +345,7 @@ def run(opts):
                 os.unlink(f"{tag}_r2.fastq")
 
         tee.write("\n  Ribo-seq decontamination complete.\n")
+        tee.write("  STEP 2 COMPLETE\n")
 
     # ==================================================================
     # STEP 3 — RNA-seq STAR mapping + StringTie transcriptome assembly
@@ -317,6 +354,17 @@ def run(opts):
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 3: RNA-seq transcriptome assembly (STAR + StringTie)\n")
         tee.write("=" * 60 + "\n")
+
+        # Cleanup previous incomplete step 3
+        for d in ["STAR_RNA_index", "STAR_SJ", "STAR_RNA_2nd", "assembledGTF"]:
+            if os.path.exists(d):
+                import shutil as _shutil
+                _shutil.rmtree(d, ignore_errors=True)
+        for tag in rna_tags:
+            for d in [f"star_{tag}_1st"]:
+                if os.path.exists(d):
+                    import shutil as _shutil
+                    _shutil.rmtree(d, ignore_errors=True)
 
         # Build STAR genome index for RNA-seq
         star_rna_index = "STAR_RNA_index"
@@ -458,6 +506,7 @@ def run(opts):
         gffcomp_prefix = os.path.join(assembled_gtf_dir, genome)
         run_cmd(
             f"gffcompare -V -r {anno_path} -o {gffcomp_prefix} {merged_gtf}")
+        tee.write("  STEP 3 COMPLETE\n")
 
     # ==================================================================
     # STEP 4 — R: Filter novel transcripts + add gene_biotype
@@ -466,6 +515,15 @@ def run(opts):
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 4: Filtering novel transcripts + gene_biotype annotation\n")
         tee.write("=" * 60 + "\n")
+
+        # Cleanup previous incomplete step 4
+        if os.path.exists(updated_gtf):
+            os.unlink(updated_gtf)
+        # Also clean gffcompare outputs that might be stale
+        for pat in [os.path.join("assembledGTF", f"{genome}.*")]:
+            for fname in globmod.glob(pat):
+                if os.path.exists(fname):
+                    os.unlink(fname)
 
         annotated_gtf = f"{gffcomp_prefix}.annotated.gtf"
         if not os.path.exists(annotated_gtf):
@@ -482,6 +540,7 @@ def run(opts):
             f"Rscript --vanilla {prefix}/scripts/ribotaper_filter_gtf.R "
             f"{annotated_gtf} {anno_path} {updated_gtf}")
         tee.write(f"  Updated GTF written to: {updated_gtf}\n")
+        tee.write("  STEP 4 COMPLETE\n")
 
     # ==================================================================
     # STEP 5 — RSEM quantification + filter expressed isoforms
@@ -490,6 +549,14 @@ def run(opts):
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 5: RSEM quantification + expressed isoform filtering\n")
         tee.write("=" * 60 + "\n")
+
+        # Cleanup previous incomplete step 5
+        for d in ["RSEM_index", "RSEM_results"]:
+            if os.path.exists(d):
+                import shutil as _shutil
+                _shutil.rmtree(d, ignore_errors=True)
+        if os.path.exists(expressed_gtf):
+            os.unlink(expressed_gtf)
 
         # Build RSEM index
         rsem_index = "RSEM_index"
@@ -538,6 +605,7 @@ def run(opts):
             f"Rscript --vanilla {prefix}/scripts/ribotaper_filter_rsem.R "
             f"{updated_gtf} {expressed_gtf} {tpm_threshold} {rsem_files_arg}")
         tee.write(f"  Expressed GTF written to: {expressed_gtf}\n")
+        tee.write("  STEP 5 COMPLETE\n")
 
     # ==================================================================
     # STEP 6 — STAR re-mapping with expressed annotation
@@ -546,6 +614,17 @@ def run(opts):
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 6: STAR re-mapping with expressed annotation\n")
         tee.write("=" * 60 + "\n")
+
+        # Cleanup previous incomplete step 6
+        for d in ["STAR_Ribo_index", "STAR_Ribo_map",
+                   "STAR_RNA_index_new", "STAR_RNA_map_new"]:
+            if os.path.exists(d):
+                import shutil as _shutil
+                _shutil.rmtree(d, ignore_errors=True)
+        # Clean length distribution plot from previous run
+        for pat in ["Ribo_length_distribution.pdf"]:
+            if os.path.exists(pat):
+                os.unlink(pat)
 
         # 6a — Build Ribo-seq STAR index (sjdbOverhang based on read length)
         star_ribo_idx = "STAR_Ribo_index"
@@ -642,6 +721,7 @@ def run(opts):
                 f"--quantMode TranscriptomeSAM --outSAMmultNmax 1 "
                 f"--outMultimapperOrder Random "
                 f"--outFileNamePrefix {star_rna_new_map}/star_{tag}_ ")
+        tee.write("  STEP 6 COMPLETE\n")
 
     # ==================================================================
     # STEP 7 — RIBO Taper annotation
@@ -650,6 +730,11 @@ def run(opts):
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 7: Creating RIBO Taper annotation files\n")
         tee.write("=" * 60 + "\n")
+
+        # Cleanup previous incomplete step 7
+        if os.path.exists(ribo_anno_dir):
+            import shutil as _shutil
+            _shutil.rmtree(ribo_anno_dir, ignore_errors=True)
 
         ribo_anno_dir = "RiboTaper_annotation"
         os.makedirs(ribo_anno_dir, exist_ok=True)
@@ -661,13 +746,18 @@ def run(opts):
             sys.exit(f"RIBO Taper script not found: {create_anno_script}")
 
         from prnaseqtools.reference import check_and_build_indices
-        check_and_build_indices(prefix, genome=genome, tee=tee)
+        check_and_build_indices(prefix, genome=genome, mode='ribo', tee=tee)
 
+        # RIBO Taper create_annotations_files.bash usage:
+        #   ./create_annotation_files.bash <gtf_file> <genome_fasta_file> \
+        #       <use_ccdsid?> <use_appris?> <dest_folder>
+        # use_ccdsid: use CCDS IDs when mapping (true/false)
+        # use_appris: use APPRIS principal transcripts (true/false)
         run_cmd(
             _ribo_bash(f"{create_anno_script} {expressed_gtf} {fasta_path} "
-            f"false false {ribo_anno_dir} {bedtools_bin} "
-            f"{ribotaper_path}/"))
+            f"false false {ribo_anno_dir}"))
         tee.write("  RIBO Taper annotation created.\n")
+        tee.write("  STEP 7 COMPLETE\n")
 
     # ==================================================================
     # STEP 8 — Merge BAMs + Run RIBO Taper
@@ -676,6 +766,31 @@ def run(opts):
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 8: Merging BAMs + Running RIBO Taper\n")
         tee.write("=" * 60 + "\n")
+
+        # Cleanup previous incomplete step 8
+        for f in ["RNA_merged.bam", "RNA_merged.bam.bai",
+                   "Ribo_merged.bam", "Ribo_merged.bam.bai"]:
+            if os.path.exists(f):
+                os.unlink(f)
+        # Clean per-sample R1-only BAMs
+        for tag in all_ribo_tags:
+            r1 = f"{ribo_map_dir}/star_{tag}_Aligned.sortedByCoord.out_r1.bam"
+            for f in [r1, r1 + '.bai']:
+                if os.path.exists(f):
+                    os.unlink(f)
+        # Clean RIBO Taper output files (P_sites, ORFs, etc.)
+        for pat in ["P_sites*", "ORF*", "start_stops*",
+                     "all_tracks*", "reads*", "offsets*"]:
+            for fname in globmod.glob(pat):
+                if os.path.exists(fname):
+                    try:
+                        if os.path.isdir(fname):
+                            import shutil as _shutil
+                            _shutil.rmtree(fname, ignore_errors=True)
+                        else:
+                            os.unlink(fname)
+                    except OSError:
+                        pass
 
         # Merge RNA-seq BAMs
         tee.write("\n  Merging RNA-seq BAMs...\n")
@@ -732,6 +847,7 @@ def run(opts):
             f"{ribotaper_path}/ {bedtools_bin} {thread}"))
 
         tee.write("\n  RIBO Taper analysis complete.\n")
+        tee.write("  STEP 8 COMPLETE\n")
 
     # ==================================================================
     # STEP 9 — P-site analysis & visualization
@@ -741,7 +857,19 @@ def run(opts):
         tee.write("STEP 9: P-site analysis & visualization\n")
         tee.write("=" * 60 + "\n")
 
+        # Cleanup previous incomplete step 9 outputs
+        for pat in ["P_site_analysis.pdf", "P_site_frame_distribution.pdf",
+                     "P_site_metagene.pdf"]:
+            if os.path.exists(pat):
+                os.unlink(pat)
+        # Clean per-sample P-site split files
+        for pat in ["P_sites_*.txt", "psite_*.txt"]:
+            for fname in globmod.glob(pat):
+                if os.path.exists(fname):
+                    os.unlink(fname)
+
         _plot_psite_analysis(ribo_map_dir, all_ribo_tags, ribo_anno_dir, ribo_files, tee, thread)
+        tee.write("  STEP 9 COMPLETE\n")
 
     # ==================================================================
     # STEP 10 — Final output summary
@@ -757,6 +885,7 @@ def run(opts):
         tee.write(f"    RSEM results:         {rsem_dir}/\n")
         tee.write(f"    RIBO Taper results:   (current directory)\n")
         tee.write(f"    RIBO Taper annotation:{ribo_anno_dir}/\n")
+        tee.write("  STEP 10 COMPLETE\n")
 
     # Cleanup contamination index
     for pat in [f"{contam_index}*.ebwt", f"{contam_index}*.bt2"]:

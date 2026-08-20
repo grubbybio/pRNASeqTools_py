@@ -17,14 +17,34 @@ def validate_options(opts):
     mode = opts.get('mode', '')
     if os.path.exists(outdir):
         if mode == 'ribo':
-            # Ribo-seq auto-resume: allow reusing existing output dir.
-            # The _detect_last_step() helper reads log files and resumes
-            # from the last completed step.
+            # Ribo-seq auto-resume: output dir is allowed, but it must
+            # contain log files from a previous run to be a valid resume
+            # target.  If no previous logs exist this is likely an
+            # unrelated directory → refuse to continue.
+            _start_time = opts.get('_start_time', 0)
+            _current_log = f"log_{_start_time}.txt"
+            _prev_logs = [
+                f for f in os.listdir(outdir)
+                if f.startswith('log_') and f.endswith('.txt')
+                and f != _current_log
+            ]
+            if not _prev_logs:
+                sys.exit(
+                    f"Output directory '{outdir}' exists but contains "
+                    f"no previous log files.\n"
+                    f"  This does not appear to be a valid Ribo-seq "
+                    f"resume target.\n"
+                    f"  Please specify a different --outdir or run the "
+                    f"pipeline from scratch."
+                )
+            # Valid resume target — warn user before continuing
             import time
             print(
                 f"Output directory '{outdir}' already exists.\n"
-                f"  Ribo-seq auto-resume will start from the last completed step.\n"
-                f"  Press Ctrl+C now to abort, or wait 5 seconds to continue...",
+                f"  Found {len(_prev_logs)} previous log file(s) → "
+                f"resuming from the last completed step.\n"
+                f"  Press Ctrl+C now to abort, or wait 5 seconds "
+                f"to continue...",
                 flush=True
             )
             try:
