@@ -86,8 +86,25 @@ python pRNASeqTools_run.py degradome -c "WT=data/degradome.fq" \
 # Ribo-seq (RIBO Taper pipeline)
 python pRNASeqTools_run.py ribo \
   --rna-control "WT=SRR111111" \
+  --ribo-control "Ribo=SRR333333"
+
+# Ribo-seq — custom contamination
+python pRNASeqTools_run.py ribo \
+  --rna-control "WT=SRR111111" \
   --ribo-control "Ribo=SRR333333" \
   --contam "rRNA.fasta,tRNA.fasta,snRNA.fasta"
+
+# Ribo-seq — auto-resume from last completed step
+python pRNASeqTools_run.py ribo \
+  --rna-control "WT=SRR111111" \
+  --ribo-control "Ribo=SRR333333" \
+  --outdir ./my_ribo_run
+
+# Ribo-seq — force restart from step 8 (re-run RIBO Taper with new params)
+python pRNASeqTools_run.py ribo \
+  --rna-control "WT=SRR111111" \
+  --ribo-control "Ribo=SRR333333" \
+  --restart-step 8
 
 # Ribo-seq — paired-end data
 python pRNASeqTools_run.py ribo \
@@ -261,9 +278,23 @@ Full RIBO Taper workflow for translated ORF detection from Ribo-seq data.
 4. gffcompare → novel transcript filtering + gene_biotype annotation
 5. RSEM quantification → expressed isoform filtering (TPM threshold)
 6. STAR re-mapping with expressed annotation
-7. RIBO Taper annotation files
-8. Merge BAMs + Ribotaper.sh ORF detection
-9. Output summary
+7. RIBO Taper annotation files (create_annotations_files.bash)
+8. Merge BAMs → metaplots → interactive parameter confirmation → Ribotaper.sh ORF detection
+9. P-site analysis & visualization (frame distribution + bedtools-closest metagene plots)
+10. Final output summary
+
+**Auto-resume:** The pipeline automatically detects the last completed step from log files and resumes from where it left off. Use `--restart-step N` to force restart from a specific step (1-9).
+
+**Key features:**
+- Length distribution plots (`Ribo_length_distributions.pdf`) generated after mapping (steps 1-8); skipped when running step 9 only
+- Metaplots generated before RIBO Taper for parameter selection
+- Interactive confirmation of `ribo-len` and `cutoffs` after metaplots
+- Frame computation uses transcript_id from `start_stop_FAR.bed` match — not limited to `.1` transcripts
+- Metagene plots use bedtools closest (`P_sites_all` vs `start_stop_FAR.bed`) with RiboTaper's distance formula
+- Per-sample metagene plots with frame-colored stacked histograms (green→yellow→red gradient) + line plot overlays
+- Combined "All reads" page plus per-sample pages (2×2 layout: start codon, stop codon, overlay, stats)
+- GTF used preferentially; GFF auto-converted if needed
+- Ribo-seq BAM filtered to R1-only; RNA-seq BAM retains paired-end
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -271,12 +302,13 @@ Full RIBO Taper workflow for translated ORF detection from Ribo-seq data.
 | `--rna-treatment` | — | RNA-seq treatment: `name=file1+file2...` (repeatable) |
 | `--ribo-control` | *(required)* | Ribo-seq control: `name=file1+file2...` |
 | `--ribo-treatment` | — | Ribo-seq treatment: `name=file1+file2...` (repeatable) |
-| `--contam` | *(required)* | Contamination FASTA for Bowtie2 index |
-| `--ribo-len` | `24,25,26,27,28` | Ribo-seq read lengths |
-| `--cutoffs` | `8,9,10,11,12` | RIBO Taper cutoffs |
+| `--contam` | `reference/{genome}_contam4.fa` | Contamination FASTA for Bowtie2 index |
+| `--ribo-len` | `24,25,26,27,28` | Ribo-seq read lengths (must match cutoffs count) |
+| `--cutoffs` | `8,9,10,11,12` | RIBO Taper cutoffs (must match ribo-len count) |
 | `--tpm-threshold` | `0` | Mean TPM threshold |
 | `--ribotaper` | `~/software/ribotaper/bin` | Path to RIBO Taper installation |
 | `--ribotaper-env` | `ribotaper` | Conda environment for RIBO Taper |
+| `--restart-step` | — | Force restart from step N (1-9), overrides auto-detection |
 
 **Additional dependency:** [RiboTaper](https://github.com/hsinyenwu/RiboTaper) (manual install)
 

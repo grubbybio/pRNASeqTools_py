@@ -132,15 +132,20 @@ def build_parser():
                    help='Contamination fasta file(s) for Bowtie2 index '
                         '(default: reference/{genome}_contam4.fa)')
     p.add_argument('--ribo-len', default='24,25,26,27,28',
-                   help='Ribo-seq read lengths (comma-separated)')
+                   help='Ribo-seq read lengths (comma-separated); '
+                        'count must match cutoffs')
     p.add_argument('--cutoffs', default='8,9,10,11,12',
-                   help='RIBO Taper cutoffs (comma-separated)')
+                   help='RIBO Taper cutoffs (comma-separated); '
+                        'count must match ribo-len')
     p.add_argument('--ribotaper', default=os.path.expanduser('~/software/ribotaper/bin'),
                    help='Path to RIBO Taper installation directory')
     p.add_argument('--ribotaper-env', default='ribotaper',
                    help='Conda environment name for RIBO Taper')
     p.add_argument('--tpm-threshold', default=0, type=float,
                    help='Mean TPM threshold for isoform filtering (default: 0)')
+    p.add_argument('--restart-step', type=int, default=None,
+                   help='Force restart from this step (1-10), '
+                        'overrides auto-detection')
 
     # cips (CiPS uORF analysis)
     p = sub.add_parser('cips', help='CiPS uORF analysis (translated uORF detection)')

@@ -90,8 +90,8 @@ def run(opts):
                 f"  Please provide --contam or place {genome}_contam4.fa "
                 f"in the reference directory."
             )
-    ribo_len = opts.get('ribo_len', '24,25,26,27,28,29,30,31')
-    cutoffs = opts.get('cutoffs', '8,9,10,11,12,13,14,15')
+    ribo_len = opts.get('ribo_len', '24,25,26,27,28')
+    cutoffs = opts.get('cutoffs', '8,9,10,11,12')
     tpm_threshold = opts.get('tpm_threshold', 0)
     ribotaper_path = opts.get('ribotaper')
     ribotaper_env = opts.get('ribotaper_env')
@@ -167,13 +167,24 @@ def run(opts):
     ribo_map_dir = "STAR_Ribo_map"
     star_rna_new_map = "STAR_RNA_map_new"
     contam_index = "Contam"
+    ribo_anno_dir = "RiboTaper_annotation"
 
     # ── Auto-detect last completed step from log ─────────────────────
     _start_time = opts.get('_start_time', 0)
     current_log = f"log_{_start_time}.txt"
     last_step, resume_log = _detect_last_step(exclude_log=current_log)
-    if last_step > 0:
-        tee.write(f"\n  Resuming from step {last_step + 1} (last completed: step {last_step})\n")
+
+    # ── Manual restart-step override ──────────────────────────────
+    _restart = opts.get('restart_step')
+    if _restart is not None:
+        if not 1 <= _restart <= 10:
+            sys.exit(f"--restart-step must be 1-10, got {_restart}")
+        last_step = _restart - 1  # step N → set last_step to N-1 so step N re-runs
+        tee.write(f"\n  Manual restart from step {_restart} "
+                  f"(--restart-step={_restart})\n\n")
+    elif last_step > 0:
+        tee.write(f"\n  Resuming from step {last_step + 1} "
+                  f"(last completed: step {last_step})\n")
         tee.write(f"  Log file: {resume_log}\n\n")
     else:
         tee.write("  No previous log found, starting from step 1.\n\n")
@@ -621,10 +632,6 @@ def run(opts):
             if os.path.exists(d):
                 import shutil as _shutil
                 _shutil.rmtree(d, ignore_errors=True)
-        # Clean length distribution plot from previous run
-        for pat in ["Ribo_length_distribution.pdf"]:
-            if os.path.exists(pat):
-                os.unlink(pat)
 
         # 6a — Build Ribo-seq STAR index (sjdbOverhang based on read length)
         star_ribo_idx = "STAR_Ribo_index"
@@ -638,7 +645,6 @@ def run(opts):
             f"--limitGenomeGenerateRAM 64000000000")
 
         # Map Ribo-seq reads
-        ribo_map_dir = "STAR_Ribo_map"
         os.makedirs(ribo_map_dir, exist_ok=True)
 
         for tag in all_ribo_tags:
@@ -665,25 +671,6 @@ def run(opts):
                 f"--quantMode TranscriptomeSAM --outSAMmultNmax 1 "
                 f"--outMultimapperOrder Random "
                 f"--outFileNamePrefix {ribo_map_dir}/star_{tag}_ ")
-
-    # ── Plot Ribo-seq read length distributions (always runs when BAMs exist) ──
-    _ribo_bam_files = [
-        os.path.join(ribo_map_dir, f"star_{tag}_Aligned.sortedByCoord.out.bam")
-        for tag in all_ribo_tags
-    ]
-    _ribo_bam_files = [b for b in _ribo_bam_files if os.path.exists(b)]
-    if _ribo_bam_files:
-        tee.write("\n  Plotting Ribo-seq read length distributions...\n")
-        try:
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
-            from matplotlib.backends.backend_pdf import PdfPages
-            _plot_ribo_lengths(ribo_map_dir, all_ribo_tags, tee)
-        except ImportError:
-            tee.write("  Warning: matplotlib not available, skipping length distribution plots\n")
-    else:
-        tee.write(f"\n  No Ribo-seq BAMs found in {ribo_map_dir}, skipping length distribution plots.\n")
 
     # ── STEP 6b: RNA-seq STAR mapping ──
     if last_step < 6:
@@ -736,7 +723,6 @@ def run(opts):
             import shutil as _shutil
             _shutil.rmtree(ribo_anno_dir, ignore_errors=True)
 
-        ribo_anno_dir = "RiboTaper_annotation"
         os.makedirs(ribo_anno_dir, exist_ok=True)
 
         create_anno_script = os.path.join(
@@ -780,7 +766,8 @@ def run(opts):
                     os.unlink(f)
         # Clean RIBO Taper output files (P_sites, ORFs, etc.)
         for pat in ["P_sites*", "ORF*", "start_stops*",
-                     "all_tracks*", "reads*", "offsets*"]:
+                     "all_tracks*", "reads*", "offsets*",
+                     "Ribo_metaplots*"]:
             for fname in globmod.glob(pat):
                 if os.path.exists(fname):
                     try:
@@ -835,6 +822,57 @@ def run(opts):
         os.rename("Ribo_merged_sorted.bam", ribo_merged)
         run_cmd(f"samtools index {ribo_merged}")
 
+        # ── Generate metaplots for parameter selection ────────────────
+        tee.write("\n  Generating metaplots for read-length/cutoff selection...\n")
+        metaplot_script = os.path.join(
+            ribotaper_path, "create_metaplots.bash"
+        )
+        start_stops_bed = os.path.join(ribo_anno_dir, "start_stops_FAR.bed")
+        if not os.path.exists(metaplot_script):
+            tee.write(f"  Warning: create_metaplots.bash not found at "
+                      f"{metaplot_script}, skipping metaplots\n")
+        elif not os.path.exists(start_stops_bed):
+            tee.write(f"  Warning: start_stops_FAR.bed not found at "
+                      f"{start_stops_bed}, skipping metaplots\n")
+        else:
+            metaplot_name = "Ribo_metaplots"
+            run_cmd(
+                _ribo_bash(
+                    f"{metaplot_script} {ribo_merged} "
+                    f"{start_stops_bed} {metaplot_name}"))
+            tee.write(f"  Metaplots generated: {metaplot_name}*.pdf\n")
+
+        # ── Interactive parameter confirmation ────────────────────────
+        tee.write("\n  ── RIBO Taper parameter setup ──\n")
+        tee.write(f"  Current ribo-len: {ribo_len}\n")
+        tee.write(f"  Current cutoffs:  {cutoffs}\n")
+        try:
+            _new_len = input(
+                f"  Press Enter to use default ribo-len='{ribo_len}', "
+                f"or enter new comma-separated lengths: ").strip()
+            if _new_len:
+                ribo_len = _new_len
+                tee.write(f"  Updated ribo-len: {ribo_len}\n")
+            _new_cut = input(
+                f"  Press Enter to use default cutoffs='{cutoffs}', "
+                f"or enter new comma-separated cutoffs: ").strip()
+            if _new_cut:
+                cutoffs = _new_cut
+                tee.write(f"  Updated cutoffs: {cutoffs}\n")
+
+            # Validate matching counts
+            _rl_n = len([x for x in ribo_len.split(',') if x.strip()])
+            _co_n = len([x for x in cutoffs.split(',') if x.strip()])
+            if _rl_n != _co_n:
+                sys.exit(
+                    f"ribo-len ({_rl_n} items) and cutoffs ({_co_n} items) "
+                    f"must have the same number of values!\n"
+                    f"  ribo-len:  {ribo_len}\n"
+                    f"  cutoffs:   {cutoffs}"
+                )
+        except (EOFError, KeyboardInterrupt):
+            tee.write(f"  Using defaults: ribo-len={ribo_len}, cutoffs={cutoffs}\n")
+
         # Run RIBO Taper
         tee.write("\n  Running RIBO Taper ORF detection...\n")
         ribotaper_script = os.path.join(ribotaper_path, "Ribotaper.sh")
@@ -843,11 +881,35 @@ def run(opts):
 
         run_cmd(
             _ribo_bash(f"{ribotaper_script} {ribo_merged} {rna_merged} "
-            f"{ribo_anno_dir} {ribo_len} {cutoffs} "
-            f"{ribotaper_path}/ {bedtools_bin} {thread}"))
+            f"{ribo_anno_dir} {ribo_len} {cutoffs} {thread}"))
 
         tee.write("\n  RIBO Taper analysis complete.\n")
         tee.write("  STEP 8 COMPLETE\n")
+
+    # ── Plot Ribo-seq read length distributions ──
+    # Generate when steps 1-8 are run (last_step < 8).
+    # Skip when running step 9 only (last_step = 8, mapping already done).
+    if last_step < 8:
+        _len_pdf = "Ribo_length_distributions.pdf"
+        if os.path.exists(_len_pdf):
+            os.unlink(_len_pdf)
+        _ribo_bam_files = [
+            os.path.join(ribo_map_dir, f"star_{tag}_Aligned.sortedByCoord.out.bam")
+            for tag in all_ribo_tags
+        ]
+        _ribo_bam_files = [b for b in _ribo_bam_files if os.path.exists(b)]
+        if _ribo_bam_files:
+            tee.write("\n  Plotting Ribo-seq read length distributions...\n")
+            try:
+                import matplotlib
+                matplotlib.use('Agg')
+                import matplotlib.pyplot as plt
+                from matplotlib.backends.backend_pdf import PdfPages
+                _plot_ribo_lengths(ribo_map_dir, all_ribo_tags, tee)
+            except ImportError:
+                tee.write("  Warning: matplotlib not available, skipping length distribution plots\n")
+        else:
+            tee.write(f"\n  No Ribo-seq BAMs found in {ribo_map_dir}, skipping length distribution plots.\n")
 
     # ==================================================================
     # STEP 9 — P-site analysis & visualization
@@ -868,7 +930,7 @@ def run(opts):
                 if os.path.exists(fname):
                     os.unlink(fname)
 
-        _plot_psite_analysis(ribo_map_dir, all_ribo_tags, ribo_anno_dir, ribo_files, tee, thread)
+        _plot_psite_analysis(ribo_map_dir, all_ribo_tags, ribo_anno_dir, tee)
         tee.write("  STEP 9 COMPLETE\n")
 
     # ==================================================================
@@ -922,10 +984,13 @@ def _plot_ribo_lengths(ribo_map_dir, tags, tee):
     with PdfPages(pdf_path) as pdf:
         # Page 1: combined histogram (all samples overlayed)
         fig, ax = plt.subplots(figsize=(10, 6))
+        _all_lens = []
         for tag, bam in bam_files:
             lengths = _extract_read_lengths(bam)
             if lengths:
-                ax.hist(lengths, bins=50, alpha=0.5, label=tag, density=True)
+                _all_lens.extend(lengths)
+                ax.hist(lengths, bins=range(min(lengths), max(lengths) + 2),
+                        alpha=0.5, label=tag, density=True, align='left')
         ax.set_xlabel("Read Length (bp)")
         ax.set_ylabel("Density")
         ax.set_title("Ribo-seq Read Length Distribution (all samples)")
@@ -940,7 +1005,8 @@ def _plot_ribo_lengths(ribo_map_dir, tags, tee):
             if not lengths:
                 continue
             fig, ax = plt.subplots(figsize=(10, 6))
-            ax.hist(lengths, bins=50, color='steelblue', edgecolor='white', density=True)
+            ax.hist(lengths, bins=range(min(lengths), max(lengths) + 2),
+                    color='steelblue', edgecolor='white', density=True, align='left')
             ax.set_xlabel("Read Length (bp)")
             ax.set_ylabel("Density")
             ax.set_title(f"{tag} — Read Length Distribution")
@@ -962,11 +1028,14 @@ def _plot_ribo_lengths(ribo_map_dir, tags, tee):
 
 
 def _extract_read_lengths(bam_path):
-    """Extract read lengths from a BAM file using samtools."""
-    import subprocess
+    """Extract read lengths from a BAM file using samtools.
+    
+    Uses SAM text output (not binary BAM) and filters to primary
+    mapped reads (-F 260 = exclude unmapped + secondary alignments).
+    """
     try:
         result = subprocess.run(
-            f"samtools view -b {bam_path} | awk '{{print length($10)}}'",
+            f"samtools view -F 260 {bam_path} | awk '{{print length($10)}}'",
             shell=True, capture_output=True, text=True
         )
         lengths = [int(x) for x in result.stdout.strip().split('\n') if x]
@@ -979,164 +1048,586 @@ def _extract_read_lengths(bam_path):
 
 
 def _read_psite_tracks(psite_file):
-    """Read RIBO Taper P_sites_all_tracks_exonsccds file.
+    """Read RIBO Taper P_sites_all file (BED14 format).
     
-    Returns list of dicts with keys: read_name, chrom, pos, frame, length, etc.
-    Auto-detects delimiter (tab or space).
+    Column mapping (per RIBO Taper spec):
+    1. chrom              2. chromStart (P-site pos)   3. chromEnd
+    4. name (read_id)      5. score                     6. strand
+    7. chrom (full read)   8. chromStart (full read)    9. RGB color
+    10. block count        11. block sizes             12. block starts
+    13. block ends         14. read length
+    
+    Frame is NOT a direct column — it must be computed by comparing
+    the P-site position to the nearest start codon.
     """
     psites = []
     with open(psite_file) as f:
-        header = f.readline()
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            fields = line.split()
-            if len(fields) < 4:
-                continue
-            entry = {
-                'read_name': fields[0],
-                'chrom': fields[1],
-                'pos': int(fields[2]),
-            }
-            if len(fields) >= 5:
-                entry['frame'] = int(fields[3]) if fields[3].lstrip('-').isdigit() else 0
-            if len(fields) >= 6:
-                entry['length'] = int(fields[4]) if fields[4].lstrip('-').isdigit() else 0
-            if len(fields) >= 7:
-                entry['strand'] = fields[5]
-            psites.append(entry)
-    return psites
-
-
-def _read_start_stops_far(bed_file):
-    """Read start_stops_FAR.bed from RIBO Taper reference.
-
-    Extracts only the first transcript (transcript .1) per gene.
-    Returns dict: chrom -> {gene: (start, end)} for starts and stops.
-    """
-    starts = {}
-    stops = {}
-    with open(bed_file) as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith('#') or line.startswith('track') or line.startswith('browser'):
                 continue
-            fields = line.split('\t')
-            if len(fields) < 4:
+            fields = line.split()
+            if len(fields) < 7:
                 continue
-            chrom = fields[0]
-            start = int(fields[1])
-            end = int(fields[2])
-            transcript_info = fields[3]
+            # Extract key fields (P-site position: columns 1-3)
+            read_name = fields[3]      # column 4: name/read_id
+            chrom = fields[0]          # column 1: chrom (P-site)
+            pos = int(fields[1])       # column 2: chromStart (P-site position)
+            chrom_end = int(fields[2]) if len(fields) > 2 and fields[2].lstrip('-').isdigit() else pos + 1
+            strand = fields[5]         # column 6: strand
+            
+            # Full read coordinates (columns 7-8)
+            full_read_chrom = fields[6] if len(fields) > 6 else chrom
+            full_read_pos = int(fields[7]) if len(fields) > 7 and fields[7].lstrip('-').isdigit() else pos
+            
+            # RGB color (column 9)
+            rgb = fields[8] if len(fields) > 8 else '0,0,0'
+            
+            # Block info (columns 10-13)
+            block_count = int(fields[9]) if len(fields) > 9 and fields[9].lstrip('-').isdigit() else 0
+            block_sizes = fields[10] if len(fields) > 10 else '0'
+            block_starts = fields[11] if len(fields) > 11 else '0'
+            block_ends = fields[12] if len(fields) > 12 else '0'
+            
+            # Read length (column 14)
+            length = int(fields[13]) if len(fields) > 13 and fields[13].lstrip('-').isdigit() else 0
+            
+            # frame is not a direct column; set to 0, computed later if needed
+            frame = 0
+            
+            entry = {
+                'read_name': read_name,
+                'chrom': chrom,
+                'pos': pos,
+                'chrom_end': chrom_end,
+                'frame': frame,
+                'length': length,
+                'strand': strand,
+                'full_read_chrom': full_read_chrom,
+                'full_read_pos': full_read_pos,
+                'rgb': rgb,
+                'block_count': block_count,
+                'block_sizes': block_sizes,
+                'block_starts': block_starts,
+                'block_ends': block_ends,
+                'fields': fields,
+                'line': line,
+            }
+            psites.append(entry)
+    return psites
 
-            if chrom not in starts:
-                starts[chrom] = {}
-                stops[chrom] = {}
 
-            # Only keep first transcript (.1): e.g. AT1G01010.1_start / AT1G01010.1_stop
-            parts = transcript_info.rsplit('_', 1)
-            tx_name = parts[0]
-            if not tx_name.endswith('.1'):
-                continue
-
-            gene = tx_name.split('.')[0]
-
-            if transcript_info.endswith('_start'):
-                starts[chrom][gene] = (start, end)
-            elif transcript_info.endswith('_stop'):
-                stops[chrom][gene] = (start, end)
-
-    return starts, stops
+def _normalize_strand(strand):
+    """Normalize strand to +/-."""
+    s = strand.strip()
+    if s in ('+', '-'):
+        return s
+    if s == '.':
+        return '+'  # default
+    return '+'
 
 
-def _get_sample_read_names(fastq_path, max_reads=100000):
-    """Get read names from a FASTQ/FASTQ.gz file to identify sample origin.
+def _assign_frames(psites, transcr_exons_file, cds_coords_file, tmp_dir):
+    """Assign reading frames to P-sites using transcript coordinates.
     
-    Returns set of read name prefixes (first part of @readname before space).
+    Uses cds_coords_transcripts (transcript-level CDS start/stop) and
+    transcr_exons_ccds.bed (genomic exon positions) to compute frames.
+    
+    Steps:
+    1. Write P-sites to temp BED file
+    2. Filter transcr_exons_ccds.bed for .1 transcripts → temp BED
+    3. Run bedtools intersect to assign transcript IDs to P-sites
+    4. Build transcript exon lookup + read CDS coords
+    5. For each P-site, convert genomic → transcript pos, compute frame
+    
+    Returns (valid_psites, debug_info).
     """
-    import gzip
+    # Step 1: Write P-sites to temp BED (name = index into psites list)
+    psite_bed = os.path.join(tmp_dir, "psites_for_intersect.bed")
+    with open(psite_bed, 'w') as f:
+        for i, psite in enumerate(psites):
+            chrom = psite['chrom']
+            pos = psite['pos']  # BED0-based chromStart
+            chrom_end = psite.get('chrom_end', pos + 1)
+            strand = _normalize_strand(psite['strand'])
+            f.write(f"{chrom}\t{pos}\t{chrom_end}\tpsite_{i}\t0\t{strand}\n")
     
-    read_names = set()
+    # Step 2: Use all transcript exons from transcr_exons_ccds.bed
+    gene_bed = os.path.join(tmp_dir, "gene_exons_all.bed")
+    with open(transcr_exons_file) as fin, open(gene_bed, 'w') as fout:
+        for line in fin:
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('track') or line.startswith('browser'):
+                continue
+            fields = line.split('\t')
+            if len(fields) < 6:
+                continue
+            fout.write(line + '\n')
+    
+    # Step 3: Run bedtools intersect to assign transcript IDs
+    psite_tx = {}  # psite_idx -> transcript_id
     try:
-        if fastq_path.endswith('.gz'):
-            with gzip.open(fastq_path, 'rt') as f:
-                for i, line in enumerate(f):
-                    if i % 4 == 0:
-                        name = line.strip()[1:].split()[0]
-                        read_names.add(name)
-                    if len(read_names) >= max_reads:
-                        break
-        else:
-            with open(fastq_path) as f:
-                for i, line in enumerate(f):
-                    if i % 4 == 0:
-                        name = line.strip()[1:].split()[0]
-                        read_names.add(name)
-                    if len(read_names) >= max_reads:
-                        break
+        intersect_cmd = f"bedtools intersect -a {psite_bed} -b {gene_bed} -s -wb"
+        result = subprocess.run(intersect_cmd, shell=True, capture_output=True, text=True)
+        n_primary = 0
+        if result.returncode == 0 and result.stdout:
+            for line in result.stdout.strip().split('\n'):
+                if not line.strip():
+                    continue
+                fields = line.split('\t')
+                # -wb: 6 (psite A) + 6 (gene_bed B) = 12 columns
+                # B columns: chrom, start, end, transcript_id (.1), gene_id, strand
+                if len(fields) >= 12:
+                    psite_idx = int(fields[3].replace('psite_', ''))
+                    tx_id = fields[9]   # column 4 of B = transcript_id
+                    if tx_id:
+                        psite_tx[psite_idx] = tx_id
+                        n_primary += 1
+        
+        # Retry without strand if no matches
+        if n_primary == 0:
+            intersect_cmd = f"bedtools intersect -a {psite_bed} -b {gene_bed} -wb"
+            result2 = subprocess.run(intersect_cmd, shell=True, capture_output=True, text=True)
+            if result2.returncode == 0 and result2.stdout:
+                for line in result2.stdout.strip().split('\n'):
+                    if not line.strip():
+                        continue
+                    fields = line.split('\t')
+                    if len(fields) >= 12:
+                        psite_idx = int(fields[3].replace('psite_', ''))
+                        tx_id = fields[9]
+                        if tx_id:
+                            psite_tx[psite_idx] = tx_id
     except Exception:
         pass
-    return read_names
-
-
-def _get_sample_bam_read_names(bam_path, max_reads=100000):
-    """Get read names from a BAM file using samtools view.
     
-    Returns set of read names.
-    """
-    import subprocess
+    # Step 4: Build transcript exon lookup from filtered .1 BED
+    tx_exons = {}  # transcript_id -> (starts[], ends[], strand)
+    with open(gene_bed) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            gf = line.split('\t')
+            if len(gf) < 6:
+                continue
+            tx_id = gf[3]
+            tstart = int(gf[1])
+            tend = int(gf[2])
+            strand = gf[5]
+            if tx_id not in tx_exons:
+                tx_exons[tx_id] = [[], [], strand]
+            tx_exons[tx_id][0].append(tstart)
+            tx_exons[tx_id][1].append(tend)
+    
+    # Sort exon intervals per transcript
+    for tx_id in tx_exons:
+        tx_exons[tx_id][0].sort()
+        tx_exons[tx_id][1].sort()
+    
+    # Step 5: Read CDS coordinates (transcript-level) for ALL transcripts
+    # Format: transcript_id  start_codon  stop_codon
+    cds_coords = {}  # transcript_id -> (cds_start, cds_stop)
+    if cds_coords_file and os.path.exists(cds_coords_file):
+        with open(cds_coords_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                fields = line.split('\t')
+                if len(fields) < 3:
+                    continue
+                tx_id = fields[0]
+                try:
+                    cds_start = int(fields[1])
+                    cds_stop = int(fields[2])
+                    cds_coords[tx_id] = (cds_start, cds_stop)
+                except ValueError:
+                    continue
+    
+    # Step 6: Compute frames
+    valid_psites = []
+    for i, psite in enumerate(psites):
+        chrom = psite['chrom']
+        pos = psite['pos']  # BED0-based position
+        strand = psite['strand']
+        
+        tx_id = psite_tx.get(i)
+        if tx_id is None:
+            psite['frame'] = -1
+            continue
+        
+        # Get CDS start for this transcript
+        if tx_id not in cds_coords:
+            psite['frame'] = -1
+            continue
+        
+        cds_start_tx, cds_stop = cds_coords[tx_id]
+        
+        # Get transcript exon structure
+        if tx_id not in tx_exons:
+            psite['frame'] = -1
+            continue
+        
+        tx_starts, tx_ends, tx_strand = tx_exons[tx_id]
+        
+        # Convert genomic position → transcript position
+        psite_tx_pos = _genomic_to_transcript(pos, tx_starts, tx_ends, tx_strand)
+        
+        # Compute frame (cds_coords is 1-based, psite_tx_pos is 0-based)
+        frame = (psite_tx_pos - (cds_start_tx - 1)) % 3
+        psite['frame'] = frame
+        psite['psite_tx_pos'] = psite_tx_pos
+        psite['tx_id'] = tx_id
+        psite['cds_start'] = cds_start_tx
+        psite['cds_stop'] = cds_stop
+        valid_psites.append(psite)
+    
+    # Clean up temp BED files
     try:
-        result = subprocess.run(
-            f"samtools view {bam_path} | cut -f1 | head -n {max_reads}",
-            shell=True, capture_output=True, text=True
-        )
-        return set(result.stdout.strip().split('\n')) - {'read_name'}
+        os.unlink(psite_bed)
+        os.unlink(gene_bed)
     except Exception:
-        return set()
+        pass
+    
+    return valid_psites, len(psite_tx)
 
 
-def _split_psites_by_sample(psites, tags, fastq_files, bam_dir, tee):
+def _genomic_to_transcript(genomic_pos, starts, ends, strand):
+    """Convert a genomic position to transcript position given exon structure.
+    
+    For + strand: transcript starts at the first exon's start.
+    For - strand: transcript starts at the last exon's end (reversed).
+    """
+    if strand == '+':
+        cumulative = 0
+        for s, e in zip(starts, ends):
+            if genomic_pos < e:
+                offset = max(0, genomic_pos - s)
+                return cumulative + offset
+            cumulative += (e - s)
+        return cumulative  # beyond last exon
+    else:
+        # Minus strand: transcript is reversed
+        # Iterate exons from right to left
+        cumulative = 0
+        for s, e in reversed(list(zip(starts, ends))):
+            if genomic_pos >= s:
+                offset = max(0, e - genomic_pos)
+                return cumulative + offset
+            cumulative += (e - s)
+        return cumulative  # beyond first (leftmost) exon
+
+
+def _read_transcript_lookups(transcr_exons_file, cds_coords_file):
+    """Build per-transcript exon structure and CDS coordinate lookups.
+    
+    Uses ALL transcripts (no .1 filter).
+    
+    Returns:
+        tx_exons: {transcript_id: (starts[], ends[], strand)}
+        cds_coords: {transcript_id: (cds_start, cds_stop)}
+    """
+    tx_exons = {}  # transcript_id -> (starts[], ends[], strand)
+    if transcr_exons_file and os.path.exists(transcr_exons_file):
+        with open(transcr_exons_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or line.startswith('track') or line.startswith('browser'):
+                    continue
+                fields = line.split('\t')
+                if len(fields) < 6:
+                    continue
+                tx_id = fields[3]
+                tstart = int(fields[1])
+                tend = int(fields[2])
+                strand = fields[5]
+                if tx_id not in tx_exons:
+                    tx_exons[tx_id] = [[], [], strand]
+                tx_exons[tx_id][0].append(tstart)
+                tx_exons[tx_id][1].append(tend)
+        # Sort exon intervals per transcript
+        for tx_id in tx_exons:
+            tx_exons[tx_id][0].sort()
+            tx_exons[tx_id][1].sort()
+    
+    cds_coords = {}  # transcript_id -> (cds_start, cds_stop)
+    if cds_coords_file and os.path.exists(cds_coords_file):
+        with open(cds_coords_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                fields = line.split('\t')
+                if len(fields) < 3:
+                    continue
+                tx_id = fields[0]
+                try:
+                    cds_start = int(fields[1])
+                    cds_stop = int(fields[2])
+                    cds_coords[tx_id] = (cds_start, cds_stop)
+                except ValueError:
+                    continue
+    
+    return tx_exons, cds_coords
+
+
+def _compute_frame_for_psite(psite_genomic_pos, transcript_id, tx_exons, cds_coords):
+    """Compute reading frame for a single P-site given its transcript_id.
+    
+    Uses the transcript's exon structure and CDS coordinates.
+    Returns frame (0, 1, or 2) or -1 if computation fails.
+    """
+    if transcript_id not in tx_exons or transcript_id not in cds_coords:
+        return -1
+    
+    tx_starts, tx_ends, tx_strand = tx_exons[transcript_id]
+    cds_start_tx, _ = cds_coords[transcript_id]
+    
+    # Convert genomic position → transcript position
+    psite_tx_pos = _genomic_to_transcript(psite_genomic_pos, tx_starts, tx_ends, tx_strand)
+    
+    # Compute frame (cds_coords is 1-based, psite_tx_pos is 0-based)
+    frame = (psite_tx_pos - (cds_start_tx - 1)) % 3
+    return frame
+
+
+def _split_psites_by_sample(psites, tags, bam_dir, tee):
     """Split P-sites by sample based on read name mapping.
     
     Uses the sample BAM files to identify which P-sites belong to which sample.
+    Reads all mapped read names from each BAM, then matches P-sites by read name.
     Returns dict: tag -> list of psite dicts
     """
-    sample_psites = {tag: [] for tag in tags}
+    # First, extract read names from ALL samples in parallel to save time
+    tee.write("    Extracting read names from sample BAMs...\n")
+    sample_read_sets = {}
     
     for tag in tags:
-        bam_path = os.path.join(bam_dir, f"star_{tag}_Aligned.sortedByCoord.out.bam")
-        if not os.path.exists(bam_path):
-            tee.write(f"    BAM not found for {tag}, trying FASTQ...\n")
+        # Check both STAR and Ribo BAM paths
+        bam_candidates = [
+            os.path.join(bam_dir, f"star_{tag}_Aligned.sortedByCoord.out.bam"),
+            os.path.join(bam_dir, f"{tag}_Ribo.bam"),
+            os.path.join(bam_dir, f"{tag}.bam"),
+        ]
+        bam_path = next((p for p in bam_candidates if os.path.exists(p)), None)
+        
+        if not bam_path:
+            tee.write(f"    BAM not found for {tag}, skipping\n")
+            sample_read_sets[tag] = set()
             continue
         
-        tee.write(f"    Getting read names for {tag}...\n")
-        read_names = _get_sample_bam_read_names(bam_path)
-        
-        if not read_names:
-            tee.write(f"    Warning: No reads found for {tag}\n")
-            continue
-        
-        tee.write(f"    Found {len(read_names)} reads for {tag}, assigning P-sites...\n")
-        
-        # Build a lookup: check if psite read_name is in sample's read names
-        # Use prefix matching since P-site file may use truncated names
-        read_prefixes = set()
-        for rn in read_names:
-            # Try to extract the unique part (before any suffix like /1, /2)
-            parts = rn.rsplit('/', 1)
-            read_prefixes.add(parts[0])
-            read_prefixes.add(rn)  # also keep full name
-        
-        for psite in psites:
-            rn = psite['read_name']
-            if rn in read_prefixes or rn in read_names:
-                sample_psites[tag].append(psite)
+        tee.write(f"    Reading {tag} ({bam_path})...\n")
+        try:
+            result = subprocess.run(
+                f"samtools view -F 260 {bam_path} | cut -f1",
+                shell=True, capture_output=True, text=True
+            )
+            read_names = set(result.stdout.strip().split('\n')) - {'read_name'}
+            sample_read_sets[tag] = read_names
+            tee.write(f"    {tag}: {len(read_names):,} mapped reads\n")
+        except Exception:
+            tee.write(f"    Warning: Failed to read {bam_path}\n")
+            sample_read_sets[tag] = set()
+    
+    # Assign P-sites to samples with deduplication
+    sample_psites = {tag: [] for tag in tags}
+    seen = {tag: set() for tag in tags}  # track unique keys per sample
+    
+    tee.write(f"    Assigning {len(psites):,} P-sites to samples (dedup)...\n")
+    
+    for psite in psites:
+        rn = psite['read_name']
+        # Deduplication key: chrom + pos + read_name + length + strand
+        key = (psite['chrom'], psite['pos'], rn, psite['length'], psite['strand'])
+        for tag in tags:
+            read_set = sample_read_sets.get(tag, set())
+            if rn in read_set:
+                if key not in seen[tag]:
+                    seen[tag].add(key)
+                    sample_psites[tag].append(psite)
+                break  # assign to first matching sample only
+    
+    for tag in tags:
+        n = len(sample_psites[tag])
+        if n > 0:
+            tee.write(f"    {tag}: assigned {n:,} unique P-sites\n")
     
     return sample_psites
 
 
-def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, fastq_files, tee, threads):
+# ── Metagene via bedtools closest (RiboTaper-style) ────────────────
+
+
+def _run_metagene_bedtools(psite_file, start_stop_bed, tmp_dir, tee):
+    """Run bedtools closest to map P-sites to nearest start/stop codons.
+    
+    Follows the RiboTaper approach (metag.R + create_metaplots.bash):
+    - Input A: P_sites_all (BED14 format)
+    - Input B: start_stop_FAR.bed (BED6 format with start/stop codon positions)
+      Expected columns: chrom, start(0-based), end, name(start_codon/stop_codon),
+                        score(gene_id), strand
+    - Uses bedtools closest -s (strand-specific) -t "first" (first nearest)
+    - Output: 14 + 6 = 20 columns (BED14 from A + BED6 from B)
+    - Computes distance per RiboTaper formula:
+        + strand: distance = psite_start - codon_start
+        - strand: distance = codon_end - psite_end
+    - Groups by read length for per-length metagene plotting
+    
+    Returns dict:
+      {
+        'by_length': {length: {'start': [distances], 'stop': [distances]}},  # legacy
+        'raw_entries': [{'read_id': str, 'distance': int, 'codon_class': str, 'read_length': int}, ...],
+        'total_psites': int,
+        'total_matched': int,
+      }
+    """
+    tee.write("  Running bedtools closest for metagene analysis...\n")
+    
+    # Step 1: Prepare P_sites_all as BED file (use directly)
+    # The P_sites_all file is already in BED14 format, which bedtools can read.
+    # We need to ensure it's sorted for bedtools closest.
+    # Use version sort (-V) for chromosome names (chr1, chr2, ..., chr10)
+    psite_sorted = os.path.join(tmp_dir, "psite_sorted.bed")
+    sort_cmd = f"sort -k1,1V -k2,2n {psite_file} > {psite_sorted}"
+    try:
+        subprocess.run(sort_cmd, shell=True, check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        tee.write("  Warning: Failed to sort P_sites, using unsorted file\n")
+        psite_sorted = psite_file
+    
+    # Step 2: Sort start_stop_FAR.bed
+    ss_sorted = os.path.join(tmp_dir, "start_stop_sorted.bed")
+    sort_cmd2 = f"sort -k1,1V -k2,2n {start_stop_bed} > {ss_sorted}"
+    try:
+        subprocess.run(sort_cmd2, shell=True, check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        tee.write("  Warning: Failed to sort start_stop file\n")
+        ss_sorted = start_stop_bed
+    
+    # Step 3: Validate start_stop_FAR.bed format
+    tee.write(f"  Validating start_stop file format...\n")
+    sample_lines = []
+    with open(ss_sorted) as f:
+        for i, line in enumerate(f):
+            if i >= 5:
+                break
+            line = line.strip()
+            if line and not line.startswith('#') and not line.startswith('track'):
+                sample_lines.append(line)
+    
+    if sample_lines:
+        fields = sample_lines[0].split('\t')
+        tee.write(f"  start_stop columns: {len(fields)}, sample: {fields[:6]}\n")
+        if len(fields) < 4:
+            tee.write("  Warning: start_stop_FAR.bed has < 4 columns, might not be valid BED format\n")
+    
+    # Step 4: Run bedtools closest
+    closest_out = os.path.join(tmp_dir, "metagene_closest.bed")
+    closest_cmd = (
+        f"bedtools closest -a {psite_sorted} -b {ss_sorted} -s -t \"first\" > {closest_out}"
+    )
+    tee.write(f"  Command: {closest_cmd}\n")
+    try:
+        subprocess.run(closest_cmd, shell=True, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        tee.write(f"  Warning: bedtools closest failed: {e.stderr}\n")
+        return None
+    
+    if not os.path.exists(closest_out) or os.path.getsize(closest_out) == 0:
+        tee.write("  Warning: bedtools closest produced no output\n")
+        return None
+    
+    tee.write(f"  bedtools closest output: {os.path.getsize(closest_out)} bytes\n")
+    
+    # Step 5: Parse the bedtools closest output
+    # Format: BED14 (from A) + BED6 (from B) = 20 columns
+    # Columns 1-14: from P_sites_all
+    #   1: chrom, 2: start (P-site), 3: end, 4: read_id, 5: score, 6: strand
+    #   7: chrom_full, 8: start_full, 9: RGB, 10: block_count
+    #   11: block_sizes, 12: block_starts, 13: block_ends, 14: read_length
+    # Columns 15-20: from start_stop_FAR.bed
+    #   15: chrom, 16: start (codon), 17: end (codon)
+    #   18: name (start_codon/stop_codon), 19: score (gene_id), 20: strand
+    
+    by_length = {}  # length -> {'start': [distances], 'stop': [distances]}
+    raw_entries = []  # list of dicts with read_id, distance, codon_class, read_length
+    total_psites = 0
+    total_matched = 0
+    
+    with open(closest_out) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            fields = line.split('\t')
+            if len(fields) < 20:
+                continue
+            
+            total_psites += 1
+            
+            # Extract P-site info (cols 1-14)
+            psite_start = int(fields[1]) if fields[1].lstrip('-').isdigit() else 0
+            psite_end = int(fields[2]) if fields[2].lstrip('-').isdigit() else psite_start + 1
+            read_id = fields[3]  # read name / ID
+            psite_strand = fields[5]
+            read_length = int(fields[13]) if len(fields) > 13 and fields[13].lstrip('-').isdigit() else 0
+            
+            # Extract codon info (cols 15-20 from start_stop_FAR.bed)
+            # start_stop_FAR.bed format: chrom, start, end, name, score=transcript_id, strand
+            codon_start = int(fields[15]) if fields[15].lstrip('-').isdigit() else 0
+            codon_end = int(fields[16]) if fields[16].lstrip('-').isdigit() else codon_start + 3
+            codon_type = fields[17]  # "start_codon" or "stop_codon" (BED name)
+            transcript_id = fields[18] if len(fields) > 18 else ''  # BED score = transcript_id
+            
+            # Classify codon type (handle various naming conventions)
+            codon_type_lower = codon_type.lower()
+            if 'start' in codon_type_lower:
+                codon_class = 'start'
+            elif 'stop' in codon_type_lower or 'end' in codon_type_lower:
+                codon_class = 'stop'
+            else:
+                continue  # Skip if codon type is not recognized
+            
+            # Compute distance (RiboTaper formula)
+            # For + strand: distance = psite_start - codon_start
+            # For - strand: distance = codon_end - psite_end
+            if psite_strand == '+':
+                distance = psite_start - codon_start
+            else:
+                distance = codon_end - psite_end
+            
+            total_matched += 1
+            
+            # Group by read length (legacy, keep for stats)
+            if read_length not in by_length:
+                by_length[read_length] = {'start': [], 'stop': []}
+            by_length[read_length][codon_class].append(distance)
+            
+            # Store raw entry for per-sample/per-frame plotting
+            raw_entries.append({
+                'read_id': read_id,
+                'distance': distance,
+                'codon_class': codon_class,
+                'read_length': read_length,
+                'transcript_id': transcript_id,
+                'psite_start': psite_start,
+                'psite_strand': psite_strand,
+            })
+    
+    tee.write(f"  Total P-sites in closest output: {total_psites}\n")
+    tee.write(f"  Matched to start/stop codons: {total_matched}\n")
+    tee.write(f"  Read lengths found: {sorted(by_length.keys())}\n")
+    
+    return {
+        'by_length': by_length,
+        'raw_entries': raw_entries,
+        'total_psites': total_psites,
+        'total_matched': total_matched,
+    }
+
+
+def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, tee):
     """Run P-site analysis using RIBO Taper pre-computed outputs.
     
     Splits P-sites by sample, computes frame distribution and metagene plots.
@@ -1154,9 +1645,11 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, fastq_files, tee, th
         tee.write("  Warning: matplotlib/numpy not available, skipping P-site analysis\n")
         return
     
-    # Find RIBO Taper P-site output
+    # Find RIBO Taper P-site output (check exact names first, then glob)
     psite_file = None
     candidates = [
+        "P_sites_all",
+        "P_sites_all.txt",
         "P_sites_all_tracks_exonsccds",
         "P_sites_all_tracks_exonsccds.txt",
         "P_sites_all_tracks",
@@ -1166,6 +1659,18 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, fastq_files, tee, th
         if os.path.exists(c):
             psite_file = c
             break
+    
+    # Fallback: try glob for P_sites*
+    if not psite_file:
+        import glob as _glob
+        _glob_candidates = sorted(_glob.glob("P_sites*"))
+        # Prefer P_sites_all over other matches
+        for g in _glob_candidates:
+            if "P_sites_all" in g and not g.endswith(".txt"):
+                psite_file = g
+                break
+        if not psite_file and _glob_candidates:
+            psite_file = _glob_candidates[0]
     
     if not psite_file:
         tee.write(f"  Warning: RIBO Taper P-site file not found\n")
@@ -1179,34 +1684,85 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, fastq_files, tee, th
     
     tee.write(f"  Found {len(psites)} P-sites total\n")
     
-    # Find start/stop codon file
-    starts_stops_file = None
+    # Find start_stop_FAR.bed for bedtools closest approach
+    start_stop_bed = None
     ss_candidates = [
+        os.path.join(ribo_anno_dir, "start_stop_FAR.bed"),
         os.path.join(ribo_anno_dir, "start_stops_FAR.bed"),
+        os.path.join(ribo_anno_dir, "start_stop.bed"),
         os.path.join(ribo_anno_dir, "start_stops.bed"),
+        "start_stop_FAR.bed",
         "start_stops_FAR.bed",
-        "start_stops.bed",
     ]
-    for s in ss_candidates:
-        if os.path.exists(s):
-            starts_stops_file = s
+    for ss in ss_candidates:
+        if os.path.exists(ss):
+            start_stop_bed = ss
             break
     
-    start_codons = {}
-    stop_codons = {}
-    if starts_stops_file:
-        tee.write(f"  Reading start/stop codons: {starts_stops_file}\n")
-        start_codons, stop_codons = _read_start_stops_far(starts_stops_file)
-        tee.write(f"  Found start codons on {len(start_codons)} chromosomes\n")
-        tee.write(f"  Found stop codons on {len(stop_codons)} chromosomes\n")
+    # Also find transcr_exons_ccds.bed and cds_coords_transcripts for frame computation
+    transcr_exons_file = None
+    te_candidates = [
+        os.path.join(ribo_anno_dir, "transcr_exons_ccds.bed"),
+        os.path.join(ribo_anno_dir, "transcr_exons.bed"),
+        "transcr_exons_ccds.bed",
+        "transcr_exons.bed",
+    ]
+    for te in te_candidates:
+        if os.path.exists(te):
+            transcr_exons_file = te
+            break
+    
+    cds_coords_file = None
+    cds_candidates = [
+        os.path.join(ribo_anno_dir, "cds_coords_transcripts"),
+        os.path.join(ribo_anno_dir, "cds_coords_transcripts.txt"),
+        "cds_coords_transcripts",
+        "cds_coords_transcripts.txt",
+    ]
+    for cc in cds_candidates:
+        if os.path.exists(cc):
+            cds_coords_file = cc
+            break
+    
+    # Compute frames if possible (for frame distribution plot)
+    if transcr_exons_file and cds_coords_file:
+        tee.write(f"  Filtering .1 transcript exons from: {transcr_exons_file}\n")
+        tee.write(f"  Reading CDS coordinates from: {cds_coords_file}\n")
+        tee.write("  Assigning frames (transcript-level coordinates)...\n")
+        valid_psites, n_matched = _assign_frames(
+            psites, transcr_exons_file, cds_coords_file, ribo_map_dir)
+        tee.write(f"  bedtools matched: {n_matched} P-sites\n")
+        n_excluded = len(psites) - len(valid_psites)
+        frames_list = [p['frame'] for p in valid_psites]
+        tee.write(f"  Excluded {n_excluded} P-sites outside .1 transcript exons\n")
+        tee.write(f"  Valid P-sites: {len(valid_psites)}\n")
+        if frames_list:
+            fc = np.bincount(frames_list, minlength=3)[:3]
+            tee.write(f"  Frame distribution: 0={fc[0]}, 1={fc[1]}, 2={fc[2]}\n")
+        psites = valid_psites
     else:
-        tee.write("  Warning: start_stops_FAR.bed not found, metagene plots will be empty\n")
+        if not transcr_exons_file:
+            tee.write("  Warning: transcr_exons_ccds.bed not found, skipping frame computation\n")
+        if not cds_coords_file:
+            tee.write("  Warning: cds_coords_transcripts not found, skipping frame computation\n")
+        tee.write("  Frame assignment skipped, using all P-sites\n")
     
     # Split P-sites by sample
     tee.write("  Splitting P-sites by sample...\n")
     sample_psites = _split_psites_by_sample(
-        psites, tags, fastq_files, ribo_map_dir, tee
+        psites, tags, ribo_map_dir, tee
     )
+    
+    # ── Run bedtools closest for metagene plotting (RiboTaper-style) ──
+    metagene_data = None
+    if start_stop_bed:
+        tee.write(f"\n  Running bedtools closest with {start_stop_bed}...\n")
+        metagene_data = _run_metagene_bedtools(
+            psite_file, start_stop_bed, ribo_map_dir, tee)
+        if metagene_data:
+            tee.write(f"  Metagene data ready: {len(metagene_data['by_length'])} read lengths\n")
+    else:
+        tee.write("  Warning: start_stop_FAR.bed not found, skipping metagene plots\n")
     
     # Generate plots
     pdf_path = "Ribo_psite_analysis.pdf"
@@ -1220,27 +1776,32 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, fastq_files, tee, th
         all_frames = []
         for tag, sp in sample_psites.items():
             for p in sp:
-                if 'frame' in p:
+                if 'frame' in p and p['frame'] >= 0:
                     all_frames.append(p['frame'])
         
         if all_frames:
             frame_counts = np.bincount(all_frames, minlength=3)[:3]
             colors = ['#2ecc71', '#e74c3c', '#3498db']
-            bars = axes[0].bar(['Frame 0', 'Frame +1', 'Frame +2'],
-                              frame_counts, color=colors, edgecolor='white')
+            axes[0].bar(['Frame 0', 'Frame +1', 'Frame +2'],
+                       frame_counts, color=colors, edgecolor='white')
             axes[0].set_ylabel('Count')
             axes[0].set_title('P-site Frame Distribution (All Samples)')
             total = frame_counts.sum()
-            axes[0].legend([f'Frame {i}: {c} ({100*c/total:.1f}%)'
-                          for i, c in enumerate(frame_counts)],
-                         fontsize=8, loc='upper right')
+            if total > 0:
+                axes[0].legend([f'Frame {i}: {c} ({100*c/total:.1f}%)'
+                              for i, c in enumerate(frame_counts)],
+                             fontsize=8, loc='upper right')
+            else:
+                axes[0].legend([f'Frame {i}: {c}'
+                              for i, c in enumerate(frame_counts)],
+                             fontsize=8, loc='upper right')
         
         # Per-sample frame heatmap
         valid_samples = [t for t in tags if sample_psites.get(t)]
         if valid_samples:
             heatmap_data = np.zeros((3, len(valid_samples)))
             for j, tag in enumerate(valid_samples):
-                frames = [p['frame'] for p in sample_psites[tag] if 'frame' in p]
+                frames = [p['frame'] for p in sample_psites[tag] if 'frame' in p and p['frame'] >= 0]
                 if frames:
                     counts = np.bincount(frames, minlength=3)[:3]
                     total = counts.sum()
@@ -1262,94 +1823,282 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, fastq_files, tee, th
         pdf.savefig(fig)
         plt.close(fig)
         
-        # ── Per-sample pages: frame bar + metagene ──
-        for tag in tags:
-            assignments = sample_psites.get(tag, [])
-            if not assignments:
-                continue
+        # ── Per-sample metagene plots (bedtools closest, RiboTaper-style) ──
+        if metagene_data and metagene_data.get('raw_entries'):
+            tee.write("\n  Preparing per-sample metagene data...\n")
+            raw_entries = metagene_data['raw_entries']
             
-            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
+            # Build read_id → sample_tag mapping from sample_psites
+            # (for sample assignment only; frame is computed from transcript_id)
+            read_to_sample = {}  # read_id -> tag
+            for tag in tags:
+                for psite_entry in sample_psites.get(tag, []):
+                    rn = psite_entry.get('read_name', '')
+                    if rn and rn not in read_to_sample:
+                        read_to_sample[rn] = tag
             
-            # Frame distribution
-            frames = [p['frame'] for p in assignments if 'frame' in p]
-            if frames:
-                frame_counts = np.bincount(frames, minlength=3)[:3]
-                colors = ['#2ecc71', '#e74c3c', '#3498db']
-                total = frame_counts.sum()
-                bars = ax1.bar(['F0', 'F+1', 'F+2'],
-                              frame_counts, color=colors, edgecolor='white')
-                ax1.set_title(f'{tag} — Frame Distribution')
-                ax1.set_ylabel('Count')
-                for i, (bar, count) in enumerate(zip(bars, frame_counts)):
-                    pct = 100 * count / total if total > 0 else 0
-                    ax1.text(bar.get_x() + bar.get_width()/2., bar.get_height(),
-                            f'{pct:.1f}%', ha='center', va='bottom', fontsize=9)
-            else:
-                ax1.text(0.5, 0.5, 'No frame data', ha='center', va='center', transform=ax1.transAxes)
-                ax1.set_title(f'{tag} — Frame Distribution')
+            tee.write(f"  Read→sample mapping: {len(read_to_sample)} entries\n")
             
-            # Metagene: near start codon
-            if start_codons:
-                start_positions = []
-                for psite in assignments:
-                    chrom = psite.get('chrom', '')
-                    pos = psite.get('pos', 0)
-                    if chrom in start_codons:
-                        for gene, (s, e) in start_codons[chrom].items():
-                            mid = (s + e) // 2
-                            offset = pos - mid
-                            if -200 <= offset <= 300:
-                                start_positions.append(offset)
+            # Build transcript lookups (ALL transcripts, no .1 filter)
+            tx_exons, cds_coords = _read_transcript_lookups(transcr_exons_file, cds_coords_file)
+            tee.write(f"  Transcript exon lookups: {len(tx_exons)} transcripts\n")
+            tee.write(f"  CDS coordinate lookups: {len(cds_coords)} transcripts\n")
+            
+            # Compute frame for each raw_entry using its matched transcript_id
+            # (from start_stop_FAR.bed match, not limited to .1)
+            n_frame0 = n_frame1 = n_frame2 = n_unassigned = 0
+            for entry in raw_entries:
+                tid = entry.get('transcript_id', '')
+                pstart = entry.get('psite_start', 0)
+                if tid and tid in tx_exons and tid in cds_coords:
+                    frame = _compute_frame_for_psite(pstart, tid, tx_exons, cds_coords)
+                    entry['frame'] = frame
+                    if frame == 0:
+                        n_frame0 += 1
+                    elif frame == 1:
+                        n_frame1 += 1
+                    elif frame == 2:
+                        n_frame2 += 1
+                    else:
+                        n_unassigned += 1
+                else:
+                    entry['frame'] = -1
+                    n_unassigned += 1
+                # Assign sample from read_to_sample
+                entry['sample'] = read_to_sample.get(entry.get('read_id', ''), None)
+            
+            tee.write(f"  Frame assignment: 0={n_frame0}, 1={n_frame1}, 2={n_frame2}, unassigned={n_unassigned}\n")
+            
+            # Define sample order: all tags that have data + "All" combined
+            sample_order = ['All']
+            for tag in tags:
+                if sample_psites.get(tag):
+                    sample_order.append(tag)
+            
+            # Initialize per-sample data structure
+            # For each sample/codon: count[frame][distance]
+            # distance range: -30..30 (61 positions)
+            DIST_MIN, DIST_MAX = -30, 30
+            N_DIST = DIST_MAX - DIST_MIN + 1  # 61
+            
+            # Structure: data[sample][codon] = [[counts for dist -30..30] for frame 0..2]
+            # Plus 'unassigned' list for entries without frame/sample
+            metagene_by_sample = {}  # sample -> {'start': [3 lists of 61], 'stop': [3 lists of 61]}
+            for s in sample_order:
+                metagene_by_sample[s] = {
+                    'start': [np.zeros(N_DIST) for _ in range(3)],
+                    'stop': [np.zeros(N_DIST) for _ in range(3)],
+                    'unassigned_start': [],
+                    'unassigned_stop': [],
+                }
+            
+            # Process raw entries (frame already computed per-entry)
+            n_assigned = 0
+            n_unassigned_count = 0
+            for entry in raw_entries:
+                dist = entry['distance']
+                codon = entry['codon_class']  # 'start' or 'stop'
+                frame = entry.get('frame', -1)
+                sample = entry.get('sample', None)
                 
-                if start_positions:
-                    bins = np.arange(-200, 301, 5)
-                    ax2.hist(start_positions, bins=bins, density=True,
-                            color='steelblue', edgecolor='white', alpha=0.7)
-                    ax2.axvline(x=0, color='red', linestyle='--', linewidth=1.5)
-                    ax2.text(0.5, -0.15, 'Start Codon', transform=ax2.get_xaxis_transform(),
-                            ha='center', fontsize=8, color='red')
-            ax2.set_title(f'{tag} — P-sites near Start Codon')
-            ax2.set_xlabel('Offset from Start Codon (bp)')
-            ax2.set_ylabel('Density')
-            
-            # Metagene: near stop codon
-            if stop_codons:
-                stop_positions = []
-                for psite in assignments:
-                    chrom = psite.get('chrom', '')
-                    pos = psite.get('pos', 0)
-                    if chrom in stop_codons:
-                        for gene, (s, e) in stop_codons[chrom].items():
-                            mid = (s + e) // 2
-                            offset = pos - mid
-                            if -300 <= offset <= 100:
-                                stop_positions.append(offset)
+                # Filter to -30..30 range
+                if dist < DIST_MIN or dist > DIST_MAX:
+                    continue
                 
-                if stop_positions:
-                    bins = np.arange(-300, 101, 5)
-                    ax3.hist(stop_positions, bins=bins, density=True,
-                            color='darkorange', edgecolor='white', alpha=0.7)
-                    ax3.axvline(x=0, color='red', linestyle='--', linewidth=1.5)
-                    ax3.text(0.5, -0.15, 'Stop Codon', transform=ax3.get_xaxis_transform(),
-                            ha='center', fontsize=8, color='red')
-            ax3.set_title(f'{tag} — P-sites near Stop Codon')
-            ax3.set_xlabel('Offset from Stop Codon (bp)')
-            ax3.set_ylabel('Density')
+                dist_idx = dist - DIST_MIN  # 0..60
+                
+                if 0 <= frame <= 2:
+                    # Frame assigned: assign to "All" and specific sample
+                    targets = ['All']
+                    if sample and sample in metagene_by_sample:
+                        targets.append(sample)
+                    for s in targets:
+                        if s in metagene_by_sample:
+                            frame_counts = metagene_by_sample[s][codon][frame]
+                            frame_counts[dist_idx] += 1
+                    n_assigned += 1
+                else:
+                    # Frame unassigned
+                    key = 'unassigned_start' if codon == 'start' else 'unassigned_stop'
+                    metagene_by_sample['All'][key].append(dist)
+                    if sample and sample in metagene_by_sample:
+                        metagene_by_sample[sample][key].append(dist)
+                    n_unassigned_count += 1
             
-            plt.tight_layout()
-            pdf.savefig(fig)
-            plt.close(fig)
+            tee.write(f"  Assigned (frame+sample): {n_assigned}, unassigned: {n_unassigned}\n")
+            
+            # Define frame colors: green→yellow→red gradient
+            frame_colors = ['#27ae60', '#f1c40f', '#e74c3c']
+            frame_labels = ['Frame 0', 'Frame 1', 'Frame 2']
+            dist_positions = np.arange(DIST_MIN, DIST_MAX + 1)  # -30..30
+            
+            def _draw_sample_page(ax_row, sample_name, sample_data):
+                """Draw a 2x2 metagene page for one sample.
+                ax_row[0,0] = Start Codon (histogram + line plot)
+                ax_row[0,1] = Stop Codon (histogram + line plot)
+                ax_row[1,0] = Overlay (Start vs Stop total line plot)
+                ax_row[1,1] = Stats
+                """
+                # ── Start Codon ──
+                ax_start = ax_row[0, 0]
+                _draw_codon_panel(ax_start, dist_positions, sample_data, 'start',
+                                  f'Start Codon — {sample_name}')
+                
+                # ── Stop Codon ──
+                ax_stop = ax_row[0, 1]
+                _draw_codon_panel(ax_stop, dist_positions, sample_data, 'stop',
+                                  f'Stop Codon — {sample_name}')
+                
+                # ── Overlay (total counts line plot) ──
+                ax_overlay = ax_row[1, 0]
+                start_total = np.zeros(N_DIST)
+                stop_total = np.zeros(N_DIST)
+                for f in range(3):
+                    start_total += sample_data['start'][f]
+                    stop_total += sample_data['stop'][f]
+                # Add unassigned
+                for d in sample_data.get('unassigned_start', []):
+                    if DIST_MIN <= d <= DIST_MAX:
+                        start_total[d - DIST_MIN] += 1
+                for d in sample_data.get('unassigned_stop', []):
+                    if DIST_MIN <= d <= DIST_MAX:
+                        stop_total[d - DIST_MIN] += 1
+                
+                ax_overlay.plot(dist_positions, start_total, color='#3498db',
+                               linewidth=2, marker='o', markersize=3, label='Start', alpha=0.85)
+                ax_overlay.plot(dist_positions, stop_total, color='#e74c3c',
+                               linewidth=2, marker='s', markersize=3, label='Stop', alpha=0.85)
+                ax_overlay.axvline(x=0, color='black', linestyle='--', linewidth=1, alpha=0.5)
+                ax_overlay.set_xlabel('Distance from Codon (nt)')
+                ax_overlay.set_ylabel('Count')
+                ax_overlay.set_title(f'Overlay — {sample_name}')
+                ax_overlay.set_xlim(DIST_MIN, DIST_MAX)
+                ax_overlay.legend(fontsize=8, loc='upper right')
+                
+                # ── Stats ──
+                ax_stats = ax_row[1, 1]
+                ax_stats.axis('off')
+                n_start_total = int(start_total.sum())
+                n_stop_total = int(stop_total.sum())
+                lines = [
+                    f'Sample: {sample_name}',
+                    f'',
+                    f'Start codon (in range): {n_start_total}',
+                    f'  Frame 0: {int(sample_data["start"][0].sum())}',
+                    f'  Frame 1: {int(sample_data["start"][1].sum())}',
+                    f'  Frame 2: {int(sample_data["start"][2].sum())}',
+                    f'',
+                    f'Stop codon (in range): {n_stop_total}',
+                    f'  Frame 0: {int(sample_data["stop"][0].sum())}',
+                    f'  Frame 1: {int(sample_data["stop"][1].sum())}',
+                    f'  Frame 2: {int(sample_data["stop"][2].sum())}',
+                ]
+                ax_stats.text(0.1, 0.95, '\n'.join(lines), fontsize=10,
+                             verticalalignment='top', fontfamily='monospace',
+                             transform=ax_stats.transAxes)
+                ax_stats.set_title(f'Stats — {sample_name}')
+            
+            def _draw_codon_panel(ax, dist_pos, sample_data, codon_type, title):
+                """Draw histogram (stacked by frame) + line plot for one codon type."""
+                frame_data_list = sample_data[codon_type]  # list of 3 arrays
+                total_counts = sum(frame_data_list)  # sum across frames
+                
+                # Stacked histogram for frames
+                bottom = np.zeros(N_DIST)
+                has_data = total_counts.sum() > 0
+                
+                if has_data:
+                    for f in range(3):
+                        ax.bar(dist_pos, frame_data_list[f], bottom=bottom,
+                               color=frame_colors[f], label=frame_labels[f],
+                               width=1, align='edge', edgecolor='white', linewidth=0.3,
+                               alpha=0.85)
+                        bottom += frame_data_list[f]
+                    # Add unassigned counts
+                    unassigned_key = 'unassigned_' + codon_type
+                    unassigned_data = sample_data.get(unassigned_key, [])
+                    if unassigned_data:
+                        unassigned_arr = np.zeros(N_DIST)
+                        for d in unassigned_data:
+                            if DIST_MIN <= d <= DIST_MAX:
+                                unassigned_arr[d - DIST_MIN] += 1
+                        if unassigned_arr.sum() > 0:
+                            ax.bar(dist_pos, unassigned_arr, bottom=bottom,
+                                   color='gray', label='Unassigned',
+                                   width=1, align='edge', edgecolor='white', linewidth=0.3,
+                                   alpha=0.5)
+                
+                # Line plot overlay (total counts per distance)
+                total_with_unassigned = total_counts.copy()
+                unassigned_key = 'unassigned_' + codon_type
+                for d in sample_data.get(unassigned_key, []):
+                    if DIST_MIN <= d <= DIST_MAX:
+                        total_with_unassigned[d - DIST_MIN] += 1
+                
+                if total_with_unassigned.sum() > 0:
+                    ax.plot(dist_pos + 0.5, total_with_unassigned, color='black',
+                           linewidth=1.5, marker='.', markersize=3,
+                           zorder=5, alpha=0.7, label='Total (line)')
+                
+                ax.axvline(x=0, color='red', linestyle='--', linewidth=1, alpha=0.6)
+                ax.set_xlabel('Distance from Codon (nt)')
+                ax.set_ylabel('Count')
+                n_total = int(total_with_unassigned.sum())
+                ax.set_title(f'{title} (n={n_total})')
+                ax.set_xlim(DIST_MIN, DIST_MAX + 1)
+                ax.set_xticks(range(DIST_MIN, DIST_MAX + 1, 5))
+                ax.legend(fontsize=7, loc='upper right')
+            
+            # ── Generate all pages ──
+            pages_generated = 0
+            for sample_name in sample_order:
+                sample_data = metagene_by_sample[sample_name]
+                # Check if there's any data for this sample
+                has_data = (
+                    sample_data['start'][0].sum() + sample_data['start'][1].sum() + sample_data['start'][2].sum() +
+                    sample_data['stop'][0].sum() + sample_data['stop'][1].sum() + sample_data['stop'][2].sum() +
+                    len(sample_data.get('unassigned_start', [])) +
+                    len(sample_data.get('unassigned_stop', []))
+                ) > 0
+                
+                if not has_data:
+                    tee.write(f"  Skipping {sample_name}: no metagene data\n")
+                    continue
+                
+                fig, axes_2x2 = plt.subplots(2, 2, figsize=(14, 10))
+                fig.suptitle(
+                    f'Metagene Profile — {sample_name}',
+                    fontsize=14, fontweight='bold')
+                
+                _draw_sample_page(axes_2x2, sample_name, sample_data)
+                
+                plt.tight_layout()
+                pdf.savefig(fig)
+                plt.close(fig)
+                pages_generated += 1
+            
+            tee.write(f"  Generated {pages_generated} metagene pages (All + per-sample)\n")
+        else:
+            tee.write("  No metagene data available, skipping metagene plots\n")
     
-    # Save per-sample P-site files
+    # Save per-sample P-site files (exact same format as P_sites_all)
     tee.write("\n  Saving per-sample P-site files...\n")
     for tag, assignments in sample_psites.items():
         if not assignments:
             continue
-        out_file = f"P_sites_{tag}.txt"
+        out_file = f"P_sites_{tag}"
         with open(out_file, 'w') as f:
-            f.write("read_name\tchrom\tpos\tframe\tlength\n")
             for p in assignments:
-                f.write(f"{p.get('read_name','')}\t{p.get('chrom','')}\t{p.get('pos',0)}\t{p.get('frame',0)}\t{p.get('length',0)}\n")
+                f.write(p.get('line', '') + '\n')
         tee.write(f"    {out_file}: {len(assignments)} P-sites\n")
+    
+    # Clean up temp files from bedtools closest
+    for tmp_f in ['psite_sorted.bed', 'start_stop_sorted.bed', 'metagene_closest.bed']:
+        tmp_path = os.path.join(ribo_map_dir, tmp_f)
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
     
     tee.write(f"\n  P-site analysis complete. Plots saved to: {pdf_path}\n")

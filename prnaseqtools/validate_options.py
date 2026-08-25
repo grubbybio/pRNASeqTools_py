@@ -103,6 +103,20 @@ def validate_options(opts):
     if mode != 'ribo' and opts.get('no_mapping') and opts.get('mapping_only'):
         sys.exit('Parameter conflict: nomapping and mappingonly!')
 
+    # Ribo-seq: validate ribo-len and cutoffs have the same number of items
+    if mode == 'ribo':
+        _rl = opts.get('ribo_len', '')
+        _co = opts.get('cutoffs', '')
+        _rl_n = len([x for x in _rl.split(',') if x.strip()])
+        _co_n = len([x for x in _co.split(',') if x.strip()])
+        if _rl_n != _co_n:
+            sys.exit(
+                f"ribo-len ({_rl_n} items) and cutoffs ({_co_n} items) "
+                f"must have the same number of comma-separated values!\n"
+                f"  ribo-len:  {_rl}\n"
+                f"  cutoffs:   {_co}"
+            )
+
     # DESeq2Norm validation
     deseq2_norm = opts.get('deseq2_norm')
     if deseq2_norm is not None and deseq2_norm not in ('DESeq2', 'RPM'):
