@@ -66,7 +66,7 @@ dependencies:
   # ── UMI handling ─────────────────────────────────────────────────────
   - umi_tools
 
-  # ── Python libraries (stdlib-only rewrite, but sPARTA needs these) ───
+  # ── Python libraries (sPARTA degradome + ribo-mode TE statistics) ────
   - numpy
   - scipy
 
@@ -74,9 +74,15 @@ dependencies:
   - bioconductor-deseq2
   - bioconductor-dmrcaller
   - bioconductor-rnamodr.ribomethseq
+  - bioconductor-complexheatmap   # TE summary heatmap plotting
   - r-pheatmap
   - r-dplyr
   - r-devtools
+  - r-emmeans                     # Estimated marginal means + paired comparisons (TE stats)
+  - r-car                         # ANOVA table type II/III, Levene's test (TE stats)
+  - r-agricolae                   # Tukey HSD / LSD compact letter display (TE stats)
+  - r-multcomp                    # Post-hoc multiple comparison letters (TE stats backup)
+  - r-ggpubr                      # Publication-ready stat annotations (TE stats)
 
   # ── pip-installed tools not on conda ─────────────────────────────────
   - pip

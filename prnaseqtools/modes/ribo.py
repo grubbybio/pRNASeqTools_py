@@ -71,6 +71,55 @@ def _detect_last_step(search_dir=None, exclude_log=None):
     return (last_step, latest_log)
 
 
+# R packages required by the TE statistical testing module (Step 11)
+_TE_R_PACKAGES = ['emmeans', 'car', 'multcomp']
+
+
+def _check_r_packages(tee):
+    """Check and auto-install the R packages required for TE statistics.
+
+    Called once at pipeline start. Uses scripts/checkPackages.R for
+    installation when packages are missing.
+    """
+    rscript = shutil.which("Rscript")
+    if not rscript:
+        tee.write("  WARNING: Rscript not found - TE statistics may fail\n")
+        return
+
+    check_script = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        'scripts', 'checkPackages.R')
+
+    # Build an inline R expression that reports missing packages
+    pkg_str = ','.join(_TE_R_PACKAGES)
+    probe = (
+        f'missing <- c(); '
+        f'for (p in strsplit("{pkg_str}", ",")[[1]]) '
+        f'if (!requireNamespace(p, quietly=TRUE)) missing <- c(missing, p); '
+        f'cat(if (length(missing)) paste(missing, collapse=",") else "")'
+    )
+    try:
+        r = subprocess.run([rscript, '--vanilla', '-e', probe],
+                           capture_output=True, text=True, timeout=120)
+        missing = r.stdout.strip()
+        if not missing:
+            tee.write(f"  R packages OK: {pkg_str}\n")
+            return
+        tee.write(f"  Missing R packages: {missing} - attempting installation...\n")
+        if os.path.exists(check_script):
+            run_cmd(
+                f'Rscript --vanilla "{check_script}" '
+                f'--packages "{missing}"')
+        else:
+            run_cmd(
+                f"Rscript --vanilla -e "
+                f"'if(!requireNamespace(\"BiocManager\",quietly=TRUE))"
+                f"install.packages(\"BiocManager\");"
+                f"install.packages(c({','.join(repr(p) for p in _TE_R_PACKAGES)}))'")
+    except Exception as exc:
+        tee.write(f"  WARNING: R package check failed: {exc}\n")
+
+
 # ── Main entry point ─────────────────────────────────────────────────────
 
 def run(opts):
@@ -209,12 +258,15 @@ def run(opts):
     else:
         tee.write("  No previous log found, starting from step 1.\n\n")
 
-    # ── Verify intermediate files if resuming from step 6+ ──
+        # ── Verify intermediate files if resuming from step 6+ ──
     if last_step >= 6:
         if not os.path.exists(expressed_gtf):
             tee.write(f"  WARNING: {expressed_gtf} not found - steps 4-5 may need to be re-run\n")
         if not os.path.exists(updated_gtf):
             tee.write(f"  WARNING: {updated_gtf} not found - steps 4-5 may need to be re-run\n")
+
+    # ── Check & install required R packages (for TE statistics) ──────
+    _check_r_packages(tee)
 
     # ==================================================================
     # STEP 1 — Build Bowtie2 contamination index
@@ -230,7 +282,7 @@ def run(opts):
                 os.unlink(fname)
 
         run_cmd(
-            f"bowtie2-build {contam} {contam_index}")
+            f"bowtie2-build {contam} {contam_index}", quiet=True)
         tee.write("  Contamination index built.\n")
         tee.write("  STEP 1 COMPLETE\n")
 
@@ -596,7 +648,7 @@ def run(opts):
             f"rsem-prepare-reference --gtf {updated_gtf} "
             f"--star --star-path {os.path.dirname(star_bin)} "
             f"--star-sjdboverhang 99 -p {thread} "
-            f"{fasta_path} {rsem_index}/RNA")
+            f"{fasta_path} {rsem_index}/RNA", quiet=True)
 
         # Run RSEM for each RNA-seq sample
         rsem_dir = "RSEM_results"
@@ -621,7 +673,7 @@ def run(opts):
                 f"--star-gzipped-read-file "
                 f"-p {thread} --time --strandedness reverse "
                 f"--no-bam-output "
-                f"{read_files} {rsem_index}/RNA {rsem_dir}/{tag}")
+                f"{read_files} {rsem_index}/RNA {rsem_dir}/{tag}", quiet=True)
 
         # Filter expressed isoforms with R
         tee.write(f"\n  Filtering expressed isoforms (mean TPM > {tpm_threshold})...\n")
@@ -981,7 +1033,7 @@ def run(opts):
                 f"rsem-prepare-reference --gtf {expressed_gtf} "
                 f"--star --star-path {os.path.dirname(star_bin)} "
                 f"--star-sjdboverhang 99 -p {thread} "
-                f"{fasta_path} {rsem_index}/RNA")
+                f"{fasta_path} {rsem_index}/RNA", quiet=True)
 
         # Helper: detect paired-end status
         def _is_paired_bam(bam_path):
@@ -1045,7 +1097,7 @@ def run(opts):
                     f"rsem-calculate-expression --alignments "
                     f"{ribo_pe} -p {thread} --time "
                     f"{os.path.abspath(ribo_bam)} "
-                    f"{rsem_index}/RNA {rsem_ribo_out}")
+                    f"{rsem_index}/RNA {rsem_ribo_out}", quiet=True)
 
                 # Run RSEM on RNA-seq BAM
                 tee.write(f"    Running RSEM on {rna_tag} (RNA-seq)...\n")
@@ -1055,7 +1107,7 @@ def run(opts):
                     f"rsem-calculate-expression --alignments "
                     f"{rna_pe} -p {thread} --time "
                     f"{os.path.abspath(rna_bam)} "
-                    f"{rsem_index}/RNA {rsem_rna_out}")
+                    f"{rsem_index}/RNA {rsem_rna_out}", quiet=True)
 
                 # Compute TE (saves te_table.tsv in pair_dir)
                 tee.write(f"    Computing TE for {pair_name}...\n")
@@ -1126,7 +1178,7 @@ def run(opts):
 
                 # Generate combined summary
                 tee.write("  Generating combined TE summary...\n")
-                _generate_te_summary(all_te_tables, te_dir, tee)
+                _generate_te_summary(all_te_tables, te_dir, tee, rna_groups=rna_groups)
 
         tee.write("  STEP 11 COMPLETE\n")
 
@@ -1553,12 +1605,136 @@ def _plot_te(te_table, output_dir, tee):
         tee.write(f"  Warning: TE plotting failed: {e}\n")
 
 
-def _generate_te_summary(all_te_tables, output_dir, tee):
+def _te_group_stats(wide_tsv, output_dir, tee, alpha=0.05,
+                    rna_groups=None):
+    """Statistical testing of TE across conditions via external R script.
+
+    Design assumption: multiple conditions, each with biological replicates.
+    Per-gene log2(TE) values are paired across conditions (same gene = unit).
+
+    Runs scripts/TE_stats.R which:
+      1. Fits linear model log2te ~ condition + gene_id (paired design)
+      2. Uses emmeans for estimated marginal means + Tukey-adjusted contrasts
+      3. Uses agricolae::HSD.test for compact letter display
+      4. Outputs TE_emmeans.tsv, TE_contrasts.tsv, TE_letters.tsv,
+         TE_summary_stats.tsv in output_dir
+
+    Args:
+        wide_tsv: Path to wide-format TE table (te_combined.tsv) with
+                  columns: gene_id, {pair1}_log2te, {pair2}_log2te, ...
+        output_dir: Directory for output files (R script writes here too)
+        tee: Tee writer for logging
+        alpha: Significance threshold (default 0.05)
+        rna_groups: Optional list of [(group_name, n_replicates), ...] from
+                    input parameters. If None, uses each pair as one group.
+
+    Returns:
+        (anova_f, anova_p, letters) — letters maps pair_name/condition ->
+        letter string; empty dict when statistics could not be run.
+    """
+    letters = {}
+
+    # Locate the R script relative to this file
+    prefix = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    r_script = os.path.join(prefix, 'scripts', 'TE_stats.R')
+    if not os.path.exists(r_script):
+        tee.write(f"  ERROR: {r_script} not found - skipping R stats\n")
+        return (None, None, letters)
+
+    if not os.path.exists(wide_tsv):
+        tee.write(f"  ERROR: {wide_tsv} not found - skipping R stats\n")
+        return (None, None, letters)
+
+    tee.write(f"  Using wide TE table for R stats: {wide_tsv}\n")
+
+    # Group args: derive condition structure from rna_groups if provided,
+    # otherwise treat each sample pair as its own group with 1 replicate.
+    pair_names = []
+    with open(wide_tsv) as f:
+        header = f.readline().strip().split('\t')
+        pair_names = [h[:-len('_log2te')] for h in header
+                      if h.endswith('_log2te')]
+
+    group_args = []
+    if rna_groups and len(rna_groups) > 0:
+        # Count how many pairs map to each group based on n_replicates
+        col_idx = 0
+        for gname, n_rep in rna_groups:
+            take = min(n_rep, len(pair_names) - col_idx)
+            if take <= 0:
+                break
+            # Use the first replicate's condition name as the group label
+            label = str(gname).split('__')[0]  # strip ribo part if present
+            group_args.append(f"{label}={take}")
+            col_idx += take
+        # Handle any leftover pairs
+        while col_idx < len(pair_names):
+            left = pair_names[col_idx]
+            label = left.split('__')[0]
+            remaining_same_label = sum(
+                1 for p in pair_names[col_idx:] if p.split('__')[0] == label)
+            group_args.append(f"{label}={remaining_same_label}")
+            col_idx += remaining_same_label
+    else:
+        for p in pair_names:
+            group_args.append(f"{p}=1")
+
+    if len(group_args) < 2:
+        tee.write("  Only 1 condition available, skipping statistical test\n")
+        return (None, None, letters)
+
+    cmd = (
+        f'Rscript --vanilla "{r_script}" '
+        f'"{wide_tsv}" "{output_dir}" "{alpha}" {" ".join(group_args)}'
+    )
+    run_cmd(cmd)
+
+    # Parse back the letters result to annotate the boxplot
+    letters_file = os.path.join(output_dir, "TE_letters.tsv")
+    anova_p = None
+    anova_f = None
+
+    if os.path.exists(letters_file):
+        try:
+            with open(letters_file) as f:
+                header = f.readline().strip().split('\t')
+                cond_idx = header.index('condition') if 'condition' in header else 0
+                letter_idx = header.index('letters') if 'letters' in header else 1
+                for line in f:
+                    fields = line.strip().split('\t')
+                    if len(fields) <= max(cond_idx, letter_idx):
+                        continue
+                    letters[fields[cond_idx]] = fields[letter_idx]
+            tee.write(f"  Loaded significance letters: "
+                      f"{', '.join(f'{k}={v}' for k, v in sorted(letters.items()))}\n")
+        except Exception as e:
+            tee.write(f"  Warning: Failed to parse {letters_file}: {e}\n")
+
+    # Try parsing ANOVA p-value from log if R wrote a summary file
+    stats_log = os.path.join(output_dir, "TE_anova.tsv")
+    if os.path.exists(stats_log):
+        try:
+            with open(stats_log) as f:
+                next(f)
+                row = f.readline().strip().split('\t')
+                if len(row) >= 3:
+                    anova_f = float(row[1])
+                    anova_p = float(row[2])
+        except Exception:
+            pass
+
+    return (anova_f, anova_p, letters)
+
+
+def _generate_te_summary(all_te_tables, output_dir, tee, rna_groups=None):
     """Generate combined TE summary across all sample pairs.
     
     Creates:
     1. Combined TE table (all pairs merged)
-    2. Summary PDF with boxplot of log2(TE) per sample pair
+    2. Summary PDF with boxplot of log2(TE) per sample pair, annotated
+       with significance letters (one-way ANOVA + Tukey HSD, shared letter
+       = not significantly different at alpha = 0.05)
     3. Heatmap of TE statistics per sample pair
     
     Args:
@@ -1638,6 +1814,11 @@ def _generate_te_summary(all_te_tables, output_dir, tee):
                 labels = list(valid_data.keys())
                 n_pairs = len(labels)
 
+                # Statistical test via external R script (emmeans + agricolae)
+                _anova_f, anova_p, sig_letters = _te_group_stats(
+                    combined_file, output_dir, tee, alpha=0.05,
+                    rna_groups=rna_groups)
+
                 # Page 1: Boxplot of log2(TE) per sample pair
                 fig, ax = plt.subplots(figsize=(max(8, n_pairs * 1.5), 6))
                 data_list = [valid_data[k] for k in labels]
@@ -1651,9 +1832,27 @@ def _generate_te_summary(all_te_tables, output_dir, tee):
                     patch.set_facecolor(color)
                     patch.set_alpha(0.7)
                 
+                # Significance letters above each box (shared letter =
+                # not significantly different by Tukey HSD)
+                _ymin = min(float(v.min()) for v in valid_data.values())
+                _ymax = max(float(v.max()) for v in valid_data.values())
+                _pad = (_ymax - _ymin) * 0.08 if _ymax > _ymin else 1.0
+                ax.set_ylim(_ymin - 0.2 * _pad, _ymax + 1.6 * _pad)
+                for xi, lab in enumerate(labels):
+                    ls = sig_letters.get(lab, '')
+                    if ls:
+                        ax.text(xi + 1, _ymax + 0.4 * _pad, ls,
+                                ha='center', va='bottom', fontsize=12,
+                                fontweight='bold', color='black')
+                
                 ax.axhline(y=0, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
                 ax.set_ylabel('log₂(TE)')
-                ax.set_title('Translation Efficiency per Sample Pair')
+                _anova_txt = (f' (ANOVA p = {anova_p:.2e})'
+                              if anova_p is not None else '')
+                _letter_txt = ('\n(letters: shared = not significant, '
+                               'Tukey HSD α=0.05)') if sig_letters else ''
+                ax.set_title(f'Translation Efficiency per Sample Pair{_anova_txt}'
+                             f'{_letter_txt}')
                 plt.xticks(rotation=45, ha='right', fontsize=7)
                 plt.tight_layout()
                 pdf.savefig(fig)

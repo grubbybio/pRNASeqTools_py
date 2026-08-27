@@ -22,13 +22,16 @@ def _tee():
     return sys.stderr
 
 
-def run_cmd(cmd, tee=None, check=True, **kwargs):
+def run_cmd(cmd, tee=None, check=True, quiet=False, **kwargs):
     """Run a shell command, tee-ing stdout+stderr to log file and terminal.
 
     All subprocess output streams through the TeeHandler so alignment tool
     logs appear in both the pipeline log file and stderr in real-time.
     On failure the captured output is included in the exception so R / tool
     error messages are visible in the pipeline log.
+
+    When quiet=True, command output is captured but NOT streamed to the
+    terminal or log; it is only written to the tee if the command fails.
     """
     if tee is None:
         tee = _tee()
@@ -37,6 +40,21 @@ def run_cmd(cmd, tee=None, check=True, **kwargs):
         text=True, **kwargs
     )
     out_lines = []
+    if quiet:
+        # Capture silently; only surface output on failure
+        for line in proc.stdout:
+            out_lines.append(line)
+        remainder = proc.stdout.read()
+        if remainder:
+            out_lines.append(remainder)
+        ret = proc.wait()
+        if check and ret != 0:
+            tail = "".join(out_lines[-40:]) if out_lines else "(no output)"
+            tee.write(f"  Command failed: {cmd}\n{tail}\n")
+            raise subprocess.CalledProcessError(
+                ret, cmd, output=tail, stderr=None
+            )
+        return ret
     for line in proc.stdout:
         tee.write(line)
         out_lines.append(line)

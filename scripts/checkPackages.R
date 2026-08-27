@@ -91,7 +91,13 @@ install_one <- function(pkg) {
     "DMRcaller"               = install_bioconductor("DMRcaller"),
     "ORFik"                   = install_bioconductor("ORFik"),
     "pheatmap"                = install_bioconductor("pheatmap"),
+    "ComplexHeatmap"          = install_bioconductor("ComplexHeatmap"),
     "RNAmodR.RiboMethSeq"     = install_bioconductor("RNAmodR.RiboMethSeq"),
+    "emmeans"                 = install_cran("emmeans"),
+    "car"                     = install_cran("car"),
+    "agricolae"               = install_cran("agricolae"),
+    "multcomp"                = install_cran("multcomp"),
+    "ggpubr"                  = install_cran("ggpubr"),
     "NMF"                     = install_github("NMF", "renozao/NMF", ref = "devel"),
     "riboWaltz"               = install_github("riboWaltz", "LabTranslationalArchitectomics/riboWaltz"),
     "Seurat"                  = install_github("Seurat", "satijalab/seurat", extra = c("uwot")),
@@ -105,7 +111,9 @@ install_one <- function(pkg) {
 if (is.null(pkg_list)) {
   # Install all known packages
   all_pkgs <- c("dplyr", "DESeq2", "DMRcaller", "ORFik", "pheatmap",
-                 "RNAmodR.RiboMethSeq", "NMF", "riboWaltz", "Seurat")
+                 "ComplexHeatmap", "RNAmodR.RiboMethSeq",
+                 "emmeans", "car", "agricolae", "multcomp", "ggpubr",
+                 "NMF", "riboWaltz", "Seurat")
   pkg_list <- all_pkgs
 }
 
