@@ -144,7 +144,7 @@ def build_parser():
     p.add_argument('--tpm-threshold', default=0, type=float,
                    help='Mean TPM threshold for isoform filtering (default: 0)')
     p.add_argument('--restart-step', type=int, default=None,
-                   help='Force restart from this step (1-10), '
+                   help='Force restart from this step (1-12), '
                         'overrides auto-detection')
 
     # cips (CiPS uORF analysis)

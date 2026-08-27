@@ -9,6 +9,8 @@ Workflow:
   5. STAR re-mapping (RNA-seq + Ribo-seq) with expressed annotation
   6. RIBO Taper annotation + ORF detection
   7. RSEM CDS quantification
+  8. P-site analysis & visualization (metagene plots)
+  9. Translation Efficiency (TE) = Ribo TPM / RNA TPM per gene
 
 Requires: Bowtie2, STAR, samtools, bedtools, StringTie, gffcompare, RSEM,
           RIBO Taper scripts, R (dplyr)
@@ -17,6 +19,7 @@ Requires: Bowtie2, STAR, samtools, bedtools, StringTie, gffcompare, RSEM,
 import os
 import sys
 import re
+import math
 import glob as globmod
 import shutil
 import subprocess
@@ -103,8 +106,14 @@ def run(opts):
         return f"bash {cmd}"
 
     # ── Parse RNA-seq inputs ─────────────────────────────────────────
+    # rna_groups records [(group_name, n_replicates), ...] in input order
+    # (control first, then treatments) so TE calculation can pair samples
+    # by experimental role instead of raw list position.
+    rna_groups = []
     rna_ctrl_dict = _parse_to_dict(opts.get('rna_control', ''))
-    rna_tags, rna_files, _ = parse_input(rna_ctrl_dict)
+    rna_tags, rna_files, rna_pars = parse_input(rna_ctrl_dict)
+    if len(rna_pars) >= 2:
+        rna_groups.append((str(rna_pars[0]), int(rna_pars[1])))
 
     rna_trt = opts.get('rna_treatment')
     if rna_trt:
@@ -112,15 +121,20 @@ def run(opts):
             rna_trt = [rna_trt]
         for trt_str in rna_trt:
             trt_dict = _parse_to_dict(trt_str)
-            rt_tags, rt_files, _ = parse_input(trt_dict)
+            rt_tags, rt_files, rt_pars = parse_input(trt_dict)
+            if len(rt_pars) >= 2:
+                rna_groups.append((str(rt_pars[0]), int(rt_pars[1])))
             rna_tags.extend(rt_tags)
             rna_files.extend(rt_files)
 
     all_rna_tags = list(rna_tags)
 
     # ── Parse Ribo-seq inputs ────────────────────────────────────────
+    ribo_groups = []
     ribo_ctrl_dict = _parse_to_dict(opts.get('ribo_control', ''))
-    ribo_tags, ribo_files, _ = parse_input(ribo_ctrl_dict)
+    ribo_tags, ribo_files, ribo_pars = parse_input(ribo_ctrl_dict)
+    if len(ribo_pars) >= 2:
+        ribo_groups.append((str(ribo_pars[0]), int(ribo_pars[1])))
 
     ribo_trt = opts.get('ribo_treatment')
     if ribo_trt:
@@ -128,7 +142,9 @@ def run(opts):
             ribo_trt = [ribo_trt]
         for rbt_str in ribo_trt:
             rbt_dict = _parse_to_dict(rbt_str)
-            rbt_tags, rbt_files, _ = parse_input(rbt_dict)
+            rbt_tags, rbt_files, rbt_pars = parse_input(rbt_dict)
+            if len(rbt_pars) >= 2:
+                ribo_groups.append((str(rbt_pars[0]), int(rbt_pars[1])))
             ribo_tags.extend(rbt_tags)
             ribo_files.extend(rbt_files)
 
@@ -168,6 +184,10 @@ def run(opts):
     star_rna_new_map = "STAR_RNA_map_new"
     contam_index = "Contam"
     ribo_anno_dir = "RiboTaper_annotation"
+    # Defined here (not inside step 3) so step 4 can use them when resuming
+    # with last_step >= 3 or --restart-step >= 4.
+    assembled_gtf_dir = "assembledGTF"
+    gffcomp_prefix = os.path.join(assembled_gtf_dir, genome)
 
     # ── Auto-detect last completed step from log ─────────────────────
     _start_time = opts.get('_start_time', 0)
@@ -177,8 +197,8 @@ def run(opts):
     # ── Manual restart-step override ──────────────────────────────
     _restart = opts.get('restart_step')
     if _restart is not None:
-        if not 1 <= _restart <= 10:
-            sys.exit(f"--restart-step must be 1-10, got {_restart}")
+        if not 1 <= _restart <= 12:
+            sys.exit(f"--restart-step must be 1-12, got {_restart}")
         last_step = _restart - 1  # step N → set last_step to N-1 so step N re-runs
         tee.write(f"\n  Manual restart from step {_restart} "
                   f"(--restart-step={_restart})\n\n")
@@ -486,7 +506,6 @@ def run(opts):
 
         # ── StringTie per sample ─────────────────────────────────────────
         tee.write("\n  --- StringTie assembly ---\n")
-        assembled_gtf_dir = "assembledGTF"
         os.makedirs(assembled_gtf_dir, exist_ok=True)
 
         merge_list_paths = []
@@ -514,7 +533,6 @@ def run(opts):
 
         # gffcompare
         tee.write("  Running gffcompare...\n")
-        gffcomp_prefix = os.path.join(assembled_gtf_dir, genome)
         run_cmd(
             f"gffcompare -V -r {anno_path} -o {gffcomp_prefix} {merged_gtf}")
         tee.write("  STEP 3 COMPLETE\n")
@@ -786,15 +804,9 @@ def run(opts):
             for tag in all_rna_tags
         ]
         rna_bam_list = [b for b in rna_bam_list if os.path.exists(b)]
-        rna_bams_arg = ' '.join(rna_bam_list)
 
         rna_merged = "RNA_merged.bam"
-        run_cmd(
-            f"samtools merge -f {rna_merged} {rna_bams_arg}")
-        run_cmd(
-            f"samtools sort -o RNA_merged_sorted.bam {rna_merged}")
-        os.rename("RNA_merged_sorted.bam", rna_merged)
-        run_cmd(f"samtools index {rna_merged}")
+        _merge_or_copy_bams(rna_bam_list, rna_merged, tee=tee)
 
         # Merge Ribo-seq BAMs (R1 only for RIBO Taper)
         tee.write("  Merging Ribo-seq BAMs...\n")
@@ -814,13 +826,7 @@ def run(opts):
             ribo_r1_bams.append(r1_bam)
 
         ribo_merged = "Ribo_merged.bam"
-        ribo_bams_arg = ' '.join(ribo_r1_bams)
-        run_cmd(
-            f"samtools merge -f {ribo_merged} {ribo_bams_arg}")
-        run_cmd(
-            f"samtools sort -o Ribo_merged_sorted.bam {ribo_merged}")
-        os.rename("Ribo_merged_sorted.bam", ribo_merged)
-        run_cmd(f"samtools index {ribo_merged}")
+        _merge_or_copy_bams(ribo_r1_bams, ribo_merged, tee=tee)
 
         # ── Generate metaplots for parameter selection ────────────────
         tee.write("\n  Generating metaplots for read-length/cutoff selection...\n")
@@ -851,14 +857,24 @@ def run(opts):
                 f"  Press Enter to use default ribo-len='{ribo_len}', "
                 f"or enter new comma-separated lengths: ").strip()
             if _new_len:
-                ribo_len = _new_len
-                tee.write(f"  Updated ribo-len: {ribo_len}\n")
+                if all(re.fullmatch(r"\d+", x.strip()) for x in _new_len.split(',')):
+                    ribo_len = ",".join(x.strip() for x in _new_len.split(','))
+                    tee.write(f"  Updated ribo-len: {ribo_len}\n")
+                else:
+                    tee.write(f"  Warning: invalid ribo-len '{_new_len}' "
+                              f"(comma-separated positive integers expected), "
+                              f"keeping {ribo_len}\n")
             _new_cut = input(
                 f"  Press Enter to use default cutoffs='{cutoffs}', "
                 f"or enter new comma-separated cutoffs: ").strip()
             if _new_cut:
-                cutoffs = _new_cut
-                tee.write(f"  Updated cutoffs: {cutoffs}\n")
+                if all(re.fullmatch(r"\d+", x.strip()) for x in _new_cut.split(',')):
+                    cutoffs = ",".join(x.strip() for x in _new_cut.split(','))
+                    tee.write(f"  Updated cutoffs: {cutoffs}\n")
+                else:
+                    tee.write(f"  Warning: invalid cutoffs '{_new_cut}' "
+                              f"(comma-separated positive integers expected), "
+                              f"keeping {cutoffs}\n")
 
             # Validate matching counts
             _rl_n = len([x for x in ribo_len.split(',') if x.strip()])
@@ -929,16 +945,197 @@ def run(opts):
             for fname in globmod.glob(pat):
                 if os.path.exists(fname):
                     os.unlink(fname)
+        # Extensionless per-sample outputs from previous runs. Exact names
+        # only: P_sites_all* must survive — it is this step's input file.
+        for tag in all_ribo_tags:
+            _ps_out = f"P_sites_{tag}"
+            if os.path.exists(_ps_out):
+                os.unlink(_ps_out)
 
         _plot_psite_analysis(ribo_map_dir, all_ribo_tags, ribo_anno_dir, tee)
         tee.write("  STEP 9 COMPLETE\n")
 
     # ==================================================================
-    # STEP 10 — Final output summary
+    # STEP 10 — Translation Efficiency (TE) calculation (per sample)
     # ==================================================================
     if last_step < 10:
         tee.write("\n" + "=" * 60 + "\n")
-        tee.write("STEP 10: Pipeline complete\n")
+        tee.write("STEP 10: Translation Efficiency (TE) calculation\n")
+        tee.write("=" * 60 + "\n")
+
+        te_dir = "TE_results"
+        os.makedirs(te_dir, exist_ok=True)
+
+        # Build RSEM index if not already done (reuse from step 5)
+        # Different RSEM versions lay out the STAR index differently: some
+        # put it directly under RSEM_index/, others in RSEM_index/RNA/.
+        rsem_index = "RSEM_index"
+        _rsem_idx_markers = [
+            os.path.join(rsem_index, "sjdbList.out.tab"),
+            os.path.join(rsem_index, "RNA", "sjdbList.out.tab"),
+        ]
+        if not any(os.path.exists(p) for p in _rsem_idx_markers):
+            tee.write("  Building RSEM index for TE calculation...\n")
+            star_bin = shutil.which("STAR") or "STAR"
+            run_cmd(
+                f"rsem-prepare-reference --gtf {expressed_gtf} "
+                f"--star --star-path {os.path.dirname(star_bin)} "
+                f"--star-sjdboverhang 99 -p {thread} "
+                f"{fasta_path} {rsem_index}/RNA")
+
+        # Helper: detect paired-end status
+        def _is_paired_bam(bam_path):
+            try:
+                r = subprocess.run(
+                    f"samtools view -F 260 {bam_path} | head -1 | cut -f2",
+                    shell=True, capture_output=True, text=True
+                )
+                flag = int(r.stdout.strip()) if r.stdout.strip() else 0
+                return bool(flag & 1)
+            except Exception:
+                return False
+
+        # ── Per-sample TE calculation ──
+        # Pair Ribo-seq and RNA-seq samples by experimental role
+        # (control↔control, treatment i↔treatment i), replicates positionally
+        # within each group.
+        te_pairs = _pair_te_samples(rna_groups, ribo_groups,
+                                    all_rna_tags, all_ribo_tags, tee)
+        if not te_pairs:
+            tee.write("  Warning: No valid Ribo-seq/RNA-seq sample pairs, skipping TE\n")
+        else:
+            tee.write(f"  Found {len(te_pairs)} sample pair(s)\n")
+
+            for i, (ribo_tag, rna_tag) in enumerate(te_pairs):
+                pair_name = f"{ribo_tag}__{rna_tag}"
+                pair_dir = os.path.join(te_dir, pair_name)
+                os.makedirs(pair_dir, exist_ok=True)
+
+                tee.write(f"\n  ── Pair {i+1}: {pair_name} ──\n")
+
+                # Find Ribo-seq BAM
+                ribo_bam_candidates = [
+                    os.path.join(ribo_map_dir, f"star_{ribo_tag}_Aligned.toTranscriptome.out.bam"),
+                    os.path.join(ribo_map_dir, f"{ribo_tag}_Aligned.toTranscriptome.out.bam"),
+                ]
+                ribo_bam = next((p for p in ribo_bam_candidates if os.path.exists(p)), None)
+
+                # Find RNA-seq BAM
+                rna_bam_candidates = [
+                    os.path.join(star_rna_new_map, f"star_{rna_tag}_Aligned.toTranscriptome.out.bam"),
+                    os.path.join(star_rna_new_map, f"{rna_tag}_Aligned.toTranscriptome.out.bam"),
+                ]
+                rna_bam = next((p for p in rna_bam_candidates if os.path.exists(p)), None)
+
+                if not ribo_bam:
+                    tee.write(f"    Warning: Ribo-seq BAM not found for {ribo_tag}, skipping\n")
+                    continue
+                if not rna_bam:
+                    tee.write(f"    Warning: RNA-seq BAM not found for {rna_tag}, skipping\n")
+                    continue
+
+                tee.write(f"    Ribo-seq BAM: {ribo_bam}\n")
+                tee.write(f"    RNA-seq BAM:  {rna_bam}\n")
+
+                # Run RSEM on Ribo-seq BAM
+                tee.write(f"    Running RSEM on {ribo_tag} (Ribo-seq)...\n")
+                rsem_ribo_out = os.path.join(pair_dir, "ribo")
+                ribo_pe = "--paired-end" if _is_paired_bam(ribo_bam) else ""
+                run_cmd(
+                    f"rsem-calculate-expression --alignments "
+                    f"{ribo_pe} -p {thread} --time "
+                    f"{os.path.abspath(ribo_bam)} "
+                    f"{rsem_index}/RNA {rsem_ribo_out}")
+
+                # Run RSEM on RNA-seq BAM
+                tee.write(f"    Running RSEM on {rna_tag} (RNA-seq)...\n")
+                rsem_rna_out = os.path.join(pair_dir, "rna")
+                rna_pe = "--paired-end" if _is_paired_bam(rna_bam) else ""
+                run_cmd(
+                    f"rsem-calculate-expression --alignments "
+                    f"{rna_pe} -p {thread} --time "
+                    f"{os.path.abspath(rna_bam)} "
+                    f"{rsem_index}/RNA {rsem_rna_out}")
+
+                # Compute TE (saves te_table.tsv in pair_dir)
+                tee.write(f"    Computing TE for {pair_name}...\n")
+                try:
+                    _compute_te(
+                        os.path.join(pair_dir, "ribo.genes.results"),
+                        os.path.join(pair_dir, "rna.genes.results"),
+                        pair_dir, tee)
+                except Exception as _te_err:
+                    tee.write(f"    ERROR: TE computation failed for {pair_name}: "
+                              f"{_te_err}\n")
+                    tee.write("    Continuing with remaining pairs...\n")
+
+        tee.write(f"\n  TE calculation complete. Results saved to: {te_dir}/\n")
+        tee.write("  STEP 10 COMPLETE\n")
+
+    # ==================================================================
+    # STEP 11 — TE plotting (per-sample + combined summary)
+    # ==================================================================
+    if last_step < 11:
+        tee.write("\n" + "=" * 60 + "\n")
+        tee.write("STEP 11: TE plotting\n")
+        tee.write("=" * 60 + "\n")
+
+        te_dir = "TE_results"
+        if not os.path.isdir(te_dir):
+            tee.write("  No TE_results directory found, skipping TE plotting\n")
+        else:
+            # Load all TE tables from disk
+            all_te_tables = {}
+            for pair_name in sorted(os.listdir(te_dir)):
+                pair_dir = os.path.join(te_dir, pair_name)
+                if not os.path.isdir(pair_dir):
+                    continue
+                te_file = os.path.join(pair_dir, "te_table.tsv")
+                if not os.path.exists(te_file):
+                    tee.write(f"  Warning: No te_table.tsv for {pair_name}, skipping\n")
+                    continue
+                # Parse TSV back into list of dicts
+                table = []
+                with open(te_file) as f:
+                    header = f.readline().strip().split('\t')
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        fields = line.split('\t')
+                        row = {}
+                        for h, val in zip(header, fields):
+                            try:
+                                row[h] = float(val) if val != 'NA' else float('nan')
+                            except ValueError:
+                                row[h] = val
+                        table.append(row)
+
+                if table:
+                    all_te_tables[pair_name] = table
+                    tee.write(f"  Loaded {pair_name}: {len(table)} genes\n")
+
+            if not all_te_tables:
+                tee.write("  No TE tables found, skipping plotting\n")
+            else:
+                # Plot per-sample TE
+                for pair_name, te_table in all_te_tables.items():
+                    pair_dir = os.path.join(te_dir, pair_name)
+                    tee.write(f"  Plotting {pair_name}...\n")
+                    _plot_te(te_table, pair_dir, tee)
+
+                # Generate combined summary
+                tee.write("  Generating combined TE summary...\n")
+                _generate_te_summary(all_te_tables, te_dir, tee)
+
+        tee.write("  STEP 11 COMPLETE\n")
+
+    # ==================================================================
+    # STEP 12 — Final output summary
+    # ==================================================================
+    if last_step < 12:
+        tee.write("\n" + "=" * 60 + "\n")
+        tee.write("STEP 12: Pipeline complete\n")
         tee.write("=" * 60 + "\n")
 
         tee.write(f"\n  Output files:\n")
@@ -947,7 +1144,8 @@ def run(opts):
         tee.write(f"    RSEM results:         {rsem_dir}/\n")
         tee.write(f"    RIBO Taper results:   (current directory)\n")
         tee.write(f"    RIBO Taper annotation:{ribo_anno_dir}/\n")
-        tee.write("  STEP 10 COMPLETE\n")
+        tee.write(f"    TE results:           TE_results/\n")
+        tee.write("  STEP 12 COMPLETE\n")
 
     # Cleanup contamination index
     for pat in [f"{contam_index}*.ebwt", f"{contam_index}*.bt2"]:
@@ -959,6 +1157,28 @@ def run(opts):
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
+
+
+def _merge_or_copy_bams(bam_list, out_path, tee=None):
+    """Merge BAMs into out_path; copy directly when there is only one input.
+
+    `samtools merge` requires >= 2 input files on most versions, and an
+    empty list fails outright, so handle both cases explicitly.
+    """
+    if not bam_list:
+        sys.exit(f"  Error: no input BAMs to merge into {out_path}")
+    if len(bam_list) == 1:
+        if tee:
+            tee.write(f"    Only one BAM ({bam_list[0]}), copying instead of merging\n")
+        shutil.copy(bam_list[0], out_path)
+    else:
+        run_cmd(
+            f"samtools merge -f {out_path} {' '.join(bam_list)}")
+        sorted_tmp = out_path.replace('.bam', '_merged_sorted.bam')
+        run_cmd(
+            f"samtools sort -o {sorted_tmp} {out_path}")
+        os.rename(sorted_tmp, out_path)
+    run_cmd(f"samtools index {out_path}")
 
 
 def _plot_ribo_lengths(ribo_map_dir, tags, tee):
@@ -1044,14 +1264,441 @@ def _extract_read_lengths(bam_path):
         return []
 
 
-# ── P-site analysis helpers (using RIBO Taper output) ────────────────
+# ── Translation Efficiency (TE) helpers ─────────────────────────────────
+
+def _pair_te_samples(rna_groups, ribo_groups, rna_tags, ribo_tags, tee):
+    """Pair Ribo-seq/RNA-seq tags for TE calculation, aligned by role.
+
+    Groups come from parse_input pars: [(group_name, n_replicates), ...]
+    in input order (control first, then treatments).
+
+    Strategy:
+    - Same number of groups on both sides → pair k-th group with k-th group
+      and pair replicates positionally within each group. Group names that
+      differ between RNA and Ribo only produce a warning (role alignment is
+      assumed from input order).
+    - Different group structure → refuse to guess: report both structures
+      and return no pairs.
+
+    Returns:
+        list of (ribo_tag, rna_tag) pairs.
+    """
+    if sum(n for _, n in rna_groups) != len(rna_tags) or \
+            sum(n for _, n in ribo_groups) != len(ribo_tags):
+        tee.write("  ERROR: group sizes do not add up to sample tag counts, "
+                  "skipping TE\n")
+        return []
+
+    if len(rna_groups) != len(ribo_groups):
+        tee.write("  ERROR: RNA-seq and Ribo-seq sample groups differ - "
+                  "cannot safely pair samples for TE\n")
+        tee.write(f"    RNA groups:  {rna_groups}\n")
+        tee.write(f"    Ribo groups: {ribo_groups}\n")
+        tee.write("    Please give control and treatments matching roles, e.g. "
+                  "--rc ctrl --rt trt1 --bc ctrl --bt trt1\n")
+        return []
+
+    for (rna_name, _), (ribo_name, _) in zip(rna_groups, ribo_groups):
+        if str(rna_name).lower() != str(ribo_name).lower():
+            tee.write(f"  Warning: group names differ between RNA ('{rna_name}') "
+                      f"and Ribo ('{ribo_name}') - pairing by input order\n")
+
+    pairs = []
+    rna_offset = 0
+    ribo_offset = 0
+    for g_idx, ((_, rna_n), (_, ribo_n)) in enumerate(zip(rna_groups, ribo_groups)):
+        n_pair = min(rna_n, ribo_n)
+        if rna_n != ribo_n:
+            tee.write(f"  Warning: group {g_idx + 1} ({rna_groups[g_idx][0]}): "
+                      f"{ribo_n} ribo vs {rna_n} rna samples - pairing first "
+                      f"{n_pair} replicate(s)\n")
+        for j in range(n_pair):
+            pairs.append((ribo_tags[ribo_offset + j], rna_tags[rna_offset + j]))
+        rna_offset += rna_n
+        ribo_offset += ribo_n
+
+    return pairs
+
+
+def _compute_te(ribo_results_file, rna_results_file, output_dir, tee):
+    """Compute Translation Efficiency (TE) = Ribo TPM / RNA TPM per gene.
+    
+    Reads RSEM gene-level results files for Ribo-seq and RNA-seq,
+    matches genes, and computes TE ratios.
+    
+    Args:
+        ribo_results_file: Path to RSEM ribo.genes.results
+        rna_results_file: Path to RSEM rna.genes.results
+        output_dir: Directory to write TE results
+        tee: Tee writer for logging
+    
+    Returns:
+        list of dicts with gene_id, ribo_tpm, rna_tpm, te, log2te or None
+    """
+    if not os.path.exists(ribo_results_file):
+        tee.write(f"  Warning: {ribo_results_file} not found\n")
+        return None
+    if not os.path.exists(rna_results_file):
+        tee.write(f"  Warning: {rna_results_file} not found\n")
+        return None
+
+    # Parse RSEM gene results
+    # Format: gene_id, transcript_id(s), length, effective_length,
+    #         expected_count, TPM, FPKM, IsoPct, ReprLeft, ...
+    def parse_rsem_genes(filepath):
+        """Parse RSEM .genes.results file into dict: gene_id -> {tpm, fpkm, count}"""
+        genes = {}
+        with open(filepath) as f:
+            header = f.readline().strip().split('\t')
+            # Find column indices
+            col_idx = {h: i for i, h in enumerate(header)}
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                fields = line.split('\t')
+                gene_id = fields[col_idx['gene_id']]
+                tpm = float(fields[col_idx['TPM']]) if 'TPM' in col_idx else 0.0
+                fpkm = float(fields[col_idx['FPKM']]) if 'FPKM' in col_idx else 0.0
+                count = float(fields[col_idx['expected_count']]) if 'expected_count' in col_idx else 0.0
+                genes[gene_id] = {'tpm': tpm, 'fpkm': fpkm, 'count': count}
+        return genes
+
+    tee.write(f"  Parsing RSEM results...\n")
+    ribo_genes = parse_rsem_genes(ribo_results_file)
+    rna_genes = parse_rsem_genes(rna_results_file)
+
+    tee.write(f"    Ribo-seq genes: {len(ribo_genes):,}\n")
+    tee.write(f"    RNA-seq genes: {len(rna_genes):,}\n")
+
+    # Match genes and compute TE
+    common_genes = set(ribo_genes.keys()) & set(rna_genes.keys())
+    tee.write(f"    Common genes: {len(common_genes):,}\n")
+
+    if not common_genes:
+        tee.write("  Warning: No common genes between Ribo-seq and RNA-seq RSEM results\n")
+        return None
+
+    te_table = []
+    for gene_id in sorted(common_genes):
+        r_info = ribo_genes[gene_id]
+        t_info = rna_genes[gene_id]
+        
+        ribo_tpm = r_info['tpm']
+        rna_tpm = t_info['tpm']
+        ribo_fpkm = r_info['fpkm']
+        rna_fpkm = t_info['fpkm']
+        ribo_count = r_info['count']
+        rna_count = t_info['count']
+
+        # Compute TE: use TPM ratio
+        if rna_tpm > 0 and ribo_tpm > 0:
+            te = ribo_tpm / rna_tpm
+            log2te = math.log2(te)
+        elif rna_tpm > 0:
+            te = 0.0
+            log2te = float('-inf')
+        else:
+            te = float('nan')
+            log2te = float('nan')
+
+        te_table.append({
+            'gene_id': gene_id,
+            'ribo_tpm': ribo_tpm,
+            'rna_tpm': rna_tpm,
+            'ribo_fpkm': ribo_fpkm,
+            'rna_fpkm': rna_fpkm,
+            'ribo_count': ribo_count,
+            'rna_count': rna_count,
+            'te': te,
+            'log2te': log2te,
+        })
+
+    # Write TE table
+    te_output = os.path.join(output_dir, "te_table.tsv")
+    with open(te_output, 'w') as f:
+        header = ['gene_id', 'ribo_tpm', 'rna_tpm', 'ribo_fpkm', 'rna_fpkm',
+                  'ribo_count', 'rna_count', 'te', 'log2te']
+        f.write('\t'.join(header) + '\n')
+        for row in te_table:
+            f.write('\t'.join([
+                str(row['gene_id']),
+                f"{row['ribo_tpm']:.4f}",
+                f"{row['rna_tpm']:.4f}",
+                f"{row['ribo_fpkm']:.4f}",
+                f"{row['rna_fpkm']:.4f}",
+                f"{row['ribo_count']:.1f}",
+                f"{row['rna_count']:.1f}",
+                f"{row['te']:.4f}" if not math.isnan(row['te']) else 'NA',
+                f"{row['log2te']:.4f}" if not math.isnan(row['log2te']) and row['log2te'] != float('-inf') else 'NA',
+            ]) + '\n')
+
+    tee.write(f"  TE table written: {te_output} ({len(te_table):,} genes)\n")
+
+    # Summary statistics
+    log2tes = [r['log2te'] for r in te_table
+               if not math.isnan(r['log2te']) and r['log2te'] != float('-inf')]
+    if log2tes:
+        import numpy as np
+        arr = np.array(log2tes)
+        tee.write(f"  TE summary (log2 scale):\n")
+        tee.write(f"    Mean:   {np.mean(arr):.3f}\n")
+        tee.write(f"    Median: {np.median(arr):.3f}\n")
+        tee.write(f"    Std:    {np.std(arr):.3f}\n")
+        tee.write(f"    Range:  [{np.min(arr):.3f}, {np.max(arr):.3f}]\n")
+        # Percentiles
+        p5, p25, p75, p95 = np.percentile(arr, [5, 25, 75, 95])
+        tee.write(f"    P5: {p5:.3f}, P25: {p25:.3f}, P75: {p75:.3f}, P95: {p95:.3f}\n")
+
+    return te_table
+
+
+def _plot_te(te_table, output_dir, tee):
+    """Plot Translation Efficiency (TE) distribution.
+    
+    Creates a PDF with:
+    - Page 1: Histogram of log2(TE) with statistics
+    - Page 2: Scatter plot of Ribo TPM vs RNA TPM (log-log) with TE contours
+    
+    Args:
+        te_table: List of dicts from _compute_te
+        output_dir: Directory for output PDF
+        tee: Tee writer for logging
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+        import numpy as np
+
+        te_pdf = os.path.join(output_dir, "TE_distribution.pdf")
+        log2tes = np.array([r['log2te'] for r in te_table
+                           if not math.isnan(r['log2te']) and r['log2te'] != float('-inf')])
+
+        if len(log2tes) == 0:
+            tee.write("  Warning: No valid TE values to plot\n")
+            return
+
+        with PdfPages(te_pdf) as pdf:
+            # Page 1: log2(TE) histogram
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.hist(log2tes, bins=80, color='steelblue', edgecolor='white',
+                    density=True, alpha=0.85)
+            
+            # Add median line
+            median_val = np.median(log2tes)
+            ax.axvline(x=median_val, color='red', linestyle='--', linewidth=1.5,
+                      label=f'Median: {median_val:.2f}')
+            # Add mean line
+            mean_val = np.mean(log2tes)
+            ax.axvline(x=mean_val, color='green', linestyle=':', linewidth=1.5,
+                      label=f'Mean: {mean_val:.2f}')
+            # Add zero line (TE = 1, no translational change)
+            ax.axvline(x=0, color='black', linestyle='-', linewidth=1, alpha=0.5,
+                      label='TE = 1 (no change)')
+            
+            ax.set_xlabel('log₂(TE) = log₂(Ribo TPM / RNA TPM)')
+            ax.set_ylabel('Density')
+            ax.set_title(f'Translation Efficiency Distribution\n({len(log2tes):,} genes)')
+            ax.legend(fontsize=8)
+            
+            # Add stats text box
+            stats_text = (
+                f"N genes: {len(log2tes):,}\n"
+                f"Mean: {mean_val:.3f}\n"
+                f"Median: {median_val:.3f}\n"
+                f"Std: {np.std(log2tes):.3f}\n"
+                f"Range: [{np.min(log2tes):.2f}, {np.max(log2tes):.2f}]"
+            )
+            ax.text(0.95, 0.95, stats_text, transform=ax.transAxes,
+                    fontsize=9, verticalalignment='top', horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            pdf.savefig(fig)
+            plt.close(fig)
+
+            # Page 2: Ribo TPM vs RNA TPM scatter
+            valid_for_scatter = [r for r in te_table
+                                if r['ribo_tpm'] > 0 and r['rna_tpm'] > 0]
+            if valid_for_scatter:
+                fig, ax = plt.subplots(figsize=(8, 8))
+                
+                ribo_tpms = np.array([r['ribo_tpm'] for r in valid_for_scatter])
+                rna_tpms = np.array([r['rna_tpm'] for r in valid_for_scatter])
+                log2tes_scatter = np.array([r['log2te'] for r in valid_for_scatter])
+                
+                # Scatter plot with color = TE
+                sc = ax.scatter(np.log10(rna_tpms + 0.01), np.log10(ribo_tpms + 0.01),
+                               c=log2tes_scatter, cmap='RdYlGn', alpha=0.4, s=5,
+                               vmin=-3, vmax=3)
+                plt.colorbar(sc, ax=ax, label='log₂(TE)')
+                
+                # Diagonal line (TE = 1)
+                lims = [min(ax.get_xlim()[0], ax.get_ylim()[0]),
+                       max(ax.get_xlim()[1], ax.get_ylim()[1])]
+                ax.plot(lims, lims, 'k--', linewidth=0.8, alpha=0.5, label='TE = 1')
+                
+                ax.set_xlabel('log₁₀(RNA TPM + 0.01)')
+                ax.set_ylabel('log₁₀(Ribo TPM + 0.01)')
+                ax.set_title('Ribo TPM vs RNA TPM\n(colored by log₂ TE)')
+                ax.legend(fontsize=8, loc='upper left')
+                pdf.savefig(fig)
+                plt.close(fig)
+
+        tee.write(f"  TE plot saved: {te_pdf}\n")
+
+    except ImportError as e:
+        tee.write(f"  Warning: Missing required package for TE plotting ({e})\n")
+    except Exception as e:
+        tee.write(f"  Warning: TE plotting failed: {e}\n")
+
+
+def _generate_te_summary(all_te_tables, output_dir, tee):
+    """Generate combined TE summary across all sample pairs.
+    
+    Creates:
+    1. Combined TE table (all pairs merged)
+    2. Summary PDF with boxplot of log2(TE) per sample pair
+    3. Heatmap of TE statistics per sample pair
+    
+    Args:
+        all_te_tables: dict of pair_name -> te_table (list of dicts)
+        output_dir: Directory for output files
+        tee: Tee writer for logging
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+        import numpy as np
+
+        if not all_te_tables:
+            return
+
+        pair_names = list(all_te_tables.keys())
+        
+        # Build wide-format table: one row per gene, columns per sample pair
+        # Collect all gene_ids across all pairs
+        all_genes = set()
+        for table in all_te_tables.values():
+            for row in table:
+                all_genes.add(row['gene_id'])
+        
+        # Build lookup: gene_id -> pair_name -> data
+        gene_pair_data = {}
+        for pair_name, table in all_te_tables.items():
+            for row in table:
+                gid = row['gene_id']
+                if gid not in gene_pair_data:
+                    gene_pair_data[gid] = {}
+                gene_pair_data[gid][pair_name] = row
+        
+        # Build header: gene_id + per-pair columns
+        value_cols = ['ribo_tpm', 'rna_tpm', 'te', 'log2te']
+        header = ['gene_id']
+        for pn in pair_names:
+            for vc in value_cols:
+                header.append(f"{pn}_{vc}")
+        
+        # Write wide-format table
+        combined_file = os.path.join(output_dir, "te_combined.tsv")
+        n_genes = len(all_genes)
+        with open(combined_file, 'w') as f:
+            f.write('\t'.join(header) + '\n')
+            for gid in sorted(all_genes):
+                parts = [gid]
+                for pn in pair_names:
+                    if gid in gene_pair_data and pn in gene_pair_data[gid]:
+                        row = gene_pair_data[gid][pn]
+                        for vc in value_cols:
+                            val = row[vc]
+                            if isinstance(val, float) and (math.isnan(val) or val == float('-inf')):
+                                parts.append('NA')
+                            else:
+                                parts.append(f"{val:.4f}")
+                    else:
+                        parts.extend(['NA'] * len(value_cols))
+                f.write('\t'.join(parts) + '\n')
+        tee.write(f"  Combined TE table (wide format): {combined_file} ({n_genes:,} genes x {len(pair_names)} pairs)\n")
+
+        # Summary PDF
+        summary_pdf = os.path.join(output_dir, "TE_summary.pdf")
+        with PdfPages(summary_pdf) as pdf:
+            # Collect valid log2(TE) data per pair
+            valid_data = {}
+            for pair_name in pair_names:
+                table = all_te_tables[pair_name]
+                log2tes = [r['log2te'] for r in table
+                          if not math.isnan(r['log2te']) and r['log2te'] != float('-inf')]
+                if log2tes:
+                    valid_data[pair_name] = np.array(log2tes)
+
+            if valid_data:
+                labels = list(valid_data.keys())
+                n_pairs = len(labels)
+
+                # Page 1: Boxplot of log2(TE) per sample pair
+                fig, ax = plt.subplots(figsize=(max(8, n_pairs * 1.5), 6))
+                data_list = [valid_data[k] for k in labels]
+                
+                bp = ax.boxplot(data_list, labels=[l[:30] for l in labels],
+                              patch_artist=True, widths=0.5)
+                
+                # Color boxes
+                colors = plt.cm.Set2(np.linspace(0, 1, n_pairs))
+                for patch, color in zip(bp['boxes'], colors):
+                    patch.set_facecolor(color)
+                    patch.set_alpha(0.7)
+                
+                ax.axhline(y=0, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
+                ax.set_ylabel('log₂(TE)')
+                ax.set_title('Translation Efficiency per Sample Pair')
+                plt.xticks(rotation=45, ha='right', fontsize=7)
+                plt.tight_layout()
+                pdf.savefig(fig)
+                plt.close(fig)
+
+                # Page 2: Heatmap of mean log2(TE) per pair
+                medians = [np.median(valid_data[k]) for k in valid_data]
+                means = [np.mean(valid_data[k]) for k in valid_data]
+                
+                fig, ax = plt.subplots(figsize=(max(6, n_pairs * 1.2), 3))
+                heat_data = np.array([means])  # 1 row: mean log2(TE) per pair
+                im = ax.imshow(heat_data, aspect='auto', cmap='RdYlGn',
+                             vmin=-2, vmax=2)
+                ax.set_xticks(range(n_pairs))
+                ax.set_xticklabels([l[:30] for l in labels], rotation=45, ha='right', fontsize=7)
+                ax.set_yticks([0])
+                ax.set_yticklabels(['Mean log₂(TE)'])
+                ax.set_title('Mean Translation Efficiency per Sample Pair')
+                plt.colorbar(im, ax=ax, label='log₂(TE)')
+                
+                # Add text annotations
+                for j, (m, md) in enumerate(zip(means, medians)):
+                    ax.text(j, 0, f'{m:.2f}\n(med:{md:.2f})',
+                           ha='center', va='center', fontsize=7,
+                           color='black' if abs(m) < 1.5 else 'white')
+                plt.tight_layout()
+                pdf.savefig(fig)
+                plt.close(fig)
+
+        tee.write(f"  TE summary plot saved: {summary_pdf}\n")
+
+    except ImportError as e:
+        tee.write(f"  Warning: Missing required package for TE summary ({e})\n")
+    except Exception as e:
+        tee.write(f"  Warning: TE summary generation failed: {e}\n")
 
 
 def _read_psite_tracks(psite_file):
-    """Read RIBO Taper P_sites_all file (BED14 format).
+    """Read P_sites_all (BED14) file produced by RIBO Taper.
     
-    Column mapping (per RIBO Taper spec):
-    1. chrom              2. chromStart (P-site pos)   3. chromEnd
+    Enforces one P-site per read (by read_name). When a read has multiple
+    P-site entries, only the first is kept.
+    
+    BED14 format:
+    1. chrom             2. chromStart (P-site)    3. chromEnd
     4. name (read_id)      5. score                     6. strand
     7. chrom (full read)   8. chromStart (full read)    9. RGB color
     10. block count        11. block sizes             12. block starts
@@ -1061,6 +1708,8 @@ def _read_psite_tracks(psite_file):
     the P-site position to the nearest start codon.
     """
     psites = []
+    seen_reads = set()  # Track unique read names — each read gets exactly one P-site
+    skipped_dupes = 0
     with open(psite_file) as f:
         for line in f:
             line = line.strip()
@@ -1071,6 +1720,13 @@ def _read_psite_tracks(psite_file):
                 continue
             # Extract key fields (P-site position: columns 1-3)
             read_name = fields[3]      # column 4: name/read_id
+            
+            # Enforce one P-site per read — skip duplicate read names
+            if read_name in seen_reads:
+                skipped_dupes += 1
+                continue
+            seen_reads.add(read_name)
+            
             chrom = fields[0]          # column 1: chrom (P-site)
             pos = int(fields[1])       # column 2: chromStart (P-site position)
             chrom_end = int(fields[2]) if len(fields) > 2 and fields[2].lstrip('-').isdigit() else pos + 1
@@ -1114,7 +1770,13 @@ def _read_psite_tracks(psite_file):
                 'line': line,
             }
             psites.append(entry)
-    return psites
+    
+    if skipped_dupes > 0:
+        import sys
+        print(f"  Note: Skipped {skipped_dupes} duplicate P-sites (same read had multiple entries)",
+              file=sys.stderr)
+    
+    return psites, skipped_dupes
 
 
 def _normalize_strand(strand):
@@ -1127,7 +1789,7 @@ def _normalize_strand(strand):
     return '+'
 
 
-def _assign_frames(psites, transcr_exons_file, cds_coords_file, tmp_dir):
+def _assign_frames(psites, transcr_exons_file, cds_coords_file, tmp_dir, tee=None):
     """Assign reading frames to P-sites using transcript coordinates.
     
     Uses cds_coords_transcripts (transcript-level CDS start/stop) and
@@ -1165,12 +1827,25 @@ def _assign_frames(psites, transcr_exons_file, cds_coords_file, tmp_dir):
             fout.write(line + '\n')
     
     # Step 3: Run bedtools intersect to assign transcript IDs
+    def _af_warn(msg):
+        if tee is not None:
+            tee.write(msg)
+        else:
+            print(msg, file=sys.stderr)
+
+    if shutil.which("bedtools") is None:
+        _af_warn("  Warning: bedtools not found in PATH - frame assignment "
+                 "will fail (all frames = -1)\n")
+
     psite_tx = {}  # psite_idx -> transcript_id
     try:
         intersect_cmd = f"bedtools intersect -a {psite_bed} -b {gene_bed} -s -wb"
         result = subprocess.run(intersect_cmd, shell=True, capture_output=True, text=True)
         n_primary = 0
-        if result.returncode == 0 and result.stdout:
+        if result.returncode != 0:
+            _af_warn(f"  Warning: bedtools intersect (-s) failed: "
+                     f"{(result.stderr or '').strip()[:300]}\n")
+        elif result.stdout:
             for line in result.stdout.strip().split('\n'):
                 if not line.strip():
                     continue
@@ -1186,9 +1861,15 @@ def _assign_frames(psites, transcr_exons_file, cds_coords_file, tmp_dir):
         
         # Retry without strand if no matches
         if n_primary == 0:
+            if result.returncode == 0:
+                _af_warn("  Warning: no strand-matched overlaps; retrying "
+                         "bedtools intersect without -s\n")
             intersect_cmd = f"bedtools intersect -a {psite_bed} -b {gene_bed} -wb"
             result2 = subprocess.run(intersect_cmd, shell=True, capture_output=True, text=True)
-            if result2.returncode == 0 and result2.stdout:
+            if result2.returncode != 0:
+                _af_warn(f"  Warning: bedtools intersect fallback failed: "
+                         f"{(result2.stderr or '').strip()[:300]}\n")
+            elif result2.stdout:
                 for line in result2.stdout.strip().split('\n'):
                     if not line.strip():
                         continue
@@ -1198,8 +1879,12 @@ def _assign_frames(psites, transcr_exons_file, cds_coords_file, tmp_dir):
                         tx_id = fields[9]
                         if tx_id:
                             psite_tx[psite_idx] = tx_id
-    except Exception:
-        pass
+            else:
+                _af_warn("  Warning: no P-sites overlapped transcript exons "
+                         "(with or without strand matching)\n")
+    except Exception as exc:
+        _af_warn(f"  Warning: frame assignment via bedtools raised an error: "
+                 f"{exc}\n")
     
     # Step 4: Build transcript exon lookup from filtered .1 BED
     tx_exons = {}  # transcript_id -> (starts[], ends[], strand)
@@ -1398,10 +2083,13 @@ def _split_psites_by_sample(psites, tags, bam_dir, tee):
     Uses the sample BAM files to identify which P-sites belong to which sample.
     Reads all mapped read names from each BAM, then matches P-sites by read name.
     Returns dict: tag -> list of psite dicts
+    
+    Reports unmatched P-sites (read_name not found in any sample BAM).
     """
-    # First, extract read names from ALL samples in parallel to save time
+    # First, extract read names from ALL samples
     tee.write("    Extracting read names from sample BAMs...\n")
     sample_read_sets = {}
+    all_bam_reads = set()  # Union of all reads across all BAMs
     
     for tag in tags:
         # Check both STAR and Ribo BAM paths
@@ -1425,33 +2113,80 @@ def _split_psites_by_sample(psites, tags, bam_dir, tee):
             )
             read_names = set(result.stdout.strip().split('\n')) - {'read_name'}
             sample_read_sets[tag] = read_names
+            all_bam_reads.update(read_names)
             tee.write(f"    {tag}: {len(read_names):,} mapped reads\n")
         except Exception:
             tee.write(f"    Warning: Failed to read {bam_path}\n")
             sample_read_sets[tag] = set()
     
-    # Assign P-sites to samples with deduplication
+    # Detect read names present in more than one sample BAM. These make
+    # per-sample assignment ambiguous (a P-site can only be given to the
+    # first matching sample) and cause false dedup in _read_psite_tracks.
+    from collections import Counter
+    _name_owner_count = Counter()
+    for rn_set in sample_read_sets.values():
+        _name_owner_count.update(rn_set)
+    cross_sample_names = {rn for rn, cnt in _name_owner_count.items() if cnt > 1}
+    if cross_sample_names:
+        n_cross = len(cross_sample_names)
+        total_unique = len(_name_owner_count)
+        tee.write(f"    Warning: {n_cross:,} read names appear in more than one "
+                  f"sample BAM ({100 * n_cross / max(1, total_unique):.1f}% of "
+                  f"unique BAM read names)\n")
+        examples = sorted(cross_sample_names)[:3]
+        if examples:
+            tee.write(f"      e.g. {examples}\n")
+        tee.write("      P-sites with these names are assigned to the first "
+                  "matching sample only - use unique read names (e.g. SRA "
+                  "accessions) for reliable per-sample splitting\n")
+
+    # Build set of all P-site read names
+    all_psite_reads = {p['read_name'] for p in psites}
+    
+    # Report matching stats
+    n_unmatched_reads = len(all_psite_reads - all_bam_reads)
+    n_shared_reads = len(all_psite_reads & all_bam_reads)
+    tee.write(f"    Read name matching: {len(all_psite_reads):,} unique P-site reads, "
+              f"{len(all_bam_reads):,} unique BAM reads\n")
+    tee.write(f"    Matched: {n_shared_reads:,}, Unmatched (not in any BAM): {n_unmatched_reads:,}\n")
+    if n_unmatched_reads > 0 and len(all_psite_reads) > 0:
+        pct = 100 * n_unmatched_reads / len(all_psite_reads)
+        tee.write(f"    Warning: {pct:.1f}% of P-site read names not found in any sample BAM\n")
+        # Show a few examples of unmatched read names for debugging
+        unmatched_examples = list(all_psite_reads - all_bam_reads)[:5]
+        if unmatched_examples:
+            tee.write(f"    Example unmatched read names: {unmatched_examples[:3]}\n")
+    
+    # Assign P-sites to samples
     sample_psites = {tag: [] for tag in tags}
     seen = {tag: set() for tag in tags}  # track unique keys per sample
+    n_unassigned = 0
     
-    tee.write(f"    Assigning {len(psites):,} P-sites to samples (dedup)...\n")
+    tee.write(f"    Assigning {len(psites):,} P-sites to samples...\n")
     
     for psite in psites:
         rn = psite['read_name']
         # Deduplication key: chrom + pos + read_name + length + strand
         key = (psite['chrom'], psite['pos'], rn, psite['length'], psite['strand'])
+        assigned = False
         for tag in tags:
             read_set = sample_read_sets.get(tag, set())
             if rn in read_set:
                 if key not in seen[tag]:
                     seen[tag].add(key)
                     sample_psites[tag].append(psite)
+                assigned = True
                 break  # assign to first matching sample only
+        if not assigned:
+            n_unassigned += 1
     
     for tag in tags:
         n = len(sample_psites[tag])
         if n > 0:
-            tee.write(f"    {tag}: assigned {n:,} unique P-sites\n")
+            tee.write(f"    {tag}: assigned {n:,} P-sites\n")
+    
+    tee.write(f"    Total assigned: {sum(len(v) for v in sample_psites.values()):,}, "
+              f"unassigned (read not in any BAM): {n_unassigned:,}\n")
     
     return sample_psites
 
@@ -1677,12 +2412,15 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, tee):
         return
     
     tee.write(f"  Reading P-site file: {psite_file}\n")
-    psites = _read_psite_tracks(psite_file)
+    psites, n_skipped_dupes = _read_psite_tracks(psite_file)
     if not psites:
         tee.write("  Warning: No P-sites found\n")
         return
     
-    tee.write(f"  Found {len(psites)} P-sites total\n")
+    tee.write(f"  Found {len(psites)} P-sites total")
+    if n_skipped_dupes > 0:
+        tee.write(f" (skipped {n_skipped_dupes} duplicate P-sites from reads with multiple entries)")
+    tee.write("\n")
     
     # Find start_stop_FAR.bed for bedtools closest approach
     start_stop_bed = None
@@ -1725,21 +2463,21 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, tee):
             break
     
     # Compute frames if possible (for frame distribution plot)
+    frame_valid_psites = []
     if transcr_exons_file and cds_coords_file:
-        tee.write(f"  Filtering .1 transcript exons from: {transcr_exons_file}\n")
-        tee.write(f"  Reading CDS coordinates from: {cds_coords_file}\n")
-        tee.write("  Assigning frames (transcript-level coordinates)...\n")
-        valid_psites, n_matched = _assign_frames(
-            psites, transcr_exons_file, cds_coords_file, ribo_map_dir)
+        tee.write(f"  Loading transcript exon structures from: {transcr_exons_file}\n")
+        tee.write(f"  Loading CDS coordinates from: {cds_coords_file}\n")
+        tee.write("  Assigning frames (transcript-level coordinates, all transcripts)...\n")
+        frame_valid_psites, n_matched = _assign_frames(
+            psites, transcr_exons_file, cds_coords_file, ribo_map_dir, tee=tee)
         tee.write(f"  bedtools matched: {n_matched} P-sites\n")
-        n_excluded = len(psites) - len(valid_psites)
-        frames_list = [p['frame'] for p in valid_psites]
-        tee.write(f"  Excluded {n_excluded} P-sites outside .1 transcript exons\n")
-        tee.write(f"  Valid P-sites: {len(valid_psites)}\n")
+        n_excluded = len(psites) - len(frame_valid_psites)
+        frames_list = [p['frame'] for p in frame_valid_psites]
+        tee.write(f"  Excluded {n_excluded} P-sites outside transcript exons\n")
+        tee.write(f"  Valid P-sites (frame-assigned): {len(frame_valid_psites)}\n")
         if frames_list:
             fc = np.bincount(frames_list, minlength=3)[:3]
             tee.write(f"  Frame distribution: 0={fc[0]}, 1={fc[1]}, 2={fc[2]}\n")
-        psites = valid_psites
     else:
         if not transcr_exons_file:
             tee.write("  Warning: transcr_exons_ccds.bed not found, skipping frame computation\n")
@@ -1747,7 +2485,8 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, tee):
             tee.write("  Warning: cds_coords_transcripts not found, skipping frame computation\n")
         tee.write("  Frame assignment skipped, using all P-sites\n")
     
-    # Split P-sites by sample
+    # Split P-sites by sample (uses ALL psites, not just frame-valid ones)
+    # _assign_frames modifies psite dicts in-place, so frame info is preserved
     tee.write("  Splitting P-sites by sample...\n")
     sample_psites = _split_psites_by_sample(
         psites, tags, ribo_map_dir, tee
@@ -1927,27 +2666,24 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, tee):
             
             tee.write(f"  Assigned (frame+sample): {n_assigned}, unassigned: {n_unassigned}\n")
             
-            # Define frame colors: green→yellow→red gradient
-            frame_colors = ['#27ae60', '#f1c40f', '#e74c3c']
-            frame_labels = ['Frame 0', 'Frame 1', 'Frame 2']
             dist_positions = np.arange(DIST_MIN, DIST_MAX + 1)  # -30..30
             
             def _draw_sample_page(ax_row, sample_name, sample_data):
                 """Draw a 2x2 metagene page for one sample.
-                ax_row[0,0] = Start Codon (histogram + line plot)
-                ax_row[0,1] = Stop Codon (histogram + line plot)
+                ax_row[0,0] = Start Codon (line plot, per-frame)
+                ax_row[0,1] = Stop Codon (line plot, per-frame)
                 ax_row[1,0] = Overlay (Start vs Stop total line plot)
                 ax_row[1,1] = Stats
                 """
-                # ── Start Codon ──
+                # ── Start Codon (line plot only) ──
                 ax_start = ax_row[0, 0]
-                _draw_codon_panel(ax_start, dist_positions, sample_data, 'start',
-                                  f'Start Codon — {sample_name}')
+                _draw_codon_line_panel(ax_start, dist_positions, sample_data, 'start',
+                                       f'Start Codon — {sample_name}')
                 
-                # ── Stop Codon ──
+                # ── Stop Codon (line plot only) ──
                 ax_stop = ax_row[0, 1]
-                _draw_codon_panel(ax_stop, dist_positions, sample_data, 'stop',
-                                  f'Stop Codon — {sample_name}')
+                _draw_codon_line_panel(ax_stop, dist_positions, sample_data, 'stop',
+                                       f'Stop Codon — {sample_name}')
                 
                 # ── Overlay (total counts line plot) ──
                 ax_overlay = ax_row[1, 0]
@@ -1998,54 +2734,29 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, tee):
                              transform=ax_stats.transAxes)
                 ax_stats.set_title(f'Stats — {sample_name}')
             
-            def _draw_codon_panel(ax, dist_pos, sample_data, codon_type, title):
-                """Draw histogram (stacked by frame) + line plot for one codon type."""
+            def _draw_codon_line_panel(ax, dist_pos, sample_data, codon_type, title):
+                """Draw line plot (total only) for one codon type.
+                No frame-specific lines — total counts only.
+                """
                 frame_data_list = sample_data[codon_type]  # list of 3 arrays
-                total_counts = sum(frame_data_list)  # sum across frames
                 
-                # Stacked histogram for frames
-                bottom = np.zeros(N_DIST)
-                has_data = total_counts.sum() > 0
-                
-                if has_data:
-                    for f in range(3):
-                        ax.bar(dist_pos, frame_data_list[f], bottom=bottom,
-                               color=frame_colors[f], label=frame_labels[f],
-                               width=1, align='edge', edgecolor='white', linewidth=0.3,
-                               alpha=0.85)
-                        bottom += frame_data_list[f]
-                    # Add unassigned counts
-                    unassigned_key = 'unassigned_' + codon_type
-                    unassigned_data = sample_data.get(unassigned_key, [])
-                    if unassigned_data:
-                        unassigned_arr = np.zeros(N_DIST)
-                        for d in unassigned_data:
-                            if DIST_MIN <= d <= DIST_MAX:
-                                unassigned_arr[d - DIST_MIN] += 1
-                        if unassigned_arr.sum() > 0:
-                            ax.bar(dist_pos, unassigned_arr, bottom=bottom,
-                                   color='gray', label='Unassigned',
-                                   width=1, align='edge', edgecolor='white', linewidth=0.3,
-                                   alpha=0.5)
-                
-                # Line plot overlay (total counts per distance)
-                total_with_unassigned = total_counts.copy()
+                # Total line (sum of all frames + unassigned)
+                total_counts = sum(frame_data_list)
                 unassigned_key = 'unassigned_' + codon_type
                 for d in sample_data.get(unassigned_key, []):
                     if DIST_MIN <= d <= DIST_MAX:
-                        total_with_unassigned[d - DIST_MIN] += 1
-                
-                if total_with_unassigned.sum() > 0:
-                    ax.plot(dist_pos + 0.5, total_with_unassigned, color='black',
-                           linewidth=1.5, marker='.', markersize=3,
-                           zorder=5, alpha=0.7, label='Total (line)')
+                        total_counts[d - DIST_MIN] += 1
+                if total_counts.sum() > 0:
+                    ax.plot(dist_pos, total_counts, color='#2c3e50',
+                           linewidth=1.8, marker='.', markersize=3,
+                           alpha=0.85, label='Total')
                 
                 ax.axvline(x=0, color='red', linestyle='--', linewidth=1, alpha=0.6)
                 ax.set_xlabel('Distance from Codon (nt)')
                 ax.set_ylabel('Count')
-                n_total = int(total_with_unassigned.sum())
+                n_total = int(total_counts.sum())
                 ax.set_title(f'{title} (n={n_total})')
-                ax.set_xlim(DIST_MIN, DIST_MAX + 1)
+                ax.set_xlim(DIST_MIN, DIST_MAX)
                 ax.set_xticks(range(DIST_MIN, DIST_MAX + 1, 5))
                 ax.legend(fontsize=7, loc='upper right')
             
@@ -2081,7 +2792,7 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, tee):
         else:
             tee.write("  No metagene data available, skipping metagene plots\n")
     
-    # Save per-sample P-site files (exact same format as P_sites_all)
+    # Save per-sample P-site files (same format as P_sites_all + frame column)
     tee.write("\n  Saving per-sample P-site files...\n")
     for tag, assignments in sample_psites.items():
         if not assignments:
@@ -2089,7 +2800,10 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, tee):
         out_file = f"P_sites_{tag}"
         with open(out_file, 'w') as f:
             for p in assignments:
-                f.write(p.get('line', '') + '\n')
+                line = p.get('line', '')
+                frame = p.get('frame', -1)
+                # Append frame as last column (-1, 0, 1, or 2)
+                f.write(f"{line}\t{frame}\n")
         tee.write(f"    {out_file}: {len(assignments)} P-sites\n")
     
     # Clean up temp files from bedtools closest
