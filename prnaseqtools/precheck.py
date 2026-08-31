@@ -234,15 +234,43 @@ _CHECK_DEFS = {
         'cmd': 'stringtie --version',
         'pattern': r'version (\d+\.\d+\.\d+)',
         'required': False,
-        'msg': 'Transcriptome assembly (Ribo-seq)',
-        'mode_only': ['ribo'],
+        'msg': 'Transcriptome assembly (Ribo-seq, lncRNA-seq)',
+        'mode_only': ['ribo', 'lncrna'],
     },
     'gffcompare': {
         'cmd': 'gffcompare --version',
         'pattern': r'v(\d+\.\d+\.\d+)',
         'required': False,
-        'msg': 'GTF comparison (Ribo-seq)',
-        'mode_only': ['ribo'],
+        'msg': 'GTF comparison / transcript classification (Ribo-seq, lncRNA-seq)',
+        'mode_only': ['ribo', 'lncrna'],
+    },
+    'FEELnc': {
+        'cmd': 'FEELnc_cmd_classifier.pl -h 2>&1',
+        'pattern': r'FEELnc',
+        'required': False,
+        'msg': 'lncRNA classifier (plants, conda install -c bioconda feelnc)',
+        'mode_only': ['lncrna'],
+    },
+    'PLEK2': {
+        'cmd': 'python3 -c "import keras, tensorflow, pandas, bio; print(\"ok\")" 2>&1',
+        'pattern': r'ok',
+        'required': False,
+        'msg': 'PLEK2 lncRNA classifier deps (keras/tensorflow/bio)',
+        'mode_only': ['lncrna'],
+    },
+    'PLEK2_model': {
+        'cmd': 'ls ~/PLEK2/Coding_Net_kmer6_orf_Arabidopsis.h5 2>&1 | head -1',
+        'pattern': r'Arabidopsis\.h5',
+        'required': False,
+        'msg': 'PLEK2 pre-trained plant model (h5 file)',
+        'mode_only': ['lncrna'],
+    },
+    'featureCounts': {
+        'cmd': 'featureCounts -v 2>&1',
+        'pattern': r'version',
+        'required': False,
+        'msg': 'Read counting',
+        'mode_only': ['lncrna'],
     },
     'rsem-prepare-reference': {
         'cmd': 'rsem-prepare-reference -h 2>&1',
@@ -250,6 +278,7 @@ _CHECK_DEFS = {
         'required': False,
         'msg': 'RSEM reference preparation (Ribo-seq)',
         'mode_only': ['ribo'],
+        'silent': True,
     },
     'rsem-calculate-expression': {
         'cmd': 'rsem-calculate-expression -h 2>&1',
@@ -257,6 +286,7 @@ _CHECK_DEFS = {
         'required': False,
         'msg': 'RSEM expression quantification (Ribo-seq)',
         'mode_only': ['ribo'],
+        'silent': True,
     },
     'sPARTA.py': {
         'cmd': 'python3 -c "import numpy, scipy; print(\'sPARTA deps OK\')" 2>&1',
@@ -264,6 +294,13 @@ _CHECK_DEFS = {
         'required': False,
         'msg': 'sPARTA degradome-seq peak caller (needs numpy, scipy)',
         'mode_only': ['degradome'],
+    },
+    'DoubletFinder': {
+        'cmd': 'Rscript -e "if(requireNamespace(\'DoubletFinder\', quietly=TRUE)) cat(\'OK\')" 2>&1',
+        'pattern': r'OK',
+        'required': False,
+        'msg': 'Doublet detection for single-cell (optional)',
+        'mode_only': ['sc'],
     },
 }
 
@@ -316,12 +353,13 @@ def check_dependencies(auto_install=True, mode=None, interactive=True):
 
         version = _get_version(cfg['cmd'], cfg.get('pattern'))
         if version:
-            tee.write(f"  {name} version {version}\n")
+            if not cfg.get('silent'):
+                tee.write(f"  {name} version {version}\n")
         else:
             if cfg.get('required', True):
                 tee.write(f"  {name}: MISSING — {cfg['msg']}\n")
                 missing.append((name, cfg))
-            else:
+            elif not cfg.get('silent'):
                 tee.write(f"  {name}: not found (optional)\n")
 
     # ── Phase 2: auto-install missing tools ───────────────────────────
@@ -350,7 +388,8 @@ def check_dependencies(auto_install=True, mode=None, interactive=True):
                     continue
                 version = _get_version(cfg['cmd'], cfg.get('pattern'))
                 if version:
-                    tee.write(f"  {name} version {version}  ✓\n")
+                    if not cfg.get('silent'):
+                        tee.write(f"  {name} version {version}  ✓\n")
                 else:
                     still_missing.append((name, cfg))
             missing = still_missing

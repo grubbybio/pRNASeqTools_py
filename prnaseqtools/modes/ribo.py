@@ -1121,7 +1121,20 @@ def run(opts):
                               f"{_te_err}\n")
                     tee.write("    Continuing with remaining pairs...\n")
 
-        tee.write(f"\n  TE calculation complete. Results saved to: {te_dir}/\n")
+        # ── rPS index per Ribo-seq sample ──
+        # rPS = start-codon P-sites / other-CDS P-sites (raw ratio)
+        tee.write("\n  Computing rPS index per Ribo-seq sample...\n")
+        rps_dir = "rPS_results"
+        os.makedirs(rps_dir, exist_ok=True)
+        # Clean previous rPS tables
+        for old_f in globmod.glob(os.path.join(rps_dir, "rps_table_*.tsv")):
+            os.unlink(old_f)
+        try:
+            _compute_rps(rps_dir, ribo_anno_dir, all_ribo_tags, tee)
+        except Exception as _rps_err:
+            tee.write(f"  ERROR: rPS computation failed: {_rps_err}\n")
+
+        tee.write(f"\n  TE & rPS calculation complete. Results saved to: {te_dir}/\n")
         tee.write("  STEP 10 COMPLETE\n")
 
     # ==================================================================
@@ -1183,6 +1196,56 @@ def run(opts):
         tee.write("  STEP 11 COMPLETE\n")
 
     # ==================================================================
+    # STEP 11b — rPS plotting (per-sample + combined summary)
+    # ==================================================================
+    if last_step < 11:
+        rps_dir = "rPS_results"
+        if os.path.isdir(rps_dir):
+            tee.write("\n" + "=" * 60 + "\n")
+            tee.write("STEP 11b: rPS plotting\n")
+            tee.write("=" * 60 + "\n")
+
+            # Load rPS tables from disk
+            all_rps_tables = {}
+            for tag in all_ribo_tags:
+                rps_file = os.path.join(rps_dir, f"rps_table_{tag}.tsv")
+                if not os.path.exists(rps_file):
+                    tee.write(f"  Warning: No rps_table_{tag}.tsv, skipping\n")
+                    continue
+                table = []
+                with open(rps_file) as f:
+                    header = f.readline().strip().split('\t')
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        fields = line.split('\t')
+                        row = {}
+                        for h, val in zip(header, fields):
+                            try:
+                                row[h] = float(val) if val != 'NA' else float('nan')
+                            except ValueError:
+                                row[h] = val
+                        table.append(row)
+                if table:
+                    all_rps_tables[tag] = table
+                    tee.write(f"  Loaded rPS {tag}: {len(table)} genes\n")
+
+            if not all_rps_tables:
+                tee.write("  No rPS tables found, skipping rPS plotting\n")
+            else:
+                # Per-sample plots
+                for tag, table in all_rps_tables.items():
+                    tee.write(f"  Plotting rPS {tag}...\n")
+                    _plot_rps(tag, table, rps_dir, tee)
+
+                # Combined summary (stats + boxplot with letters)
+                tee.write("  Generating combined rPS summary...\n")
+                _generate_rps_summary(all_rps_tables, rps_dir, tee,
+                                      ribo_groups=ribo_groups)
+            tee.write("  STEP 11b COMPLETE\n")
+
+    # ==================================================================
     # STEP 12 — Final output summary
     # ==================================================================
     if last_step < 12:
@@ -1197,6 +1260,7 @@ def run(opts):
         tee.write(f"    RIBO Taper results:   (current directory)\n")
         tee.write(f"    RIBO Taper annotation:{ribo_anno_dir}/\n")
         tee.write(f"    TE results:           TE_results/\n")
+        tee.write(f"    rPS results:          rPS_results/\n")
         tee.write("  STEP 12 COMPLETE\n")
 
     # Cleanup contamination index
@@ -1606,8 +1670,8 @@ def _plot_te(te_table, output_dir, tee):
 
 
 def _te_group_stats(wide_tsv, output_dir, tee, alpha=0.05,
-                    rna_groups=None):
-    """Statistical testing of TE across conditions via external R script.
+                    rna_groups=None, suffix='_log2te', out_prefix='TE_'):
+    """Statistical testing of TE (or rPS) across conditions via external R script.
 
     Design assumption: multiple conditions, each with biological replicates.
     Per-gene log2(TE) values are paired across conditions (same gene = unit).
@@ -1615,21 +1679,23 @@ def _te_group_stats(wide_tsv, output_dir, tee, alpha=0.05,
     Runs scripts/TE_stats.R which:
       1. Fits linear model log2te ~ condition + gene_id (paired design)
       2. Uses emmeans for estimated marginal means + Tukey-adjusted contrasts
-      3. Uses agricolae::HSD.test for compact letter display
-      4. Outputs TE_emmeans.tsv, TE_contrasts.tsv, TE_letters.tsv,
-         TE_summary_stats.tsv in output_dir
+      3. Uses multcomp::cld for compact letter display
+      4. Outputs {out_prefix}emmeans.tsv, {out_prefix}contrasts.tsv,
+         {out_prefix}letters.tsv, {out_prefix}summary_stats.tsv in output_dir
 
     Args:
-        wide_tsv: Path to wide-format TE table (te_combined.tsv) with
-                  columns: gene_id, {pair1}_log2te, {pair2}_log2te, ...
+        wide_tsv: Path to wide-format table with columns:
+                  gene_id, {sample1}{suffix}, {sample2}{suffix}, ...
         output_dir: Directory for output files (R script writes here too)
         tee: Tee writer for logging
         alpha: Significance threshold (default 0.05)
         rna_groups: Optional list of [(group_name, n_replicates), ...] from
-                    input parameters. If None, uses each pair as one group.
+                    input parameters. If None, uses each sample as one group.
+        suffix: Column suffix identifying value columns (default '_log2te')
+        out_prefix: Filename prefix for R script outputs (default 'TE_')
 
     Returns:
-        (anova_f, anova_p, letters) — letters maps pair_name/condition ->
+        (anova_f, anova_p, letters) — letters maps sample/condition ->
         letter string; empty dict when statistics could not be run.
     """
     letters = {}
@@ -1653,8 +1719,8 @@ def _te_group_stats(wide_tsv, output_dir, tee, alpha=0.05,
     pair_names = []
     with open(wide_tsv) as f:
         header = f.readline().strip().split('\t')
-        pair_names = [h[:-len('_log2te')] for h in header
-                      if h.endswith('_log2te')]
+        pair_names = [h[:-len(suffix)] for h in header
+                      if h.endswith(suffix)]
 
     group_args = []
     if rna_groups and len(rna_groups) > 0:
@@ -1686,12 +1752,13 @@ def _te_group_stats(wide_tsv, output_dir, tee, alpha=0.05,
 
     cmd = (
         f'Rscript --vanilla "{r_script}" '
-        f'"{wide_tsv}" "{output_dir}" "{alpha}" {" ".join(group_args)}'
+        f'"{wide_tsv}" "{output_dir}" "{alpha}" "{out_prefix}" '
+        f'{" ".join(group_args)}'
     )
     run_cmd(cmd)
 
     # Parse back the letters result to annotate the boxplot
-    letters_file = os.path.join(output_dir, "TE_letters.tsv")
+    letters_file = os.path.join(output_dir, f"{out_prefix}letters.tsv")
     anova_p = None
     anova_f = None
 
@@ -1712,7 +1779,7 @@ def _te_group_stats(wide_tsv, output_dir, tee, alpha=0.05,
             tee.write(f"  Warning: Failed to parse {letters_file}: {e}\n")
 
     # Try parsing ANOVA p-value from log if R wrote a summary file
-    stats_log = os.path.join(output_dir, "TE_anova.tsv")
+    stats_log = os.path.join(output_dir, f"{out_prefix}anova.tsv")
     if os.path.exists(stats_log):
         try:
             with open(stats_log) as f:
@@ -1725,6 +1792,308 @@ def _te_group_stats(wide_tsv, output_dir, tee, alpha=0.05,
             pass
 
     return (anova_f, anova_p, letters)
+
+
+# ── rPS index helpers ────────────────────────────────────────────────────
+
+def _compute_rps(output_dir, ribo_anno_dir, ribo_tags, tee,
+                 min_other=1, start_window=(0, 2)):
+    """Compute rPS index per Ribo-seq sample.
+
+    rPS = N_TIS / ((N_CDS - N_TIS) / (N_codon - 1))
+
+    - N_TIS: P-sites at the translation initiation site (start codon,
+      transcript-level distance 0-2 nt by default).
+    - N_CDS: total P-sites inside the CDS (including the start codon).
+    - N_codon: number of codons in the CDS (cds_len / 3). For genes with
+      multiple transcripts, the longest CDS is used.
+
+    The denominator is the per-codon density of the rest of the CDS, so
+    rPS = 1 means the start codon has the same ribosome density per codon
+    as the CDS body.
+
+    Reads per-sample files P_sites_{tag} (cols 16=tx_id, 17=dist_to_start,
+    18=dist_to_stop, 19=cds_len, written by Step 9) and writes
+    rps_table_{tag}.tsv into output_dir.
+
+    Returns:
+        dict: tag -> list of dicts with keys
+              gene_id, tis_psites, cds_psites, n_codon, rps
+    """
+    # Build transcript -> gene map
+    tx_to_gene = {}
+    exons_bed = os.path.join(ribo_anno_dir, "transcr_exons_ccds.bed")
+    if os.path.exists(exons_bed):
+        with open(exons_bed) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                fields = line.split('\t')
+                if len(fields) >= 5:
+                    tx_to_gene[fields[3]] = fields[4]
+    else:
+        tee.write(f"  Warning: {exons_bed} not found - cannot map "
+                  f"transcripts to genes, rPS skipped\n")
+        return {}
+
+    w_lo, w_hi = start_window
+    all_tables = {}
+    for tag in ribo_tags:
+        psite_file = f"P_sites_{tag}"
+        if not os.path.exists(psite_file):
+            tee.write(f"  Warning: {psite_file} not found, skipping rPS "
+                      f"for {tag}\n")
+            continue
+
+        gene_tis = {}       # gene_id -> TIS psite count
+        gene_cds = {}       # gene_id -> total CDS psite count (incl. TIS)
+        gene_cds_len = {}   # gene_id -> longest CDS length (nt)
+        n_unassigned = 0
+        with open(psite_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                fields = line.split('\t')
+                if len(fields) < 19:
+                    n_unassigned += 1
+                    continue
+                tx_id = fields[15]
+                dist_start_str = fields[16]
+                dist_stop_str = fields[17]
+                cds_len_str = fields[18]
+                if tx_id == 'NA' or dist_start_str == 'NA' \
+                        or dist_stop_str == 'NA' or cds_len_str == 'NA':
+                    n_unassigned += 1
+                    continue
+                gene_id = tx_to_gene.get(tx_id)
+                if gene_id is None:
+                    n_unassigned += 1
+                    continue
+                try:
+                    dist_start = int(dist_start_str)
+                    dist_stop = int(dist_stop_str)
+                    cds_len = int(cds_len_str)
+                except ValueError:
+                    continue
+                in_cds = dist_start >= 0 and dist_stop <= 0
+                if not in_cds:
+                    continue
+                if w_lo <= dist_start <= w_hi:
+                    gene_tis[gene_id] = gene_tis.get(gene_id, 0) + 1
+                gene_cds[gene_id] = gene_cds.get(gene_id, 0) + 1
+                if cds_len > gene_cds_len.get(gene_id, 0):
+                    gene_cds_len[gene_id] = cds_len
+
+        table = []
+        for gene_id in sorted(gene_cds):
+            tis = gene_tis.get(gene_id, 0)
+            cds = gene_cds[gene_id]
+            n_codon = gene_cds_len[gene_id] // 3
+            other = cds - tis
+            if n_codon >= 2 and other >= min_other:
+                rps = tis / (other / (n_codon - 1))
+            else:
+                rps = float('nan')  # CDS too short or no other-CDS psites
+            table.append({
+                'gene_id': gene_id,
+                'tis_psites': tis,
+                'cds_psites': cds,
+                'n_codon': n_codon,
+                'rps': rps,
+            })
+
+        # Write per-sample table
+        out_file = os.path.join(output_dir, f"rps_table_{tag}.tsv")
+        with open(out_file, 'w') as f:
+            f.write("gene_id\ttis_psites\tcds_psites\tn_codon\trps\n")
+            for row in table:
+                rps_str = f"{row['rps']:.4f}" if not math.isnan(row['rps']) else 'NA'
+                f.write(f"{row['gene_id']}\t{row['tis_psites']}\t"
+                        f"{row['cds_psites']}\t{row['n_codon']:.0f}\t{rps_str}\n")
+
+        n_valid = sum(1 for r in table if not math.isnan(r['rps']))
+        tee.write(f"  rPS [{tag}]: {len(table):,} genes "
+                  f"({n_valid:,} with rPS value, "
+                  f"{n_unassigned:,} unassigned P-sites)\n")
+        if table:
+            all_tables[tag] = table
+
+    return all_tables
+
+
+def _plot_rps(tag, rps_table, output_dir, tee):
+    """Plot rPS index distribution for one Ribo-seq sample.
+
+    Page 1: histogram of rPS with statistics
+    Page 2: scatter of other-CDS P-sites vs rPS (log-x)
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+        import numpy as np
+
+        rps_vals = [r['rps'] for r in rps_table if not math.isnan(r['rps'])]
+        if not rps_vals:
+            tee.write(f"  Warning: No valid rPS values to plot for {tag}\n")
+            return
+
+        pdf_path = os.path.join(output_dir, f"rps_distribution_{tag}.pdf")
+        with PdfPages(pdf_path) as pdf:
+            # Page 1: histogram
+            arr = np.array(rps_vals)
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.hist(arr, bins=80, color='mediumseagreen', edgecolor='white',
+                    density=True, alpha=0.85)
+            median_val = np.median(arr)
+            mean_val = np.mean(arr)
+            ax.axvline(x=median_val, color='red', linestyle='--', linewidth=1.5,
+                       label=f'Median: {median_val:.2f}')
+            ax.axvline(x=mean_val, color='blue', linestyle=':', linewidth=1.5,
+                       label=f'Mean: {mean_val:.2f}')
+            ax.axvline(x=1.0, color='black', linestyle='-', linewidth=1, alpha=0.5,
+                       label='rPS = 1 (same per-codon density)')
+            ax.set_xlabel('rPS = N_TIS / ((N_CDS − N_TIS)/(N_codon − 1))')
+            ax.set_ylabel('Density')
+            ax.set_title(f'rPS Index Distribution — {tag}\n({len(arr):,} genes)')
+            ax.legend(fontsize=8)
+            stats_text = (
+                f"N genes: {len(arr):,}\n"
+                f"Mean: {mean_val:.3f}\n"
+                f"Median: {median_val:.3f}\n"
+                f"Std: {np.std(arr):.3f}\n"
+                f"Range: [{np.min(arr):.2f}, {np.max(arr):.2f}]"
+            )
+            ax.text(0.95, 0.95, stats_text, transform=ax.transAxes,
+                    fontsize=9, verticalalignment='top', horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            pdf.savefig(fig)
+            plt.close(fig)
+
+            # Page 2: other-CDS P-sites vs rPS scatter
+            valid = [r for r in rps_table if not math.isnan(r['rps'])]
+            others = np.array([r['cds_psites'] - r['tis_psites'] for r in valid])
+            rps_scatter = np.array([r['rps'] for r in valid])
+            fig, ax = plt.subplots(figsize=(8, 8))
+            sc = ax.scatter(np.log10(others + 1), rps_scatter,
+                            c=rps_scatter, cmap='viridis', alpha=0.4, s=5)
+            plt.colorbar(sc, ax=ax, label='rPS index')
+            ax.set_xlabel('log₁₀(other CDS P-sites + 1)')
+            ax.set_ylabel('rPS index')
+            ax.set_title(f'Other CDS P-sites vs rPS — {tag}')
+            pdf.savefig(fig)
+            plt.close(fig)
+
+        tee.write(f"  rPS plot saved: {pdf_path}\n")
+    except ImportError as e:
+        tee.write(f"  Warning: Missing required package for rPS plotting ({e})\n")
+    except Exception as e:
+        tee.write(f"  Warning: rPS plotting failed for {tag}: {e}\n")
+
+
+def _generate_rps_summary(all_rps_tables, output_dir, tee, ribo_groups=None):
+    """Generate combined rPS summary across all Ribo-seq samples.
+
+    Creates:
+    1. Wide combined table rps_combined.tsv
+       (gene_id + {tag}_rps columns)
+    2. Summary PDF: boxplot of rPS per sample with significance letters
+       (paired design via TE_stats.R, same as TE)
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+        import numpy as np
+
+        if not all_rps_tables:
+            return
+
+        tags = list(all_rps_tables.keys())
+
+        # Build wide-format combined table
+        all_genes = set()
+        gene_tag_data = {}
+        for tag, table in all_rps_tables.items():
+            for row in table:
+                gid = row['gene_id']
+                all_genes.add(gid)
+                gene_tag_data.setdefault(gid, {})[tag] = row
+
+        combined_file = os.path.join(output_dir, "rps_combined.tsv")
+        with open(combined_file, 'w') as f:
+            header = ['gene_id'] + [f"{t}_rps" for t in tags]
+            f.write('\t'.join(header) + '\n')
+            for gid in sorted(all_genes):
+                parts = [gid]
+                for t in tags:
+                    row = gene_tag_data.get(gid, {}).get(t)
+                    if row is not None and not math.isnan(row['rps']):
+                        parts.append(f"{row['rps']:.4f}")
+                    else:
+                        parts.append('NA')
+                f.write('\t'.join(parts) + '\n')
+        tee.write(f"  Combined rPS table: {combined_file} "
+                  f"({len(all_genes):,} genes x {len(tags)} samples)\n")
+
+        # Statistical test + boxplot
+        valid_data = {}
+        for tag in tags:
+            vals = [r['rps'] for r in all_rps_tables[tag]
+                    if not math.isnan(r['rps'])]
+            if vals:
+                valid_data[tag] = np.array(vals)
+
+        if not valid_data:
+            return
+
+        sig_letters = {}
+        if len(tags) >= 2:
+            _, _, sig_letters = _te_group_stats(
+                combined_file, output_dir, tee, alpha=0.05,
+                rna_groups=ribo_groups, suffix='_rps', out_prefix='RPS_')
+
+        labels = list(valid_data.keys())
+        n_samples = len(labels)
+        summary_pdf = os.path.join(output_dir, "rps_summary.pdf")
+        with PdfPages(summary_pdf) as pdf:
+            fig, ax = plt.subplots(figsize=(max(8, n_samples * 1.5), 6))
+            data_list = [valid_data[k] for k in labels]
+            bp = ax.boxplot(data_list, labels=[l[:30] for l in labels],
+                            patch_artist=True, widths=0.5)
+            colors = plt.cm.Set2(np.linspace(0, 1, n_samples))
+            for patch, color in zip(bp['boxes'], colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.7)
+
+            _ymin = min(float(v.min()) for v in valid_data.values())
+            _ymax = max(float(v.max()) for v in valid_data.values())
+            _pad = (_ymax - _ymin) * 0.08 if _ymax > _ymin else 1.0
+            ax.set_ylim(_ymin - 0.2 * _pad, _ymax + 1.6 * _pad)
+            for xi, lab in enumerate(labels):
+                if lab in sig_letters and sig_letters[lab]:
+                    ax.text(xi + 1, _ymax + 0.9 * _pad, sig_letters[lab],
+                            ha='center', va='bottom', fontsize=12,
+                            fontweight='bold', color='darkred')
+            if sig_letters:
+                ax.text(0.99, 0.02,
+                        "Letters: shared = not significant "
+                        "(Tukey HSD, α=0.05)",
+                        transform=ax.transAxes, fontsize=8,
+                        ha='right', va='bottom', color='0.4')
+            ax.set_ylabel('rPS index')
+            ax.set_title('rPS Index Distribution Across Samples')
+            plt.xticks(rotation=30, ha='right')
+            plt.tight_layout()
+            pdf.savefig(fig)
+            plt.close(fig)
+        tee.write(f"  rPS summary saved: {summary_pdf}\n")
+    except Exception as e:
+        tee.write(f"  Warning: rPS summary generation failed: {e}\n")
 
 
 def _generate_te_summary(all_te_tables, output_dir, tee, rna_groups=None):
@@ -2991,7 +3360,15 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, tee):
         else:
             tee.write("  No metagene data available, skipping metagene plots\n")
     
-    # Save per-sample P-site files (same format as P_sites_all + frame column)
+    # Save per-sample P-site files (P_sites_all format + extra columns):
+    #   col 15: frame (-1/0/1/2)
+    #   col 16: transcript_id the P-site was assigned to (NA if unassigned)
+    #   col 17: transcript-level distance to start codon
+    #           (psite_tx_pos - (cds_start - 1); NA if unassigned)
+    #   col 18: transcript-level distance to stop codon
+    #           (psite_tx_pos - (cds_stop - 1); NA if unassigned)
+    #   col 19: CDS length in nt (cds_stop - cds_start + 1; NA if unassigned)
+    # Columns 16-19 are used by the rPS index calculation in Step 10.
     tee.write("\n  Saving per-sample P-site files...\n")
     for tag, assignments in sample_psites.items():
         if not assignments:
@@ -3001,8 +3378,17 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, tee):
             for p in assignments:
                 line = p.get('line', '')
                 frame = p.get('frame', -1)
-                # Append frame as last column (-1, 0, 1, or 2)
-                f.write(f"{line}\t{frame}\n")
+                tx_id = p.get('tx_id')
+                if tx_id is not None and p.get('psite_tx_pos') is not None:
+                    dist_start = p['psite_tx_pos'] - (p['cds_start'] - 1)
+                    dist_stop = p['psite_tx_pos'] - (p['cds_stop'] - 1)
+                    cds_len = p['cds_stop'] - p['cds_start'] + 1
+                else:
+                    tx_id = 'NA'
+                    dist_start = 'NA'
+                    dist_stop = 'NA'
+                    cds_len = 'NA'
+                f.write(f"{line}\t{frame}\t{tx_id}\t{dist_start}\t{dist_stop}\t{cds_len}\n")
         tee.write(f"    {out_file}: {len(assignments)} P-sites\n")
     
     # Clean up temp files from bedtools closest

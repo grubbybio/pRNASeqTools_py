@@ -152,4 +152,35 @@ def validate_options(opts):
     if si_rnas is not None and si_rnas != 'none' and not os.path.exists(si_rnas):
         sys.exit('Cannot find the siRNA list in fasta format!')
 
+    # Single-cell specific validation
+    if mode == 'sc':
+        # Validate Seurat QC parameters
+        min_features = opts.get('min_features')
+        max_features = opts.get('max_features')
+        if min_features is not None and max_features is not None:
+            if min_features >= max_features:
+                sys.exit('minfeatures must be less than maxfeatures!')
+
+        pct_mt = opts.get('pct_mt')
+        if pct_mt is not None and (pct_mt < 0 or pct_mt > 100):
+            sys.exit('pctmt must be between 0 and 100!')
+
+        n_pcs = opts.get('n_pcs')
+        if n_pcs is not None and n_pcs < 1:
+            sys.exit('npcs must be at least 1!')
+
+        resolution = opts.get('resolution')
+        if resolution is not None and (resolution < 0.1 or resolution > 2.0):
+            sys.exit('resolution should be between 0.1 and 2.0!')
+
+        run_mode_sc = opts.get('run_mode')
+        if run_mode_sc not in ('whole', 'mapping-only', 'count-table'):
+            sys.exit('mode_sc must be one of: whole, mapping-only, count-table!')
+
+        # count-table mode requires pre-existing count files
+        if run_mode_sc == 'count-table':
+            control_val = opts.get('control', '')
+            if not control_val:
+                sys.exit('count-table mode requires --control parameter!')
+
     return opts

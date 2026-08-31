@@ -101,6 +101,9 @@ install_one <- function(pkg) {
     "NMF"                     = install_github("NMF", "renozao/NMF", ref = "devel"),
     "riboWaltz"               = install_github("riboWaltz", "LabTranslationalArchitectomics/riboWaltz"),
     "Seurat"                  = install_github("Seurat", "satijalab/seurat", extra = c("uwot")),
+    "monocle3"                = install_bioconductor("monocle3"),
+    "DoubletFinder"           = install_github("DoubletFinder", "chris-mcginnis-ucsf/DoubletFinder"),
+    "harmony"                 = install_cran("harmony"),
     {
       message(paste("Unknown package:", pkg, "- skipping"))
     }
@@ -113,7 +116,7 @@ if (is.null(pkg_list)) {
   all_pkgs <- c("dplyr", "DESeq2", "DMRcaller", "ORFik", "pheatmap",
                  "ComplexHeatmap", "RNAmodR.RiboMethSeq",
                  "emmeans", "car", "agricolae", "multcomp", "ggpubr",
-                 "NMF", "riboWaltz", "Seurat")
+                 "NMF", "riboWaltz", "Seurat", "monocle3", "DoubletFinder", "harmony")
   pkg_list <- all_pkgs
 }
 

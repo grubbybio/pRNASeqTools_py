@@ -163,16 +163,37 @@ DEPENDENCY_REGISTRY = {
         'mode_only': ['chip', 'atac', 'tf'],
     },
 
-    # ── RIBO Taper / Ribo-seq tools ──────────────────────────────────
+    # ── Transcript assembly & classification (Ribo / lncRNA) ────────
     'stringtie': {
         'pkg': 'stringtie', 'channel': 'bioconda',
-        'install_msg': 'Transcriptome assembly',
-        'mode_only': ['ribo'],
+        'install_msg': 'Transcriptome assembly (Ribo-seq / lncRNA-seq)',
+        'mode_only': ['ribo', 'lncrna'],
     },
     'gffcompare': {
         'pkg': 'gffcompare', 'channel': 'bioconda',
-        'install_msg': 'GTF comparison & class-code annotation',
-        'mode_only': ['ribo'],
+        'install_msg': 'GTF comparison & class-code annotation (Ribo-seq / lncRNA-seq)',
+        'mode_only': ['ribo', 'lncrna'],
+    },
+    'featureCounts': {
+        'pkg': 'subread', 'channel': 'bioconda',
+        'install_msg': 'featureCounts read quantification (lncRNA-seq)',
+        'mode_only': ['lncrna'],
+    },
+    'FEELnc': {
+        'pkg': 'feelnc',
+        'channel': 'bioconda',
+        'install_msg': 'FEELnc lncRNA classifier (bioconda)',
+        'mode_only': ['lncrna'],
+    },
+    'PLEK2': {
+        'pkg': None,
+        'pip': ['keras==2.4.3', 'tensorflow==2.4.1', 'pandas', 'bio',
+                'regex', 'numpy==1.19.2'],
+        'github': 'https://github.com/emanlee/plek2',
+        'install_msg': 'PLEK2 lncRNA classifier (keras/tensorflow/bio) '
+                       '+ model download from SourceForge',
+        'mode_only': ['lncrna'],
+        'requires_model_download': True,
     },
     'rsem-prepare-reference': {
         'pkg': 'rsem', 'channel': 'bioconda',
@@ -260,6 +281,26 @@ R_PACKAGE_REGISTRY = {
         'github_repo': 'satijalab/seurat',
         'extra': ['uwot'],
         'install_msg': 'Single-cell analysis (R/GitHub)',
+        'mode_only': ['sc'],
+    },
+    'monocle3': {
+        'pkg': 'monocle3',
+        'source': 'bioconductor',
+        'install_msg': 'Pseudotime analysis (R/Bioconductor)',
+        'mode_only': ['sc'],
+    },
+    'DoubletFinder': {
+        'pkg': 'DoubletFinder',
+        'source': 'github',
+        'github_repo': 'chris-mcginnis-ucsf/DoubletFinder',
+        'install_msg': 'Doublet detection for single-cell (R/GitHub)',
+        'mode_only': ['sc'],
+    },
+    'harmony': {
+        'pkg': 'harmony',
+        'source': 'cran',
+        'install_msg': 'Harmony batch integration for scRNA-seq (R/CRAN)',
+        'mode_only': ['sc'],
     },
 }
 

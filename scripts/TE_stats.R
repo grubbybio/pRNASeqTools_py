@@ -32,14 +32,16 @@
 options(warn = 1)
 args <- commandArgs(trailingOnly = TRUE)
 
-if (length(args) < 3) {
-  stop("Usage: Rscript TE_stats.R <te_wide_tsv> <output_dir> <alpha> [group=n ...]")
+if (length(args) < 4) {
+  stop("Usage: Rscript TE_stats.R <wide_tsv> <output_dir> <alpha> <out_prefix> [group=n ...]")
 }
 
 input_file <- args[1]
 output_dir <- args[2]
 alpha <- as.numeric(args[3])
-group_args <- args[-c(1:3)]  # remaining: "condition=n_replicates"
+out_prefix <- args[4]           # e.g. "TE_" or "RPS_"
+value_suffix <- if (length(args) >= 5) args[5] else "_log2te"
+group_args <- args[-c(1:5)]     # remaining: "condition=n_replicates"
 
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
@@ -58,9 +60,9 @@ if (!"gene_id" %in% colnames(dat)) {
 gene_ids <- dat$gene_id
 dat$gene_id <- NULL  # keep only value columns
 
-# Identify log2te columns (e.g., "pairname_log2te")
+# Identify value columns (e.g., "pairname_log2te" or "sample_rps")
 value_cols <- colnames(dat)
-log2te_cols <- grep("_log2te$", value_cols, value = TRUE)
+log2te_cols <- grep(paste0(value_suffix, "$"), value_cols, value = TRUE)
 
 if (length(log2te_cols) < 2) {
   message("ERROR: need at least 2 sample pairs to compare, found ",
@@ -145,19 +147,19 @@ summary_by_cond <- aggregate(log2te ~ condition, data = long_dat,
                                  sd = round(sd(x), 4),
                                  n_genes = length(x)))
 write.table(summary_by_cond,
-            file.path(output_dir, "TE_summary_stats.tsv"),
+            file.path(output_dir, paste0(out_prefix, "summary_stats.tsv")),
             sep = "\t", row.names = FALSE, quote = FALSE)
 
-# ── Paired analysis: log2(TE) ~ condition + gene ────────────────────────────
-message("Fitting linear model: log2te ~ condition + gene (paired design)...")
-model_fit <- tryCatch({
-  fit <- lm(log2te ~ condition + gene_id, data = long_dat)
-  fit
-}, error = function(e) {
-  message("LM failed: ", e$message,
-          " - falling back to condition-only model.")
-  return(lm(log2te ~ condition, data = long_dat))
-})
+# ── Paired analysis via within-gene centering ────────────────────────────────
+# Fitting lm(log2te ~ condition + gene_id) with tens of thousands of genes
+# creates a huge design matrix (one dummy column per gene) and is extremely
+# slow. Instead we remove the gene effect by within-gene centering (Frisch-
+# Waugh-Lovell): the condition effects, contrasts, and their standard errors
+# are identical to the paired model, but fitting is instant.
+message("Fitting linear model: centered log2te ~ condition (paired design)...")
+long_dat$gene_mean <- ave(long_dat$log2te, long_dat$gene_id, FUN = mean)
+long_dat$log2te_c <- long_dat$log2te - long_dat$gene_mean
+model_fit <- lm(log2te_c ~ condition, data = long_dat)
 
 # ANOVA table using car::Anova (Type II) for robustness to imbalance
 anova_tbl <- tryCatch({
@@ -178,29 +180,23 @@ if (length(cond_row_idx)) {
 }
 
 # ── Estimated marginal means + Tukey-adjusted contrasts via emmeans ─────────
+# Note: emmeans come from the gene-centered model, so emmean values are
+# centered around 0; the contrasts (which drive the tests and letters) are
+# identical to the paired model. Raw per-condition means are reported in
+# TE_summary_stats.tsv.
 message("\nComputing estimated marginal means & Tukey contrasts (emmeans)...")
-emm_result <- tryCatch({
-  emm <- emmeans::emmeans(model_fit, ~ condition)
-  contrast_res <- pairs(emm, adjust = "tukey")
-  list(emm = emm, contrast = contrast_res)
-}, error = function(e) {
-  message("emmeans on full model failed: ", e$message,
-          " - trying condition-only model...")
-  fit_simple <- lm(log2te ~ condition, data = long_dat)
-  emm <- emmeans::emmeans(fit_simple, ~ condition)
-  contrast_res <- pairs(emm, adjust = "tukey")
-  list(emm = emm, contrast = contrast_res)
-})
+emm <- emmeans::emmeans(model_fit, ~ condition)
+contrast_res <- pairs(emm, adjust = "tukey")
 
-emm_df <- as.data.frame(emm_result$emm)
-contr_df <- as.data.frame(emm_result$contrast)
+emm_df <- as.data.frame(emm)
+contr_df <- as.data.frame(contrast_res)
 write.table(emm_df[, intersect(c("condition", "emmean", "SE", "lower.CL", "upper.CL"), colnames(emm_df))],
-            file.path(output_dir, "TE_emmeans.tsv"),
+            file.path(output_dir, paste0(out_prefix, "emmeans.tsv")),
             sep = "\t", row.names = FALSE, quote = FALSE)
-write.table(contr_df, file.path(output_dir, "TE_contrasts.tsv"),
+write.table(contr_df, file.path(output_dir, paste0(out_prefix, "contrasts.tsv")),
             sep = "\t", row.names = FALSE, quote = FALSE)
 
-message("\nEstimated marginal means:")
+message("\nEstimated marginal means (gene-centered):")
 print(emm_df)
 message("\nPairwise contrasts (Tukey-adjusted):")
 print(contr_df)
@@ -208,7 +204,7 @@ print(contr_df)
 # ── Compact Letter Display via multcomp::cld on emmeans ─────────────────────
 message("\nComputing compact letter display (multcomp::cld)...")
 letters_result <- tryCatch({
-  cld_res <- multcomp::cld(emm_result$emm, alpha = alpha,
+  cld_res <- multcomp::cld(emm, alpha = alpha,
                            Letters = letters, sorted = TRUE)
   cld_df <- as.data.frame(cld_res)
   # .group column holds the letters (with spaces)
@@ -255,13 +251,13 @@ letters_result <- tryCatch({
              character(1)),
              stringsAsFactors = FALSE)
 })
-write.table(letters_result, file.path(output_dir, "TE_letters.tsv"),
+write.table(letters_result, file.path(output_dir, paste0(out_prefix, "letters.tsv")),
             sep = "\t", row.names = FALSE, quote = FALSE)
 message("\nCompact letter display:")
 print(letters_result)
 
 # ── Report overall pipeline statistics ───────────────────────────────────────
-message("\n===== TE Statistical Test Summary =====")
+message("\n===== Statistical Test Summary =====")
 message("Conditions tested: ", n_conditions)
 message("Genes analyzed:   ", length(usable_genes))
 if (is.finite(p_anova)) {
@@ -269,6 +265,6 @@ if (is.finite(p_anova)) {
                   f_anova, p_anova))
 }
 message("Letter display written to: ",
-        file.path(output_dir, "TE_letters.tsv"))
+        file.path(output_dir, paste0(out_prefix, "letters.tsv")))
 message("Full results directory: ", output_dir)
 message("Done.")

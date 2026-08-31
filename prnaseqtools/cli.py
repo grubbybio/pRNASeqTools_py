@@ -94,6 +94,87 @@ def build_parser():
     p.add_argument('--genomesize', default=10, type=int, dest='genome_size',
                    help='genomeSAindexNbases')
 
+    # lncrna (lncRNA-seq: de novo transcript assembly + coding/lncRNA classification)
+    p = sub.add_parser('lncrna', help='lncRNA-seq analysis '
+                                       '(de novo assembly + classification + DE)')
+    add_common_args(p)
+    p.add_argument('--mode_lncrna', default='whole', dest='run_mode',
+                   choices=['whole', 'mapping-only', 'assemble-only',
+                            'de-only', 'count-table'],
+                   help='whole=mapping+assemble+classify+quantify+DE, '
+                        'mapping-only=STAR+BAM only, '
+                        'assemble-only=STAR→StringTie→classify only, '
+                        'de-only=skip mapping/assembly, '
+                        'count-table=use existing GTF + BAM/count tables')
+    p.add_argument('--foldchange', default=2.0, type=float, help='FC threshold')
+    p.add_argument('--pvalue', default=0.01, type=float, help='P-value threshold')
+    p.add_argument('--fdr', default=1.0, type=float, help='FDR threshold')
+    p.add_argument('--seqstrategy', default=None, dest='seq_strategy',
+                   help='single or paired')
+    p.add_argument('--genomesize', default=10, type=int, dest='genome_size',
+                   help='genomeSAindexNbases')
+    p.add_argument('--classifier', default='feelnc',
+                   choices=['feelnc', 'plek2', 'fallback'],
+                   help='Coding/lncRNA classifier. '
+                        'feelnc=FEELnc (bioconda, recommended for plants), '
+                        'plek2=PLEK2 (deep-learning, plant model), '
+                        'fallback=ORF heuristic (no external deps)')
+    p.add_argument('--feelnc-dir', dest='feelnc_dir', default=None,
+                   help='Path to FEELnc resource dir '
+                        '(only needed if FEELnc was NOT installed via bioconda; '
+                        'conda-installed FEELnc auto-finds its own resources)')
+    p.add_argument('--plek2-dir', dest='plek2_dir', default=None,
+                   help='Path to PLEK2 install dir '
+                        '(default: ~/PLEK2)')
+    p.add_argument('--min-fpkm', dest='min_fpkm', default=0.5, type=float,
+                   help='Min FPKM for StringTie transcript filtering (0.5)')
+    p.add_argument('--min-tx-len', dest='min_tx_len', default=200, type=int,
+                   help='Min transcript length (bp) for lncRNA (200)')
+    p.add_argument('--gtf', default=None,
+                   help='Custom GTF (use in assemble-only / de-only '
+                        'to skip merging)')
+
+    # sc (single-cell RNA-seq)
+    p = sub.add_parser('sc', help='Single-cell RNA-seq analysis')
+    add_common_args(p)
+    p.add_argument('--mode_sc', default='whole', dest='run_mode',
+                   choices=['whole', 'mapping-only', 'count-table'],
+                   help='whole=mapping+count+analysis, '
+                        'mapping-only=mapping+count, '
+                        'count-table=from count table')
+    p.add_argument('--seqstrategy', default=None, dest='seq_strategy',
+                   help='single or paired')
+    p.add_argument('--genomesize', default=10, type=int, dest='genome_size',
+                   help='genomeSAindexNbases')
+    p.add_argument('--mincells', default=3, type=int, dest='min_cells',
+                   help='Min cells per gene (Seurat QC)')
+    p.add_argument('--minfeatures', default=200, type=int, dest='min_features',
+                   help='Min features per cell (Seurat QC)')
+    p.add_argument('--maxfeatures', default=5000, type=int, dest='max_features',
+                   help='Max features per cell (Seurat QC)')
+    p.add_argument('--pctmt', default=20, type=float, dest='pct_mt',
+                   help='Max percent mitochondrial content')
+    p.add_argument('--npcs', default=30, type=int, dest='n_pcs',
+                   help='Number of PCs for dimensionality reduction')
+    p.add_argument('--nclusters', default=0, type=int, dest='n_clusters',
+                   help='Number of clusters (0 = auto)')
+    p.add_argument('--resolution', default=0.5, type=float,
+                   help='Clustering resolution (0.4-1.2)')
+    p.add_argument('--markerminpct', default=0.25, type=float,
+                   dest='marker_min_pct',
+                   help='Min percent cells expressing marker')
+    p.add_argument('--markerlogfc', default=0.25, type=float,
+                   dest='marker_logfc',
+                   help='Min log2 fold change for markers')
+    p.add_argument('--pseudotime', action='store_true',
+                   help='Run pseudotime analysis (Monocle3)')
+    p.add_argument('--doublet', default=0, type=float, dest='doublet_rate',
+                   help='Expected doublet rate for DoubletFinder (0 = skip)')
+    p.add_argument('--integration', default='seurat',
+                   choices=['seurat', 'harmony', 'none'],
+                   help='Batch integration method: seurat=Seurat anchors, '
+                        'harmony=Harmony, none=no batch correction')
+
     # degradome
     p = sub.add_parser('degradome', help='Degradome-seq analysis')
     add_common_args(p)
@@ -284,6 +365,8 @@ def build_parser():
 MODE_RUNNERS = {
     'srna':       'prnaseqtools.modes.srna',
     'mrna':       'prnaseqtools.modes.mrna',
+    'lncrna':     'prnaseqtools.modes.lncrna',
+    'sc':         'prnaseqtools.modes.sc',
     'degradome':  'prnaseqtools.modes.degradome',
     'phasi':      'prnaseqtools.modes.phasi',
     'tt':         'prnaseqtools.modes.tt',
