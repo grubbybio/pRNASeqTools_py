@@ -598,13 +598,10 @@ def run(opts):
         tee.write("=" * 60 + "\n")
 
         # Cleanup previous incomplete step 4
+        # NOTE: do NOT delete gffcompare outputs ({genome}.* in assembledGTF)
+        # — they are inputs produced by Step 3 and required below.
         if os.path.exists(updated_gtf):
             os.unlink(updated_gtf)
-        # Also clean gffcompare outputs that might be stale
-        for pat in [os.path.join("assembledGTF", f"{genome}.*")]:
-            for fname in globmod.glob(pat):
-                if os.path.exists(fname):
-                    os.unlink(fname)
 
         annotated_gtf = f"{gffcomp_prefix}.annotated.gtf"
         if not os.path.exists(annotated_gtf):
@@ -613,7 +610,18 @@ def run(opts):
             if candidates:
                 annotated_gtf = candidates[0]
             else:
-                sys.exit("gffcompare annotated GTF not found")
+                # Recovery: if the merged GTF from Step 3 still exists,
+                # re-run gffcompare only (skip STAR/StringTie).
+                merged_gtf = os.path.join(assembled_gtf_dir, f"{genome}_merged.gtf")
+                if os.path.exists(merged_gtf):
+                    tee.write("  gffcompare output missing but merged GTF found -"
+                              " re-running gffcompare only\n")
+                    run_cmd(
+                        f"gffcompare -V -r {anno_path} -o {gffcomp_prefix} "
+                        f"{merged_gtf}")
+                else:
+                    sys.exit("gffcompare annotated GTF not found and no merged "
+                             "GTF to regenerate it - re-run from Step 3")
 
         updated_gtf = f"{genome}_updated.gtf"
 

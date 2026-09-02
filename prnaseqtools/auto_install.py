@@ -232,11 +232,15 @@ DEPENDENCY_REGISTRY = {
 R_PACKAGE_REGISTRY = {
     'dplyr': {
         'pkg': 'dplyr',
+        'conda_pkg': 'r-dplyr',
+        'conda_channel': 'conda-forge',
         'source': 'cran',
         'install_msg': 'Data manipulation (R/CRAN)',
     },
     'DESeq2': {
         'pkg': 'DESeq2',
+        'conda_pkg': 'bioconductor-deseq2',
+        'conda_channel': 'bioconda',
         'source': 'bioconductor',
         'install_msg': 'Differential expression (R/Bioconductor)',
     },
@@ -244,19 +248,27 @@ R_PACKAGE_REGISTRY = {
         'pkg': 'DMRcaller',
         'source': 'bioconductor',
         'install_msg': 'Differential methylation (R/Bioconductor)',
+        'mode_only': ['wgbs'],
     },
     'pheatmap': {
         'pkg': 'pheatmap',
+        'conda_pkg': 'r-pheatmap',
+        'conda_channel': 'conda-forge',
         'source': 'bioconductor',
         'install_msg': 'Heatmap plotting (R)',
     },
     'RNAmodR.RiboMethSeq': {
         'pkg': 'RNAmodR.RiboMethSeq',
+        'conda_pkg': 'bioconductor-rnamodr.ribomethseq',
+        'conda_channel': 'bioconda',
         'source': 'bioconductor',
         'install_msg': 'RiboMeth-seq analysis (R/Bioconductor)',
+        'mode_only': ['ribometh'],
     },
     'riboWaltz': {
         'pkg': 'riboWaltz',
+        'conda_pkg': 'ribowaltz',
+        'conda_channel': 'bioconda',
         'source': 'github',
         'github_repo': 'LabTranslationalArchitectomics/riboWaltz',
         'install_msg': 'Degradome CRI analysis (R/GitHub)',
@@ -273,10 +285,12 @@ R_PACKAGE_REGISTRY = {
         'source': 'github',
         'github_repo': 'renozao/NMF',
         'github_ref': 'devel',
-        'install_msg': 'Non-negative matrix factorization (R)',
+        'install_msg': 'Non-negative matrix factorization (R/GitHub devel)',
     },
     'Seurat': {
         'pkg': 'Seurat',
+        'conda_pkg': 'r-seurat',
+        'conda_channel': 'conda-forge',
         'source': 'github',
         'github_repo': 'satijalab/seurat',
         'extra': ['uwot'],
@@ -291,6 +305,8 @@ R_PACKAGE_REGISTRY = {
     },
     'DoubletFinder': {
         'pkg': 'DoubletFinder',
+        'conda_pkg': 'r-doubletfinder',
+        'conda_channel': 'bioconda',
         'source': 'github',
         'github_repo': 'chris-mcginnis-ucsf/DoubletFinder',
         'install_msg': 'Doublet detection for single-cell (R/GitHub)',
@@ -298,6 +314,8 @@ R_PACKAGE_REGISTRY = {
     },
     'harmony': {
         'pkg': 'harmony',
+        'conda_pkg': 'r-harmony',
+        'conda_channel': 'conda-forge',
         'source': 'cran',
         'install_msg': 'Harmony batch integration for scRNA-seq (R/CRAN)',
         'mode_only': ['sc'],
@@ -434,13 +452,18 @@ def install_missing(missing_list, tee=None, interactive=True):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 4. R package batch install (with retry)
+# 4. R package batch install (conda-first, R fallback)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def install_r_packages(prefix, mode=None, tee=None):
     """
-    Run the bundled checkPackages.R to install missing R packages.
+    Install missing R packages with **conda first, R as fallback**.
     Filters by analysis mode for efficient, targeted installation.
+
+    Strategy per R package:
+      1. If conda_pkg is registered → try `mamba/conda install -c <channel>`
+      2. Conda success  → skip R install for this package
+      3. Conda fail OR no conda entry → queue for Rscript checkPackages.R
 
     Args:
         prefix: project root (contains scripts/checkPackages.R)
@@ -463,15 +486,57 @@ def install_r_packages(prefix, mode=None, tee=None):
         tee.write("\nNo R packages required for this mode.\n")
         return True
 
-    pkg_names = ','.join(name for name, _ in pkgs)
-    tee.write("\nInstalling R packages (this may take several minutes)...\n")
-    try:
-        subprocess.run(
-            f"Rscript --vanilla {rscript_path} --packages {pkg_names}",
-            shell=True, check=True, timeout=1800
-        )
-        tee.write("R packages installed successfully\n")
+    pm = _detect_pm()
+    tee.write("\nInstalling R packages (conda-first, R fallback)...\n")
+
+    conda_ok = []           # installed via conda
+    conda_skipped = []      # no conda entry, go to R
+    conda_failed = []       # conda tried but failed, go to R
+
+    for r_name, info in pkgs:
+        conda_pkg = info.get('conda_pkg')
+        conda_ch = info.get('conda_channel')
+
+        if pm and conda_pkg:
+            tee.write(f"  [conda] {conda_pkg} ({conda_ch}) ← {r_name} ... ")
+            ok = _pm_install(pm, conda_pkg, conda_ch)
+            if ok:
+                tee.write("✓\n")
+                conda_ok.append(r_name)
+            else:
+                tee.write("✗ conda failed → R fallback\n")
+                conda_failed.append(r_name)
+        else:
+            if not pm:
+                tee.write(f"  [conda] no conda/mamba available → R for {r_name}\n")
+            conda_skipped.append(r_name)
+
+    # Now handle everything that didn't succeed via conda
+    r_pkg_names = conda_skipped + conda_failed
+    if not r_pkg_names:
+        tee.write(f"\nAll R packages installed via conda ({len(conda_ok)} pkg)\n")
         return True
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        tee.write("Some R packages could not be installed automatically\n")
-        return False
+
+    tee.write(f"\n  R fallback for: {', '.join(r_pkg_names)}\n")
+    all_ok = True
+
+    # Run checkPackages.R — this covers BiocManager::install + install.packages + devtools
+    if os.path.exists(rscript_path):
+        pkg_names_csv = ','.join(r_pkg_names)
+        try:
+            subprocess.run(
+                f"Rscript --vanilla {rscript_path} --packages {pkg_names_csv}",
+                shell=True, check=True, timeout=1800
+            )
+            tee.write("  R fallback completed successfully\n")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            tee.write("  Some packages failed even after R fallback\n")
+            all_ok = False
+    else:
+        tee.write("  checkPackages.R missing — cannot run R fallback\n")
+        all_ok = False
+
+    tee.write(f"\nSummary: conda={len(conda_ok)}, "
+              f"R-success={len(conda_skipped) + len(conda_failed) - (0 if all_ok else len(r_pkg_names))}, "
+              f"total={len(pkgs)}\n")
+    return all_ok
