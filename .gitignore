@@ -7,7 +7,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-
 # ── R ─────────────────────────────────────────────────────────────────
 .Rproj.user/
 .Rhistory
@@ -15,7 +14,6 @@ build/
 .Ruserdata
 .Rapp.history
 cips_Rdata/
-
 # ── Analysis outputs ─────────────────────────────────────────────────
 out/
 *.log
@@ -41,13 +39,10 @@ assembledGTF/
 RSEM_index/
 RSEM_results/
 RiboTaper_annotation/
-STAR_*/
 sparta/
-
 # ── OS ───────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
-
 # ── IDE / Editor ─────────────────────────────────────────────────────
 .vscode/
 .idea/
@@ -55,3 +50,5 @@ Thumbs.db
 *.swp
 *.swo
 *~
+# ── Cache ────────────────────────────────────────────────────────────
+.cache/

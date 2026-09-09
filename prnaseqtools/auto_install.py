@@ -114,13 +114,13 @@ DEPENDENCY_REGISTRY = {
     },
     'bgzip': {
         'pkg': 'htslib', 'channel': 'bioconda',
-        'install_msg': 'Tabix/BGZip compression (WGBS)',
-        'mode_only': ['wgbs'],
+        'install_msg': 'HTSLib (bgzip/tabix, required by WGBS + MAJIQ)',
+        'mode_only': ['wgbs', 'as'],
     },
     'tabix': {
         'pkg': 'htslib', 'channel': 'bioconda',
-        'install_msg': 'Tabix indexing (WGBS)',
-        'mode_only': ['wgbs'],
+        'install_msg': 'HTSLib (tabix, required by WGBS + MAJIQ)',
+        'mode_only': ['wgbs', 'as'],
     },
 
     # ── Mode-specific tools ────────────────────────────────────────────
@@ -201,6 +201,25 @@ DEPENDENCY_REGISTRY = {
         'mode_only': ['ribo'],
     },
 
+    # ── MAJIQ / VOILA (alternative splicing) ────────────────────
+    'MAJIQ': {
+        'pkg': None,
+        'github': 'https://bitbucket.org/biociphers/majiq_academic',
+        'pip_github': True,
+        'needs_htslib': True,
+        'conda_env_name': 'majiq_academic',
+        'conda_env_python': '3.10',
+        'conda_env_pkgs': ['htslib', 'numpy', 'pandas', 'scipy',
+                           'setuptools_scm', 'pybind11'],
+        'patch_before_install': [
+            ('majiq/rna_majiq/include/majiq/gufuncs/CoreIt.hpp',
+             's|#include <iterator>|#include <iterator>\\n#include <algorithm>|'),
+        ],
+        'install_msg': 'MAJIQ + VOILA alternative splicing '
+                       '(独立 conda env: majiq_academic, Python 3.10)',
+        'mode_only': ['as'],
+    },
+
     # ── Python libs (sPARTA.py) ────────────────────────────────────────
     'numpy': {
         'pkg': 'numpy', 'channel': 'conda-forge',
@@ -214,6 +233,117 @@ DEPENDENCY_REGISTRY = {
     },
 
 }
+
+
+# ── HTSLib 自动发现 (MAJIQ 等需要) ──────────────────────────────────
+
+def _find_htslib_env():
+    """
+    查找 conda / 系统 HTSLib 位置，返回 env dict:
+      {'HTSLIB_LIBRARY_DIR': '...', 'HTSLIB_INCLUDE_DIR': '...'}
+    如果都找不到 → 返回空 dict.
+    """
+    env = {}
+    prefix = os.environ.get('CONDA_PREFIX') or os.environ.get('CONDA_DEFAULT_ENV')
+    candidates = []
+    if prefix:
+        candidates.append(prefix)
+    # 尝试 conda base
+    try:
+        import subprocess as _sp
+        base = _sp.run(['conda', 'info', '--base'],
+                       capture_output=True, text=True).stdout.strip()
+        if base:
+            candidates.append(base)
+    except Exception:
+        pass
+    candidates.extend(['/usr/local', '/usr', '/opt/homebrew'])
+
+    for pref in candidates:
+        lib_dir = os.path.join(pref, 'lib')
+        inc_dir = os.path.join(pref, 'include')
+        # macOS 上 libhtslib 可能也在 lib/libhtslib* 里
+        found_lib = None
+        for f in os.listdir(lib_dir) if os.path.isdir(lib_dir) else []:
+            if f.startswith('libhtslib'):
+                found_lib = lib_dir
+                break
+        found_inc = None
+        if os.path.exists(os.path.join(inc_dir, 'htslib.h')):
+            found_inc = inc_dir
+        elif os.path.exists(os.path.join(inc_dir, 'htslib', 'htslib.h')):
+            found_inc = os.path.join(inc_dir, 'htslib')
+
+        if found_lib and found_inc:
+            env['HTSLIB_LIBRARY_DIR'] = found_lib
+            env['HTSLIB_INCLUDE_DIR'] = found_inc
+            break
+    return env
+
+
+
+def _install_in_conda_env(env_name, info, tee):
+    """在指定 conda env 里: clone + patch + pip install ."""
+    github_url = info['github']
+    repo_name = github_url.rstrip('/').split('/')[-1].replace('.git', '')
+    clone_dir = os.path.join('/tmp', repo_name)
+    if os.path.exists(clone_dir):
+        shutil.rmtree(clone_dir, ignore_errors=True)
+    tee.write(f"  Cloning {github_url}...\n")
+    try:
+        subprocess.run(
+            ['git', 'clone', '--depth', '1', github_url, clone_dir],
+            check=True, timeout=120
+        )
+        if info.get('patch_before_install'):
+            for rel_path, sed_cmd in info['patch_before_install']:
+                full = os.path.join(clone_dir, rel_path)
+                tee.write(f"  patch {rel_path}...\n")
+                if os.path.exists(full):
+                    subprocess.run(['sed', '-i', '', sed_cmd, full],
+                                   check=True, timeout=10)
+        tee.write(f"  pip install {repo_name} in env '{env_name}'...\n")
+        env = os.environ.copy()
+        if info.get('needs_htslib'):
+            htslib_env = _find_htslib_env_for_env(env_name)
+            if htslib_env:
+                tee.write(f"    HTSLIB → {htslib_env}\n")
+                env.update(htslib_env)
+        subprocess.run(
+            ['conda', 'run', '-n', env_name,
+             sys.executable, '-m', 'pip', 'install', '-q', '.'],
+            cwd=clone_dir, env=env, check=True, timeout=600
+        )
+        tee.write(f"  ✓ installed in conda env '{env_name}'\n")
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        tee.write(f"  ✗ failed in conda env '{env_name}': {e}\n")
+        return False
+    finally:
+        shutil.rmtree(clone_dir, ignore_errors=True)
+
+
+def _find_htslib_env_for_env(env_name):
+    """针对指定 conda env 找 HTSLib 路径."""
+    try:
+        prefix = subprocess.run(
+            ['conda', 'run', '-n', env_name, 'python3', '-c',
+             'import sys; print(sys.prefix)'],
+            capture_output=True, text=True, timeout=30
+        ).stdout.strip()
+    except Exception:
+        return _find_htslib_env()
+    env = {}
+    lib_dir = os.path.join(prefix, 'lib')
+    inc_dir = os.path.join(prefix, 'include')
+    found_lib = any(f.startswith('libhtslib')
+                    for f in os.listdir(lib_dir)) if os.path.isdir(lib_dir) else False
+    found_inc = (os.path.exists(os.path.join(inc_dir, 'htslib.h')) or
+                 os.path.exists(os.path.join(inc_dir, 'htslib', 'htslib.h')))
+    if found_lib and found_inc:
+        env['HTSLIB_LIBRARY_DIR'] = lib_dir
+        env['HTSLIB_INCLUDE_DIR'] = inc_dir
+    return env
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -375,7 +505,21 @@ def install_tool(name, info, tee=None):
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             pass
 
-    # 3. Try GitHub clone + manual install (CLIPper)
+    # 3. Python version check (如果包有版本约束)
+    py_ver = info.get('python_version')
+    if py_ver:
+        min_maj, min_min, max_maj, max_min = py_ver
+        cur = sys.version_info
+        cur_ok = ((cur.major, cur.minor) >= (min_maj, min_min) and
+                  (cur.major, cur.minor) <= (max_maj, max_min))
+        if not cur_ok:
+            tee.write(f"  SKIP GitHub install: 当前 Python {cur.major}.{cur.minor} "
+                      f"不满足 {min_maj}.{min_min}-{max_maj}.{max_min} → "
+                      f"请先建 conda env: conda create -n majiq "
+                      f"python=3.10 htslib numpy pandas -c conda-forge -c bioconda\n")
+            return False
+
+    # 4. Try GitHub clone + install
     github_url = info.get('github')
     if github_url and info.get('pkg') is None:
         tee.write(f"  Cloning {github_url}...\n")
@@ -388,14 +532,50 @@ def install_tool(name, info, tee=None):
                 ['git', 'clone', '--depth', '1', github_url, clone_dir],
                 check=True, timeout=120
             )
-            subprocess.run(
-                [sys.executable, 'setup.py', 'install'],
-                cwd=clone_dir, check=True, timeout=120
-            )
+            # 安装前 patch 源码 (如 Apple clang 兼容性)
+            if info.get('patch_before_install'):
+                for rel_path, sed_cmd in info['patch_before_install']:
+                    full = os.path.join(clone_dir, rel_path)
+                    tee.write(f"  patch {rel_path}...\n")
+                    if os.path.exists(full):
+                        subprocess.run(
+                            ['sed', '-i', '', sed_cmd, full],
+                            check=True, timeout=10
+                        )
+                    else:
+                        tee.write(f"    WARNING: patch target not found: {full}\n")
+            # 自定义环境变量
+            env = os.environ.copy()
+            if info.get('env_vars'):
+                env.update(info['env_vars'])
+            if info.get('needs_htslib'):
+                htslib_env = _find_htslib_env()
+                if htslib_env:
+                    tee.write(f"  HTSLib → {htslib_env}\n")
+                    env.update(htslib_env)
+                else:
+                    tee.write("  WARNING: needs_htslib=True 但没找到 HTSLib → "
+                              "请先 conda install -c bioconda htslib\n")
+
+            # pip_github: 现代包 (MAJIQ 等) 用 pip install .
+            if info.get('pip_github'):
+                tee.write(f"  pip install {repo_name} ...\n")
+                subprocess.run(
+                    [sys.executable, '-m', 'pip', 'install', '-q', '.'],
+                    cwd=clone_dir, env=env,
+                    check=True, timeout=300
+                )
+            else:
+                # 传统 setup.py (CLIPper 等)
+                subprocess.run(
+                    [sys.executable, 'setup.py', 'install'],
+                    cwd=clone_dir, env=env,
+                    check=True, timeout=120
+                )
             tee.write(f"  {name} installed from GitHub\n")
             return True
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            pass
+            tee.write(f"  GitHub install failed for {name}\n")
         finally:
             shutil.rmtree(clone_dir, ignore_errors=True)
 

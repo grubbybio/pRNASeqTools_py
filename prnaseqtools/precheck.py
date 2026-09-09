@@ -223,6 +223,24 @@ _CHECK_DEFS = {
         'msg': 'Tabix indexing (WGBS)',
         'mode_only': ['wgbs'],
     },
+
+    # ── MAJIQ + VOILA (可变剪接) ─────────────────────────────────
+    'MAJIQ': {
+        'cmd': 'conda run -n majiq_academic majiq -h 2>&1',
+        'pattern': r'majiq',
+        'required': True,
+        'msg': 'MAJIQ alternative splicer '
+               '(独立 conda env: majiq_academic)',
+        'mode_only': ['as'],
+    },
+    'VOILA': {
+        'cmd': 'conda run -n majiq_academic voila -h 2>&1',
+        'pattern': r'voila',
+        'required': True,
+        'msg': 'VOILA visualization (ships with MAJIQ)',
+        'mode_only': ['as'],
+    },
+
     'clipper': {
         'cmd': 'clipper -h 2>&1',
         'pattern': r'^Usage',

@@ -134,6 +134,45 @@ def build_parser():
                    help='Custom GTF (use in assemble-only / de-only '
                         'to skip merging)')
 
+    # as (alternative splicing via MAJIQ + VOILA)
+    p = sub.add_parser('as', help='Alternative splicing analysis '
+                                  '(MAJIQ + VOILA, replaces rMATS)')
+    add_common_args(p)
+    p.add_argument('--mode_as', default='whole', dest='run_mode',
+                   choices=['whole', 'mapping-only', 'build-only',
+                            'quantify-only', 'voila-only'],
+                   help='whole=mapping+build+quantify+voila, '
+                        'mapping-only=STAR+BAM only, '
+                        'build-only=STAR→majiq build, '
+                        'quantify-only=skip mapping/build, '
+                        'voila-only=仅跑 voila tsv/modulize/view')
+    p.add_argument('--classifier', default='deltapsi',
+                   choices=['deltapsi', 'heterogen', 'both'],
+                   help='MAJIQ quantifier: '
+                        'deltapsi=两组间 dPSI (假设组内重复), '
+                        'heterogen=每样本独立 PSI 后组间检验 '
+                        '(适合单样品/少量重复), '
+                        'both=deltapsi + heterogen 都跑')
+    p.add_argument('--strandness', default='none',
+                   choices=['none', 'forward', 'reverse'],
+                   help='RNA-seq strandness for MAJIQ build (none)')
+    p.add_argument('--min-experiments', dest='min_experiments',
+                   default=1, type=int,
+                   help='MAJIQ build 中支持 junction/RI 所需最少 '
+                        '独立样本数 (1 = 每个样本独立 group)')
+    p.add_argument('--psi-threshold', dest='psi_threshold',
+                   default=0.05, type=float,
+                   help='MAJIQ dPSI 显著性阈值 (0.05)')
+    p.add_argument('--seqstrategy', default=None, dest='seq_strategy',
+                   help='single or paired')
+    p.add_argument('--genomesize', default=10, type=int, dest='genome_size',
+                   help='genomeSAindexNbases')
+    p.add_argument('--view', action='store_true',
+                   help='启动 VOILA view 交互式浏览器 '
+                        '(在量化 + tsv 输出之后)')
+    p.add_argument('--majiq-dir', dest='majiq_dir', default=None,
+                   help='MAJIQ 安装目录 (默认 PATH 查找)')
+
     # sc (single-cell RNA-seq)
     p = sub.add_parser('sc', help='Single-cell RNA-seq analysis')
     add_common_args(p)
@@ -227,6 +266,14 @@ def build_parser():
     p.add_argument('--restart-step', type=int, default=None,
                    help='Force restart from this step (1-12), '
                         'overrides auto-detection')
+    p.add_argument('--te-method', default='both',
+                   choices=['both', 'separate', 'joint'],
+                   help='Per-gene TE change detection method: '
+                        'separate=two independent DESeq2 (ribo vs rna DE, '
+                        'delta_logFC difference), '
+                        'joint=single dual-factor DESeq2 '
+                        '(condition x data_type interaction), '
+                        'both=run both (default)')
 
     # cips (CiPS uORF analysis)
     p = sub.add_parser('cips', help='CiPS uORF analysis (translated uORF detection)')
@@ -366,6 +413,7 @@ MODE_RUNNERS = {
     'srna':       'prnaseqtools.modes.srna',
     'mrna':       'prnaseqtools.modes.mrna',
     'lncrna':     'prnaseqtools.modes.lncrna',
+    'as':         'prnaseqtools.modes.as',
     'sc':         'prnaseqtools.modes.sc',
     'degradome':  'prnaseqtools.modes.degradome',
     'phasi':      'prnaseqtools.modes.phasi',
