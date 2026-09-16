@@ -163,6 +163,20 @@ DEPENDENCY_REGISTRY = {
         'mode_only': ['chip', 'atac', 'tf'],
     },
 
+    # ── BAM deduplication ───────────────────────────────────────────
+    'picard': {
+        'pkg': 'picard-slim', 'channel': 'bioconda',
+        'install_msg': 'Picard MarkDuplicates (ChIP-seq dedup)',
+        'mode_only': ['chip', 'atac', 'tf'],
+    },
+
+    # ── Consensus peak counting (ChIP dual_factor) ─────────────────
+    'bedtools': {
+        'pkg': 'bedtools', 'channel': 'bioconda',
+        'install_msg': 'bedtools multicov (peak read counting, dual_factor)',
+        'mode_only': ['chip', 'tf'],
+    },
+
     # ── Transcript assembly & classification (Ribo / lncRNA) ────────
     'stringtie': {
         'pkg': 'stringtie', 'channel': 'bioconda',
@@ -374,6 +388,22 @@ R_PACKAGE_REGISTRY = {
         'source': 'bioconductor',
         'install_msg': 'Differential expression (R/Bioconductor)',
     },
+    'DiffBind': {
+        'pkg': 'DiffBind',
+        'conda_pkg': 'bioconductor-diffbind',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'ChIP-seq differential binding (R/Bioconductor)',
+        'mode_only': ['chip', 'tf'],
+    },
+    'ChIPseeker': {
+        'pkg': 'ChIPseeker',
+        'conda_pkg': 'bioconductor-chipseeker',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'Peak annotation & GO enrichment (R/Bioconductor)',
+        'mode_only': ['chip', 'tf'],
+    },
     'DMRcaller': {
         'pkg': 'DMRcaller',
         'source': 'bioconductor',
@@ -487,6 +517,10 @@ def install_tool(name, info, tee=None):
     # 1. Try conda/mamba
     if pm and info.get('pkg'):
         channel = info.get('channel')
+        # 先检查是否已装
+        if _is_conda_pkg_installed(info['pkg']):
+            tee.write(f"  {info['pkg']} ... ✓ 已装\n")
+            return True
         tee.write(f"  Trying {pm} install {info['pkg']}...\n")
         if _pm_install(pm, info['pkg'], channel):
             tee.write(f"  {name} installed via {pm}\n")
@@ -635,6 +669,46 @@ def install_missing(missing_list, tee=None, interactive=True):
 # 4. R package batch install (conda-first, R fallback)
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _is_conda_pkg_installed(pkg_name, channel=None):
+    """检查 conda 包是否已在当前 env 安装.
+    
+    用 `conda list` + 精确匹配, 避免每次都跑 conda install 求解.
+    """
+    pm = _detect_pm()
+    if not pm:
+        return False
+    try:
+        result = subprocess.run(
+            [pm, 'list', '--json'],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            return False
+        import json
+        installed = json.loads(result.stdout)
+        for pkg in installed:
+            if pkg.get('name') == pkg_name:
+                # 如果指定了 channel 也可以检查, 但通常只要装了就行
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _is_r_pkg_installed(r_pkg_name):
+    """检查 R 包是否已安装 (用 Rscript -e 'requireNamespace')."""
+    # 把包名里的点换成下划线 (R 包名 dot → underscore 有些情况)
+    # 但 requireNamespace 接受原始名
+    try:
+        result = subprocess.run(
+            ['Rscript', '-e',
+             f'cat(requireNamespace("{r_pkg_name}", quietly=TRUE))'],
+            capture_output=True, text=True, timeout=15
+        )
+        return result.stdout.strip() == 'TRUE'
+    except Exception:
+        return False
+
 def install_r_packages(prefix, mode=None, tee=None):
     """
     Install missing R packages with **conda first, R as fallback**.
@@ -677,6 +751,23 @@ def install_r_packages(prefix, mode=None, tee=None):
         conda_pkg = info.get('conda_pkg')
         conda_ch = info.get('conda_channel')
 
+        # ── 先检查: conda 包已装? ──
+        already_installed = False
+        if conda_pkg and _is_conda_pkg_installed(conda_pkg):
+            tee.write(f"  [conda] {conda_pkg} ({conda_ch}) ← {r_name} ... ✓ (已装)\n")
+            conda_ok.append(r_name)
+            already_installed = True
+
+        if already_installed:
+            continue
+
+        # ── 再检查: R 包已装? ──
+        if _is_r_pkg_installed(r_name):
+            tee.write(f"  [R] {r_name} ... ✓ (已装)\n")
+            conda_ok.append(r_name)   # 算成功, 不算进 R fallback
+            continue
+
+        # ── 都没装 → 正式安装 ──
         if pm and conda_pkg:
             tee.write(f"  [conda] {conda_pkg} ({conda_ch}) ← {r_name} ... ")
             ok = _pm_install(pm, conda_pkg, conda_ch)
@@ -687,7 +778,7 @@ def install_r_packages(prefix, mode=None, tee=None):
                 tee.write("✗ conda failed → R fallback\n")
                 conda_failed.append(r_name)
         else:
-            if not pm:
+            if not pm and conda_pkg:
                 tee.write(f"  [conda] no conda/mamba available → R for {r_name}\n")
             conda_skipped.append(r_name)
 

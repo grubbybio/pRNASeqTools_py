@@ -63,6 +63,10 @@ dependencies:
   - macs3                         # MACS3 peak caller (ChIP/ATAC)
   - genrich                       # ChIP-seq / ATAC-seq
 
+  # ── BAM dedup ────────────────────────────────────────────────────────
+  - picard-slim                   # MarkDuplicates (ChIP-seq dedup, no r-base dep)
+  - openjdk >=17                  # required by picard
+
   # ── UMI handling ─────────────────────────────────────────────────────
   - umi_tools
 

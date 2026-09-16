@@ -72,16 +72,49 @@ cat("  TxDb created successfully.\n\n")
 
 # ── Annotate peaks ────────────────────────────────────────────────────────
 cat("Annotating peaks...\n")
-peaks <- readPeakFile(peak_file, header = FALSE)
 
-# Check if this is a narrowPeak file (has score column)
-peak_colnames <- if (grepl("\\.narrowPeak$", peak_file)) {
-    c("chr", "start", "end", "name", "score", "strand",
-      "signalValue", "pValue", "qValue", "peak")
-} else {
-    c("chr", "start", "end")
+# 检查文件是否为空
+if (!file.exists(peak_file) || file.info(peak_file)$size == 0) {
+    cat("  SKIP: peak file missing or empty (0 peaks).\n")
+    quit(status = 0, save = "no")
 }
-colnames(peaks)[1:length(peak_colnames)] <- peak_colnames[1:ncol(peaks)]
+
+# 读 peak 文件 (ChIPseeker::readPeakFile 可能返回 data.frame 或 GRanges)
+peaks <- tryCatch(
+    readPeakFile(peak_file, header = FALSE),
+    error = function(e) {
+        cat("  SKIP: readPeakFile failed:", e$message, "\n")
+        quit(status = 0, save = "no")
+    }
+)
+
+# 兼容 data.frame 和 GRanges (ChIPseeker 版本差异)
+if (is.data.frame(peaks)) {
+    n_peaks <- nrow(peaks)
+} else if (methods::is(peaks, "GRanges")) {
+    n_peaks <- length(peaks)
+} else {
+    n_peaks <- tryCatch(nrow(peaks), error = function(e) NA)
+}
+if (is.na(n_peaks) || n_peaks == 0) {
+    cat("  SKIP: no valid peaks (class=", class(peaks)[1],
+        ", n_peaks=", n_peaks, ").\n", sep = "")
+    quit(status = 0, save = "no")
+}
+cat("  Peaks to annotate:", n_peaks, "\n")
+
+# 只有 data.frame 需要手动赋 colnames (GRanges 已有标准列名)
+if (is.data.frame(peaks)) {
+    peak_colnames <- if (grepl("\\.narrowPeak$", peak_file)) {
+        c("chr", "start", "end", "name", "score", "strand",
+          "signalValue", "pValue", "qValue", "peak")
+    } else {
+        c("chr", "start", "end")
+    }
+    # 只赋前面几列 (如果 peaks 有更多列就保留原名)
+    ncn <- min(length(peak_colnames), ncol(peaks))
+    colnames(peaks)[1:ncn] <- peak_colnames[1:ncn]
+}
 
 annotation <- annotatePeak(
     peaks,

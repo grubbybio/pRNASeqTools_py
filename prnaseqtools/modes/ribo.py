@@ -203,6 +203,23 @@ def run(opts):
     ref_dir = os.path.join(prefix, "reference")
     gtf_path = os.path.join(ref_dir, f"{genome}_genes.gtf")
     gff_path = os.path.join(ref_dir, f"{genome}_genes.gff")
+
+    # ── 跨 STEP 变量提前初始化 (避免 restart from N 时 UnboundLocalError) ──
+    # 每个 STEP if last_step < N: 块里赋值, 后续 STEP 会引用
+    merged_gtf = None          # STEP 3 → STEP 4
+    updated_gtf = None         # STEP 4 → STEP 5, STEP 12
+    expressed_gtf = None       # STEP 5 → STEP 6, 7, 10, 12
+    rsem_index = None          # STEP 5 → STEP 10
+    rsem_dir = None            # STEP 5 → STEP 12
+    star_bin = None            # STEP 5 → STEP 10
+    star_rna_new_map = None    # STEP 6 → STEP 8, 10
+    star_ribo_new_map = None    # STEP 6 → STEP 8, 10
+    te_dir = "TE_results"      # STEP 10 → STEP 11
+    te_pairs = []              # STEP 10 → STEP 11
+    rps_dir = "rPS_results"    # STEP 10 → STEP 11
+
+    # STEP 10 开头还会再赋值一次, 覆盖上面的默认值
+    # (如果 STEP 10 跳过, 上面的默认值仍可用)
     fasta_path = os.path.join(ref_dir, f"{genome}_chr_all.fasta")
 
     # Prefer GTF; if missing, convert from GFF
@@ -1018,6 +1035,7 @@ def run(opts):
     # ==================================================================
     # STEP 10 — Translation Efficiency (TE) calculation (per sample)
     # ==================================================================
+    # te_dir/te_pairs/rps_dir 已在 run() 开头初始化
     if last_step < 10:
         tee.write("\n" + "=" * 60 + "\n")
         tee.write("STEP 10: Translation Efficiency (TE) calculation\n")
@@ -1143,9 +1161,17 @@ def run(opts):
             tee.write(f"  ERROR: rPS computation failed: {_rps_err}\n")
 
         tee.write(f"\n  TE & rPS calculation complete. Results saved to: {te_dir}/\n")
+        tee.write("  STEP 10 COMPLETE (RSEM-based TE + rPS)\n")
+
+    # ==================================================================
+    # STEP 11 — TE statistics + plotting (DESeq2 + visualizations)
+    # ==================================================================
+    if last_step < 11:
+        tee.write("\n" + "=" * 60 + "\n")
+        tee.write("STEP 11: TE statistics & visualization\n")
+        tee.write("=" * 60 + "\n")
 
         # ── Per-gene TE change detection (DESeq2) ──
-        # 内嵌在 STEP 10 里, 计算 + 统计 + 可视化一体化
         _te_method = getattr(opts, 'te_method', 'both') if 'opts' in dir() else 'both'
         if _te_method is None:
             _te_method = 'both'
@@ -1165,28 +1191,31 @@ def run(opts):
             )
             if rm and rm_rna and rm_coldata:
                 alpha = getattr(opts, 'pvalue', 0.05) if 'opts' in dir() else 0.05
+                # control 组名 = 第一个 group 的 name (用户在 -rc/-bc 里写的名字)
+                control_group = ribo_groups[0][0] if ribo_groups else None
                 te_results = _run_te_deseq2(
-                    rm, rm_rna, rm_coldata,
-                    te_method=_te_method, tee=tee, alpha=alpha
+                    rm, rm_rna, rm_coldata, te_dir,
+                    te_method=_te_method, tee=tee, alpha=alpha,
+                    control_group=control_group
                 )
+                tee.write(f"  Control group for DESeq2: {control_group}\n")
                 if te_results:
                     tee.write(f"  DESeq2 TE results: "
                               f"{', '.join(te_results.keys())}\n")
-                    tee.write("  STEP 10b COMPLETE\n")
+                    tee.write("  DESeq2 results written\n")
                 else:
                     tee.write("  DESeq2 completed but no results produced\n")
             else:
                 tee.write("  SKIP: 无法构建 count matrices\n")
         except Exception as _te_err:
             tee.write(f"  ERROR: {_te_err}\n")
-    else:
-        tee.write(f"\n  [DESeq2 skipped] te_method={_te_method}, "
-                  f"has_te_pairs={has_te_pairs}\n")
+        else:
+            tee.write(f"  [DESeq2 skipped] te_method={_te_method}, "
+                      f"has_te_pairs={has_te_pairs}\n")
 
-        # ── TE plotting (内嵌到 STEP 10) ──
+        # ── TE plotting (独立于 DESeq2 条件, 不受 _te_method 控制) ──
         tee.write("\n  ── TE plotting ──\n")
 
-        te_dir = "TE_results"
         if not os.path.isdir(te_dir):
             tee.write("  No TE_results directory found, skipping TE plotting\n")
         else:
@@ -1236,16 +1265,9 @@ def run(opts):
 
         tee.write("  TE plotting complete\n")
 
-        tee.write("\n  STEP 10 COMPLETE (TE calculation + DESeq2 + plotting)\n")
-
-    # ==================================================================
-    # STEP 11 — rPS plotting (per-sample + combined summary)
-    # ==================================================================
-    if last_step < 11:
-        rps_dir = "rPS_results"
+        # ── rPS plotting (并入 STEP 11, 和 DESeq2/TE plots 一起) ──
         if os.path.isdir(rps_dir):
-            tee.write("\n" + "=" * 60 + "\n")
-            tee.write("STEP 11: rPS plotting\n")
+            tee.write("\n  ── rPS plotting ──\n")
             tee.write("=" * 60 + "\n")
 
             # Load rPS tables from disk
@@ -1286,7 +1308,9 @@ def run(opts):
                 tee.write("  Generating combined rPS summary...\n")
                 _generate_rps_summary(all_rps_tables, rps_dir, tee,
                                       ribo_groups=ribo_groups)
-            tee.write("  STEP 11 COMPLETE\n")
+            tee.write("  rPS plotting complete\n")
+
+        tee.write("\n  STEP 11 COMPLETE (DESeq2 + TE plots + rPS plots)\n")
 
     # ==================================================================
     # STEP 12 — Final output summary
@@ -1783,16 +1807,23 @@ def _build_count_matrices_and_coldata(te_dir, te_pairs,
         tee.write("  Not enough data to build count matrices.\n")
         return None, None, None
 
-    # 2. 找所有基因的并集
-    all_genes = sorted(
-        set(g for d in list(ribo_counts.values()) + list(rna_counts.values())
-            for g in d.keys())
-    )
-    tee.write(f"  Total genes (union): {len(all_genes)}\n")
+    # 2. 找所有基因的并集 + 去重
+    all_genes_raw = [g for d in list(ribo_counts.values()) + list(rna_counts.values())
+                     for g in d.keys()]
+    all_genes = sorted(set(all_genes_raw))
+    if len(all_genes_raw) != len(all_genes):
+        tee.write(f"  ⚠ Duplicate gene_id detected in RSEM output! "
+                  f"{len(all_genes_raw)} raw → {len(all_genes)} unique\n")
+    tee.write(f"  Total genes (union, unique): {len(all_genes)}\n")
 
     # 3. 写 count matrix TSV (rows=genes, cols=samples)
     matrix_dir = os.path.join(te_dir, "desq2_input")
     os.makedirs(matrix_dir, exist_ok=True)
+
+    # 给 sample 名加 data_type 后缀, 确保全局唯一
+    # joint DESeq2 (方法 C) 需要 ribo + rna 合并成一个 count matrix, colname 不能重复
+    ribo_counts_unique = {f"{tag}_ribo": d for tag, d in ribo_counts.items()}
+    rna_counts_unique  = {f"{tag}_rna":  d for tag, d in rna_counts.items()}
 
     def _write_matrix(counts_dict, out_file):
         with open(out_file, 'w') as fh:
@@ -1803,8 +1834,8 @@ def _build_count_matrices_and_coldata(te_dir, te_pairs,
 
     ribo_mat_file = os.path.join(matrix_dir, "ribo_counts.tsv")
     rna_mat_file  = os.path.join(matrix_dir, "rna_counts.tsv")
-    _write_matrix(ribo_counts, ribo_mat_file)
-    _write_matrix(rna_counts,  rna_mat_file)
+    _write_matrix(ribo_counts_unique, ribo_mat_file)
+    _write_matrix(rna_counts_unique,  rna_mat_file)
 
     tee.write(f"  Ribo count matrix: {ribo_mat_file} "
               f"({len(all_genes)} genes × {len(ribo_counts)} samples)\n")
@@ -1812,36 +1843,40 @@ def _build_count_matrices_and_coldata(te_dir, te_pairs,
               f"({len(all_genes)} genes × {len(rna_counts)} samples)\n")
 
     # 4. 写 colData.tsv
-    # condition 从 ribo_groups/rna_groups 推断
-    # 约定: group 0 = control, group 1.. = treatment
+    # condition = 用户输入的分组名 (直接用, 不硬编码 ctrl/treatment)
+    # 利用 all_*_tags 的顺序 + groups 的 n_rep 推断 tag→group_name 映射
     coldata_file = os.path.join(matrix_dir, "colData.tsv")
 
-    def _group_to_condition(tag, groups):
-        """返回该 tag 所属的 condition 名."""
-        for i, g in enumerate(groups):
-            if tag in g:
-                # 约定: group 0 -> "ctrl", group 1 -> "treatment", ...
-                if i == 0:
-                    return "ctrl"
-                else:
-                    return f"treatment{i}"
-        return "unknown"
+    def _build_tag_to_group(tags_list, groups):
+        """tags_list (按用户输入顺序) + groups [(name, n_rep)] → {tag: group_name}."""
+        mapping = {}
+        idx = 0
+        for group_name, n_rep in groups:
+            for _j in range(n_rep):
+                if idx < len(tags_list):
+                    mapping[tags_list[idx]] = group_name
+                idx += 1
+        return mapping
+
+    ribo_tag_map = _build_tag_to_group(all_ribo_tags, ribo_groups)
+    rna_tag_map  = _build_tag_to_group(all_rna_tags,  rna_groups)
 
     with open(coldata_file, 'w') as fh:
         fh.write("sample\tcondition\tdata_type\n")
         for tag in ribo_counts:
-            cond = _group_to_condition(tag, ribo_groups)
-            fh.write(f"{tag}\t{cond}\tribo\n")
+            cond = ribo_tag_map.get(tag, "unknown")
+            fh.write(f"{tag}_ribo\t{cond}\tribo\n")
         for tag in rna_counts:
-            cond = _group_to_condition(tag, rna_groups)
-            fh.write(f"{tag}\t{cond}\trna\n")
+            cond = rna_tag_map.get(tag, "unknown")
+            fh.write(f"{tag}_rna\t{cond}\trna\n")
 
     tee.write(f"  colData: {coldata_file} ({len(ribo_counts) + len(rna_counts)} samples)\n")
+    # te_combined.tsv 由 _generate_te_summary 在 STEP 11 自动生成, 放在 te_dir 下
     return ribo_mat_file, rna_mat_file, coldata_file
 
 
-def _run_te_deseq2(ribo_mat_file, rna_mat_file, coldata_file,
-                   te_method, tee, alpha=0.05):
+def _run_te_deseq2(ribo_mat_file, rna_mat_file, coldata_file, te_dir,
+                   te_method, tee, alpha=0.05, control_group=None):
     """
     调用 Rscript TE_DA.R (separate) 和/或 TE_DS.R (joint).
 
@@ -1872,7 +1907,8 @@ def _run_te_deseq2(ribo_mat_file, rna_mat_file, coldata_file,
             cmd = [
                 "Rscript", da_script,
                 ribo_mat_file, rna_mat_file, coldata_file,
-                separate_out, str(alpha)
+                separate_out, str(alpha), str(control_group or ""),
+                te_dir
             ]
             tee.write(f"    cmd: {' '.join(cmd)}\n")
             try:
@@ -1896,7 +1932,8 @@ def _run_te_deseq2(ribo_mat_file, rna_mat_file, coldata_file,
             cmd = [
                 "Rscript", ds_script,
                 ribo_mat_file, rna_mat_file, coldata_file,
-                joint_out, str(alpha)
+                joint_out, str(alpha), str(control_group or ""),
+                te_dir
             ]
             tee.write(f"    cmd: {' '.join(cmd)}\n")
             try:

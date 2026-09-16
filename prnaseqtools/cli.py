@@ -394,16 +394,36 @@ def build_parser():
     p.add_argument('--binsize', default=100, type=int, help='Window size')
     p.add_argument('--deseq2norm', default='DESeq2', dest='deseq2_norm',
                    help='DESeq2 or RPM')
-    # ChIP bdgdiff options
+    # ChIP options
     p.add_argument('--genome-size', default=None,
                    help='Effective genome size for MACS3 (e.g. 1.35e8 for ath)')
-    p.add_argument('--cutoff', default=3, type=float,
-                   help='log2 fold-change cutoff for bdgdiff (default: 3)')
-    p.add_argument('--qvalue', default=1.0, type=float, help='Q-value threshold')
     p.add_argument('--seqstrategy', default='paired', dest='seq_strategy',
                    help='single or paired')
     p.add_argument('--tss-distance', default=3000, type=int,
                    help='TSS distance for ChIPseeker annotation (default: 3000)')
+    # Differential peak calling method
+    p.add_argument('--chip-method', default='diffbind',
+                   choices=['bdgdiff', 'diffbind'],
+                   help='Differential peak calling method: bdgdiff (MACS3, no replicates) '
+                        'or diffbind (DESeq2/edgeR, with replicates). Default: bdgdiff')
+    # bdgdiff-specific
+    p.add_argument('--cutoff', default=3, type=float,
+                   help='log2 fold-change cutoff for bdgdiff (default: 3)')
+    p.add_argument('--qvalue', default=1.0, type=float, help='Q-value threshold (bdgdiff)')
+    # DiffBind-specific
+    p.add_argument('--chip-analysis', default='dual_factor',
+                   choices=['affinity', 'dual_factor'],
+                   help='DiffBind analysis mode: affinity (IP-only DESeq2, design=~Condition) '
+                        'or dual_factor (IP+Input joint DESeq2, design=~Condition+Factor+Condition:Factor). '
+                        'Default: affinity')
+    p.add_argument('--chip-norm', default='deseq2',
+                   choices=['deseq2', 'total', 'mito', 'chloro', 'rdna'],
+                   help='DiffBind normalization: deseq2 (size factors), '
+                        'total (total mapped reads), '
+                        'mito (mitochondrial reads chrM/MT), '
+                        'chloro (chloroplast reads chrC/chrCP), '
+                        'or rdna (chr2+chr3 reads, rDNA regions). '
+                        'Default: deseq2')
 
     return parser
 
@@ -456,7 +476,7 @@ def main():
         _cleanup_log = False
 
         auto_install = getattr(args, 'auto_install', True)
-        check_dependencies(auto_install=auto_install, mode=args.mode)
+        check_dependencies(auto_install=auto_install, mode=args.mode, genome=args.genome)
 
         # Convert namespace to dict
         opts = vars(args)

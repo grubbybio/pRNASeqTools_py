@@ -189,6 +189,28 @@ _CHECK_DEFS = {
         'msg': 'Peak caller (ChIP/ATAC/TF)',
         'mode_only': ['chip', 'atac', 'tf'],
     },
+    'picard': {
+        # picard-slim exposes a `picard` wrapper that prints version
+        'cmd': 'picard MarkDuplicates --version 2>&1',
+        'pattern': r'(\d+\.\d+\.\d+)',
+        'required': False,
+        'msg': 'BAM deduplication (ChIP-seq MarkDuplicates)',
+        'mode_only': ['chip', 'atac', 'tf'],
+    },
+    'DiffBind': {
+        'cmd': 'Rscript -e "if (requireNamespace(\'DiffBind\', quietly=TRUE)) cat(as.character(packageVersion(\'DiffBind\')))"',
+        'pattern': r'([\d]+\.[\d]+\.[\d]+)',
+        'required': False,
+        'msg': 'ChIP-seq differential binding (DiffBind, optional for --chip-method diffbind)',
+        'mode_only': ['chip', 'tf'],
+    },
+    'ChIPseeker': {
+        'cmd': 'Rscript -e "if (requireNamespace(\'ChIPseeker\', quietly=TRUE)) cat(as.character(packageVersion(\'ChIPseeker\')))"',
+        'pattern': r'([\d]+\.[\d]+\.[\d]+)',
+        'required': False,
+        'msg': 'Peak annotation & GO (ChIPseeker)',
+        'mode_only': ['chip', 'tf'],
+    },
     'umi_tools': {
         'cmd': 'umi_tools -v',
         'pattern': r'(\d+\.\d+\.\d+)',
@@ -327,7 +349,7 @@ _CHECK_DEFS = {
 # 2. Main check function
 # ═══════════════════════════════════════════════════════════════════════════
 
-def check_dependencies(auto_install=True, mode=None, interactive=True):
+def check_dependencies(auto_install=True, mode=None, interactive=True, genome=None):
     """
     Check all external dependencies.  Optionally auto-install missing ones.
 
@@ -335,6 +357,7 @@ def check_dependencies(auto_install=True, mode=None, interactive=True):
         auto_install: if True, attempt automatic installation of missing tools
         mode:        current analysis mode (e.g. 'srna'); skips mode-only tools
         interactive: if True, prompt before installing (ignored if not auto_install)
+        genome:      genome name (e.g. 'ath'); None = auto-detect all in reference/
 
     Raises SystemExit if a required tool is missing and cannot be installed.
     """
@@ -422,7 +445,7 @@ def check_dependencies(auto_install=True, mode=None, interactive=True):
     # ── Phase 3.5: ensure mapping indices exist ───────────────────────
     from prnaseqtools.reference import check_and_build_indices
     try:
-        check_and_build_indices(prefix, mode=mode, tee=tee)
+        check_and_build_indices(prefix, genome=genome, mode=mode, tee=tee)
     except Exception:
         tee.write("Warning: Index check failed\n")
 
