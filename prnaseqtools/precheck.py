@@ -102,11 +102,11 @@ def _get_env_fingerprint():
 
 
 _CHECK_DEFS = {
-    'cutadapt': {
-        'cmd': 'cutadapt --version',
-        'pattern': r'^(\d+\.\d+)',
+    'fastp': {
+        'cmd': 'fastp --version',
+        'pattern': r'fastp\s+(\d+\.\d+\.\d+)',
         'required': True,
-        'msg': 'Adapter trimming tool',
+        'msg': 'Adapter auto-detection + quality trimming (mRNA-seq, lncRNA-seq, ATAC/ChIP, WGBS)',
     },
     'samtools': {
         'cmd': 'samtools --version',

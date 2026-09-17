@@ -173,16 +173,15 @@ def run(opts):
                 tee.write(f"  Trimming adapters ({tag})...\n")
                 if input_r2:
                     run_cmd(
-                        f"cutadapt -j {thread} -m 20 --trim-n "
-                        f"-a {adaptor} -A {adaptor} "
-                        f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                        f"{input_r1} {input_r2}")
+                        f"fastp -w {thread} --length_required 20 "
+                        f"-i {input_r1} -I {input_r2} "
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq --adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}")
                     os.rename(f"{tag}_R1_trimmed.fastq", input_r1)
                     os.rename(f"{tag}_R2_trimmed.fastq", input_r2)
                 else:
                     run_cmd(
-                        f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} "
-                        f"-o {tag}_trimmed.fastq {input_r1}")
+                        f"fastp -w {thread} --length_required 20 "
+                        f"-i {input_r1} -o {tag}_trimmed.fastq --adapter_sequence {adaptor}")
                     os.rename(f"{tag}_trimmed.fastq", input_r1)
 
             # STARsolo alignment and quantification
@@ -190,7 +189,7 @@ def run(opts):
             solo_outdir = f"Solo_out/{tag}"
 
             star_cmd = (
-                f"STAR --runMode alignReads --genomeDir Genome "
+                f"STAR --runMode alignReads --genomeDir Genome --seedSearchStartLmax 25 "
                 f"--soloType SmartSeq "
                 f"--outSAMtype BAM SortedByCoordinate "
                 f"--limitBAMsortRAM 10000000000 "
@@ -470,7 +469,7 @@ def _quantify_celltagged_bam(tag, thread, gtf_file, prefix, genome):
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
         run_cmd(
-            f"STAR --runThreadN {thread} --genomeDir Genome "
+            f"STAR --runThreadN {thread} --genomeDir Genome --seedSearchStartLmax 25 "
             f"--runMode genomeGenerate "
             f"--genomeSAindexNbases 10 --genomeFastaFiles {fasta_path} "
             f"--sjdbGTFfile {gtf_file} --limitGenomeGenerateRAM 64000000000"

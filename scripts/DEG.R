@@ -31,6 +31,12 @@ for (n in 1:length(genotype)){
   }
 }
 message("Loading completed.")
+
+# Extract gene lengths (bp) — same across all replicates, take from first file
+first_rep_data <- eval(parse(text=rownames(b)[1]))
+gene_lengths <- first_rep_data$Length
+names(gene_lengths) <- rownames(first_rep_data)
+
 eval(parse(text=rownames(b)[1]))[,1] -> a
 for(q in 2:p){
   cbind(a,eval(parse(text=rownames(b)[q]))[,1]) -> a
@@ -54,7 +60,7 @@ rld <- rlog(dds)
 sampleDists <- dist(t(assay(rld)))
 sampleDistMatrix <- as.matrix(sampleDists)
 colors <- colorRampPalette(rev(brewer.pal(9,"Blues")))(255)
-pdf(file="total.pdf",6,6)
+pdf(file="DEG_overview.pdf",6,6)
 aheatmap(log2.norm.counts, Rowv=NA, Colv=NA, annCol=df)
 message("Top 1000 completed!")
 plotPCA(rld,ntop=1000,intgroup=c("genotype"))
@@ -64,7 +70,14 @@ message("Dist completed!")
 dev.off()
 for(j in 2:length(genotype)){
   results(dds,contrast = c("genotype",genotype[j],genotype[1])) -> res
-  cbind(as.data.frame(res),t(t(counts(dds))/rtotal)) -> out
+  out <- as.data.frame(res)
+
+  # Add per-sample TPM columns: TPM = (counts / len_kb) / sum(counts / len_kb) * 1e6
+  gene_len_kb <- gene_lengths[rownames(out)] / 1000               # bp → kb
+  rpkm_mat <- as.matrix(counts(dds)) / gene_len_kb                 # RPK (counts / kb)
+  tpm_mat <- sweep(rpkm_mat, 2, colSums(rpkm_mat) / 1e6, "/")      # TPM normalize
+  colnames(tpm_mat) <- paste0(colnames(counts(dds)), "_TPM")
+  out <- cbind(out, as.data.frame(tpm_mat))
   if(fdroo < 1){
     subset(out, padj < fdroo & log2FoldChange >= log2(foldchangeoo)) -> resup
     subset(out, padj < fdroo & log2FoldChange <= -log2(foldchangeoo)) -> resdown

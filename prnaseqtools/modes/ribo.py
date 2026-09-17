@@ -27,7 +27,7 @@ from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq
 
 
 # ── Helper: detect last completed step from log ────────────────────────────
@@ -352,17 +352,16 @@ def run(opts):
                 if is_paired:
                     tee.write(f"  Trimming {tag} (paired-end)...\n")
                     run_cmd(
-                        f"cutadapt -j {thread} -m 18 --trim-n "
-                        f"-a {adaptor} -A {adaptor} "
-                        f"-o {tag}_trimmed_r1.fastq -p {tag}_trimmed_r2.fastq "
-                        f"{r1_fq} {r2_fq}")
+                        f"fastp -w {thread} --length_required 18 "
+                        f"-i {r1_fq} -I {r2_fq} "
+                        f"-o {tag}_trimmed_r1.fastq -O {tag}_trimmed_r2.fastq --adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}")
                     os.rename(f"{tag}_trimmed_r1.fastq", r1_fq)
                     os.rename(f"{tag}_trimmed_r2.fastq", r2_fq)
                 else:
                     tee.write(f"  Trimming {tag}...\n")
                     run_cmd(
-                        f"cutadapt -j {thread} -m 18 --discard-untrimmed --trim-n "
-                        f"-a {adaptor} -o {tag}_trimmed.fastq {r1_fq}")
+                        f"fastp -w {thread} --length_required 18 "
+                        f"-i {r1_fq} -o {tag}_trimmed.fastq --adapter_sequence {adaptor}")
                     os.rename(f"{tag}_trimmed.fastq", r1_fq)
 
             # Bowtie2 decontamination
@@ -437,12 +436,11 @@ def run(opts):
                     if os.path.exists(fname):
                         os.unlink(fname)
 
-            if not is_paired and os.path.exists(f"{tag}.fastq"):
-                os.unlink(f"{tag}.fastq")
-            if is_paired and os.path.exists(f"{tag}_r1.fastq"):
-                os.unlink(f"{tag}_r1.fastq")
-            if is_paired and os.path.exists(f"{tag}_r2.fastq"):
-                os.unlink(f"{tag}_r2.fastq")
+            if not is_paired:
+                gzip_fastq(f"{tag}.fastq")
+            if is_paired:
+                gzip_fastq(f"{tag}_r1.fastq")
+                gzip_fastq(f"{tag}_r2.fastq")
 
         tee.write("\n  Ribo-seq decontamination complete.\n")
         tee.write("  STEP 2 COMPLETE\n")
@@ -513,7 +511,7 @@ def run(opts):
             os.makedirs(star_out_1st, exist_ok=True)
 
             run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir {star_rna_index} "
+                f"STAR --runThreadN {thread} --genomeDir {star_rna_index} --seedSearchStartLmax 25 "
                 f"--readFilesCommand zcat --readFilesIn {read_files} "
                 f"--alignIntronMax 5000 --alignIntronMin 15 "
                 f"--outFilterMismatchNmax 2 --outFilterMultimapNmax 20 "
@@ -554,7 +552,7 @@ def run(opts):
                 read_files = f"{tag}.fastq.gz"
 
             run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir {star_rna_index} "
+                f"STAR --runThreadN {thread} --genomeDir {star_rna_index} --seedSearchStartLmax 25 "
                 f"--sjdbFileChrStartEnd {sj_files} "
                 f"--readFilesCommand zcat --readFilesIn {read_files} "
                 f"--alignIntronMax 5000 --alignIntronMin 15 "
@@ -755,7 +753,7 @@ def run(opts):
                     continue
 
             run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir {star_ribo_idx} "
+                f"STAR --runThreadN {thread} --genomeDir {star_ribo_idx} --seedSearchStartLmax 25 "
                 f"--alignEndsType EndToEnd --readFilesCommand zcat "
                 f"--readFilesIn {fq_gz} "
                 f"--alignIntronMax 5000 --alignIntronMin 15 "
@@ -793,7 +791,7 @@ def run(opts):
                 read_files = f"{tag}.fastq.gz"
 
             run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir {star_rna_new_idx} "
+                f"STAR --runThreadN {thread} --genomeDir {star_rna_new_idx} --seedSearchStartLmax 25 "
                 f"--readFilesCommand zcat --readFilesIn {read_files} "
                 f"--alignIntronMax 5000 --alignIntronMin 15 "
                 f"--outFilterMismatchNmax 2 --outFilterMultimapNmax 20 "

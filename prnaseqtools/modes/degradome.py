@@ -13,7 +13,7 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee, run_cmd
+from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee, run_cmd, gzip_fastq
 from prnaseqtools import reference as ref
 
 
@@ -81,18 +81,22 @@ def run(opts):
             sra_results = download_sra(fpath, thread)
             unzip_file(sra_results[0], tag)
 
-            if adaptor:
-                tee.write("\nTrimming...\n")
-                run_cmd(
-                    f"cutadapt -j {thread} -m 18 --trim-n -a {adaptor} "
-                    f"-o {tag}_trimmed.fastq {tag}.fastq")
-                os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+            # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
+            tee.write("\nTrimming (fastp)...\n")
+            fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+            run_cmd(
+                f"fastp -w {thread} --length_required 18 "
+                f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
+            os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+            for rep in (f"{tag}.html", f"{tag}.json"):
+                if os.path.exists(rep):
+                    os.unlink(rep)
 
             tee.write("\nStart mapping...\n")
 
             # Map to transcriptome
             run_cmd(
-                f"STAR --genomeDir Genome --outSAMtype BAM SortedByCoordinate "
+                f"STAR --genomeDir Genome --seedSearchStartLmax 25 --outSAMtype BAM SortedByCoordinate "
                 f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
                 f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
                 f"--limitOutSJcollapsed 10000000 --limitIObufferSize 280000000 "
@@ -109,7 +113,7 @@ def run(opts):
 
             # Map to genome
             run_cmd(
-                f"STAR --genomeDir Genome2 --outSAMtype BAM SortedByCoordinate "
+                f"STAR --genomeDir Genome2 --seedSearchStartLmax 25 --outSAMtype BAM SortedByCoordinate "
                 f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
                 f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
                 f"--limitOutSJcollapsed 10000000 --limitIObufferSize 280000000 "
@@ -137,8 +141,7 @@ def run(opts):
                 for seq, count in fq_demux.items():
                     fh.write(f"{seq}\t{count}\n")
 
-            if os.path.exists(f"{tag}.fastq"):
-                os.unlink(f"{tag}.fastq")
+            gzip_fastq(f"{tag}.fastq")
 
         if not mappingonly:
             tee.write("Finding peaks...\n")

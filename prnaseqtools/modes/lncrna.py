@@ -24,7 +24,7 @@ from pathlib import Path
 
 from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
                                         _resolve_path)
-from prnaseqtools.functions import (_tee, run_cmd, download_sra, unzip_file)
+from prnaseqtools.functions import (_tee, run_cmd, download_sra, unzip_file, gzip_fastq)
 
 
 def run(opts):
@@ -194,11 +194,15 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
             if len(sra) == 1:
                 seq_strategy = 'single'
                 unzip_file(sra[0], tag)
-                if adaptor:
-                    run_cmd(
-                        f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} "
-                        f"-o {tag}_trimmed.fastq {tag}.fastq")
-                    os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+                # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
+                fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+                run_cmd(
+                    f"fastp -w {thread} --length_required 20 "
+                    f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
+                os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+                for rep in (f"{tag}.html", f"{tag}.json"):
+                    if os.path.exists(rep):
+                        os.unlink(rep)
                 if mask:
                     run_cmd(
                         f"bowtie -v 0 -a --un tmp.fastq -p {thread} -t mask "
@@ -206,27 +210,29 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
                     os.rename("tmp.fastq", f"{tag}.fastq")
 
                 run_cmd(
-                    f"STAR --runMode alignReads --genomeDir Genome "
+                    f"STAR --runMode alignReads --genomeDir Genome --seedSearchStartLmax 25 "
                     f"--alignIntronMax 5000 --outReadsUnmapped Fastx "
                     f"--outSAMtype BAM SortedByCoordinate "
                     f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
                     f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
                     f"--runThreadN {thread} --readFilesIn {tag}.fastq")
-                if os.path.exists(f"{tag}.fastq"):
-                    os.unlink(f"{tag}.fastq")
+                gzip_fastq(f"{tag}.fastq")
             else:
                 # Paired SRA
                 seq_strategy = 'paired'
                 unzip_file(sra[0], f"{tag}_R1")
                 unzip_file(sra[1], f"{tag}_R2")
-                if adaptor:
-                    run_cmd(
-                        f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} "
-                        f"-A {adaptor} -o {tag}_R1_trimmed.fastq "
-                        f"-p {tag}_R2_trimmed.fastq "
-                        f"{tag}_R1.fastq {tag}_R2.fastq")
-                    os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
-                    os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+                # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
+                fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
+                run_cmd(
+                    f"fastp -w {thread} --length_required 20 "
+                    f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
+                os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
+                os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+                for rep in (f"{tag}.html", f"{tag}.json"):
+                    if os.path.exists(rep):
+                        os.unlink(rep)
                 if mask:
                     run_cmd(
                         f"bowtie -v 0 -a --un tmp.fastq -p {thread} -t mask "
@@ -237,7 +243,7 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
                         os.rename("tmp_2.fastq", f"{tag}_R2.fastq")
 
                 run_cmd(
-                    f"STAR --runMode alignReads --genomeDir Genome "
+                    f"STAR --runMode alignReads --genomeDir Genome --seedSearchStartLmax 25 "
                     f"--alignIntronMax 5000 --outReadsUnmapped Fastx "
                     f"--outSAMtype BAM SortedByCoordinate "
                     f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
@@ -253,14 +259,17 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
             seq_strategy = 'paired'
             unzip_file(f1, f"{tag}_R1")
             unzip_file(f2, f"{tag}_R2")
-            if adaptor:
-                run_cmd(
-                    f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} "
-                    f"-A {adaptor} -o {tag}_R1_trimmed.fastq "
-                    f"-p {tag}_R2_trimmed.fastq "
-                    f"{tag}_R1.fastq {tag}_R2.fastq")
-                os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
-                os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+            # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
+            fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
+            run_cmd(
+                f"fastp -w {thread} --length_required 20 "
+                f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
+            os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
+            os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+            for rep in (f"{tag}.html", f"{tag}.json"):
+                if os.path.exists(rep):
+                    os.unlink(rep)
             if mask:
                 run_cmd(
                     f"bowtie -v 0 -a --un tmp.fastq -p {thread} -t mask "
@@ -271,7 +280,7 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
                     os.rename("tmp_2.fastq", f"{tag}_R2.fastq")
 
             run_cmd(
-                f"STAR --runMode alignReads --genomeDir Genome "
+                f"STAR --runMode alignReads --genomeDir Genome --seedSearchStartLmax 25 "
                 f"--alignIntronMax 5000 --outSAMtype BAM SortedByCoordinate "
                 f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
                 f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "

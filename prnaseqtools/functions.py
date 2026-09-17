@@ -76,8 +76,10 @@ def run_cmd(cmd, tee=None, check=True, quiet=False, **kwargs):
 def download_sra(srr, threads=4):
     """
     Download SRA file if input is an SRR accession.
+    Two-step: prefetch (parallel FTP download) → fasterq-dump (local conversion).
     Returns file path(s): single-end returns (file,), paired-end returns (r1, r2).
     """
+    import shutil
     m = re.search(r'([SED]RR\d+)', srr)
     if not m or os.path.exists(srr):
         return (srr,)
@@ -86,16 +88,53 @@ def download_sra(srr, threads=4):
     tee = _tee()
     tee.write("Downloading...\n")
 
-    run_cmd(
-        f"fasterq-dump -p --threads {threads} --split-3 {srr_id}"
-    )
+    # Step 1: prefetch — parallel FTP download of .sra file (much faster than fasterq-dump direct)
+    # prefetch creates: .sra_cache/<SRRxxxx>/<SRRxxxx>.sra  (accession subdir)
+    cache_dir = ".sra_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    run_cmd(f"prefetch -O {cache_dir} {srr_id}")
 
-    if os.path.exists(f"{srr_id}_1.fastq"):
+    # Step 2: locate .sra file — prefetch nests it under accession subdir
+    sra_path = None
+    for root, dirs, files in os.walk(cache_dir):
+        for f in files:
+            if f.endswith('.sra'):
+                sra_path = os.path.join(root, f)
+                break
+        if sra_path:
+            break
+    if not sra_path:
+        raise FileNotFoundError(f"prefetch failed: no .sra file found under {cache_dir}")
+
+    # Step 3: fasterq-dump — local conversion from .sra to FASTQ
+    # Use absolute path to avoid VDB relative-path resolution issues
+    sra_abs = os.path.abspath(sra_path)
+    run_cmd(f"fasterq-dump -p --threads {threads} --split-files {sra_abs}")
+
+    # Step 4: clean up intermediate .sra and cache dir
+    shutil.rmtree(cache_dir, ignore_errors=True)
+
+    # Step 5: detect actual output files (fasterq-dump may skip 0-length reads)
+    has_r1 = os.path.exists(f"{srr_id}_1.fastq")
+    has_r2 = os.path.exists(f"{srr_id}_2.fastq")
+
+    if has_r1 and has_r2:
+        # True paired-end
         if os.path.exists(f"{srr_id}.fastq"):
             os.unlink(f"{srr_id}.fastq")
         return (f"{srr_id}_1.fastq", f"{srr_id}_2.fastq")
+    elif has_r1 and not has_r2:
+        # PE data but R2 was all 0-length / empty — R1 only
+        tee.write("Warning: R2 reads are empty (0-length), treating as single-end\n")
+        return (f"{srr_id}_1.fastq",)
     else:
-        return (f"{srr_id}.fastq",)
+        # Single-end (or fallback to interleaved)
+        if os.path.exists(f"{srr_id}.fastq"):
+            return (f"{srr_id}.fastq",)
+        raise FileNotFoundError(
+            f"fasterq-dump produced no FASTQ output for {srr_id}. "
+            f"Expected {srr_id}.fastq or {srr_id}_1.fastq"
+        )
 
 
 # ── Statistics ───────────────────────────────────────────────────────────
@@ -154,9 +193,7 @@ def unzip_file(filepath, tag):
     elif filepath.endswith(('.fastq', '.fq')):
         if filepath != target:
             tee.write("Renaming...\n")
-            run_cmd(f"cp {filepath} {target}")
-            if filepath.startswith('SRR') or filepath.startswith('ERR') or filepath.startswith('DRR'):
-                os.unlink(filepath)
+            os.rename(filepath, target)
         else:
             tee.write("Backing up...\n")
             run_cmd(f"cp {filepath} {target}.bak")
@@ -167,6 +204,21 @@ def unzip_file(filepath, tag):
 
 
 # ── Remove 3' PolyC and reverse complement ───────────────────────────────
+
+
+# ── Save raw fastq as gzip instead of deleting ────────────────────────────────
+def gzip_fastq(filepath):
+    """
+    Compress a FASTQ/FASTQ.gz file in-place using gzip.
+    Safe: no-op if the file doesn't exist.
+    """
+    if not os.path.exists(filepath):
+        return
+    tee = _tee()
+    tee.write(f"Saving compressed: {filepath}.gz\n")
+    run_cmd(f"gzip -f {filepath}")
+
+
 def rmvc(tag_r1, tag_r2=None):
     """
     Remove 3' PolyC from trimmed reads and reverse complement.

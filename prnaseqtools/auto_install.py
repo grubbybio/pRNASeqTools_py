@@ -4,7 +4,7 @@ Detects missing external tools and installs them via the best available
 package manager (mamba > conda > pip > manual).
 
 Installation sources per tool:
-  bioconda   — cutadapt, samtools, bowtie, bowtie2, star, subread,
+  bioconda   — fastp, samtools, bowtie, bowtie2, star, subread,
                bedtools, sra-tools, gffread, deeptools, genrich,
                umi_tools, ucsc-bedgraphtobigwig, bismark, shortstack,
                stringtie, gffcompare, rsem, htslib, numpy, scipy
@@ -68,9 +68,9 @@ def _pm_install(pm, packages, channel=None):
 
 DEPENDENCY_REGISTRY = {
     # ── Core tools (always required) ───────────────────────────────────
-    'cutadapt': {
-        'pkg': 'cutadapt', 'channel': 'bioconda',
-        'install_msg': 'Adapter trimming tool',
+    'fastp': {
+        'pkg': 'fastp', 'channel': 'bioconda',
+        'install_msg': 'Adapter auto-detection + quality trimming',
     },
     'samtools': {
         'pkg': 'samtools', 'channel': 'bioconda',

@@ -267,13 +267,14 @@ def build_parser():
                    help='Force restart from this step (1-12), '
                         'overrides auto-detection')
     p.add_argument('--te-method', default='both',
-                   choices=['both', 'separate', 'joint'],
+                   choices=['both', 'separate', 'joint', 'none'],
                    help='Per-gene TE change detection method: '
                         'separate=two independent DESeq2 (ribo vs rna DE, '
                         'delta_logFC difference), '
                         'joint=single dual-factor DESeq2 '
                         '(condition x data_type interaction), '
-                        'both=run both (default)')
+                        'both=run both (default), '
+                        'none=skip DESeq2, TE plotting only')
 
     # cips (CiPS uORF analysis)
     p = sub.add_parser('cips', help='CiPS uORF analysis (translated uORF detection)')

@@ -51,15 +51,15 @@ def run(opts):
         sra_results = download_sra(fpath, thread)
         unzip_file(sra_results[0], tag)
 
-        if adaptor:
-            tee.write("\nStart trimming...\n")
-            run_cmd(
-                f"cutadapt -j {thread} -m 14 -M 42 --discard-untrimmed --trim-n "
-                f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq")
-            if os.path.exists(f"{tag}_trimmed.fastq"):
-                os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
-            else:
-                tee.write(f"Warning: cutadapt did not produce trimmed file for {tag}\n")
+        tee.write("\nTrimming (fastp)...\n")
+        fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+        run_cmd(
+            f"fastp -w {thread} --length_required 14 --length_limit 42 "
+            f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
+        if os.path.exists(f"{tag}_trimmed.fastq"):
+            os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+        else:
+            tee.write(f"Warning: fastp did not produce trimmed file for {tag}\n")
 
         # Iterative bowtie mapping with increasing mismatches
         ref_idx = os.path.join(prefix, "reference", f"{genome}_chr_all")

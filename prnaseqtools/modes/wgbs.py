@@ -13,7 +13,7 @@ from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq
 
 
 def run(opts):
@@ -67,12 +67,12 @@ def run(opts):
                     if adaptor:
                         tee.write("\nStart trimming...\r")
                         run_cmd(
-                            f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} "
-                            f"-o {tag}_trimmed.fastq {tag}.fastq")
+                            f"fastp -w {thread} --length_required 20 "
+                            f"-i {tag}.fastq -o {tag}_trimmed.fastq --adapter_sequence {adaptor}")
                         if os.path.exists(f"{tag}_trimmed.fastq"):
                             os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
                         else:
-                            tee.write(f"Warning: cutadapt did not produce trimmed file for {tag}\n")
+                            tee.write(f"Warning: fastp did not produce trimmed file for {tag}\n")
 
                     run_cmd(
                         f"bismark -p {thread} -N 1 . {tag}.fastq")
@@ -85,7 +85,8 @@ def run(opts):
                     run_cmd(
                         f"bismark_methylation_extractor --parallel {thread} -s --bedGraph "
                         f"--cutoff 4 --cytosine_report --CX --genome_folder . {tag}.bam")
-                    for fname in (f"{tag}.fastq", f"{tag}_bismark_bt2.bam"):
+                    gzip_fastq(f"{tag}.fastq")
+                    for fname in (f"{tag}_bismark_bt2.bam",):
                         if os.path.exists(fname):
                             os.unlink(fname)
                 else:
@@ -93,17 +94,17 @@ def run(opts):
                     unzip_file(sra_results[1], f"{tag}_R2")
                     if adaptor:
                         run_cmd(
-                            f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} -A {adaptor} "
-                            f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                            f"{tag}_R1.fastq {tag}_R2.fastq")
+                            f"fastp -w {thread} --length_required 20 "
+                            f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                            f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq --adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}")
                         if os.path.exists(f"{tag}_R1_trimmed.fastq"):
                             os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                         else:
-                            tee.write(f"Warning: cutadapt did not produce trimmed R1 for {tag}\n")
+                            tee.write(f"Warning: fastp did not produce trimmed R1 for {tag}\n")
                         if os.path.exists(f"{tag}_R2_trimmed.fastq"):
                             os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                         else:
-                            tee.write(f"Warning: cutadapt did not produce trimmed R2 for {tag}\n")
+                            tee.write(f"Warning: fastp did not produce trimmed R2 for {tag}\n")
 
                     run_cmd(
                         f"bismark -p {thread} -N 1 . -1 {tag}_R1.fastq -2 {tag}_R2.fastq")
@@ -116,7 +117,9 @@ def run(opts):
                     run_cmd(
                         f"bismark_methylation_extractor --parallel {thread} -p --bedGraph "
                         f"--cutoff 4 --cytosine_report --CX --genome_folder . {tag}.bam")
-                    for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq", f"{tag}_R1_bismark_bt2_pe.bam"):
+                    for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
+                        gzip_fastq(_f)
+                    for fname in (f"{tag}_R1_bismark_bt2_pe.bam",):
                         if os.path.exists(fname):
                             os.unlink(fname)
             else:
@@ -125,17 +128,17 @@ def run(opts):
                 unzip_file(f2, f"{tag}_R2")
                 if adaptor:
                     run_cmd(
-                        f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} -A {adaptor} "
-                        f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                        f"{tag}_R1.fastq {tag}_R2.fastq")
+                        f"fastp -w {thread} --length_required 20 "
+                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq --adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}")
                     if os.path.exists(f"{tag}_R1_trimmed.fastq"):
                         os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                     else:
-                        tee.write(f"Warning: cutadapt did not produce trimmed R1 for {tag}\n")
+                        tee.write(f"Warning: fastp did not produce trimmed R1 for {tag}\n")
                     if os.path.exists(f"{tag}_R2_trimmed.fastq"):
                         os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                     else:
-                        tee.write(f"Warning: cutadapt did not produce trimmed R2 for {tag}\n")
+                        tee.write(f"Warning: fastp did not produce trimmed R2 for {tag}\n")
 
                 run_cmd(
                     f"bismark -p {thread} -N 1 . -1 {tag}_R1.fastq -2 {tag}_R2.fastq")

@@ -129,11 +129,11 @@ def run(opts):
                     run_cmd(
                         f"umi_tools extract -p {pattern} -I {tag}.fastq -S {tag}.fq"
                     )
-                    if adaptor:
-                        run_cmd(
-                            f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
-                            f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fq"
-                        )
+                    fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+                    run_cmd(
+                        f"fastp -w {thread} --length_required 18 --length_limit 42 "
+                        f"-i {tag}.fq -o {tag}_trimmed.fastq {fastp_adaptor}"
+                    )
 
                     # Deduplication
                     _umi_dedup(tag)
@@ -141,13 +141,13 @@ def run(opts):
                     if os.path.exists(f"{tag}.fq"):
                         os.unlink(f"{tag}.fq")
                 elif run_mode == 'bulk':
-                    if adaptor:
-                        tee.write(f"\nTrimming {tag}...\n")
-                        run_cmd(
-                            f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
-                            f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq"
-                        )
-                        os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+                    tee.write(f"\nTrimming (fastp) {tag}...\n")
+                    fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+                    run_cmd(
+                        f"fastp -w {thread} --length_required 18 --length_limit 42 "
+                        f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}"
+                    )
+                    os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
 
                 # Mask filtering
                 if mask:

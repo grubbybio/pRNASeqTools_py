@@ -233,7 +233,7 @@ def _do_mapping(tags, files, pars, ref_fasta, genome_size,
 
         out_prefix = os.path.join(bam_dir, f"{tag}.")
         tee.write(f"    [{tag}] STAR mapping...\n")
-        cmd = (f"STAR --genomeDir {star_idx} "
+        cmd = (f"STAR --genomeDir {star_idx} --seedSearchStartLmax 25 "
                f"--readFilesIn {fq_arg} "
                f"--readFilesCommand zcat "
                f"--runThreadN {thread} "

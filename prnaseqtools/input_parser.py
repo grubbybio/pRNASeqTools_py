@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 
-# ── Adaptor alias table (all ≥ 13 nt for cutadapt specificity) ──────────
+# ── Adaptor alias table (all ≥ 13 nt for fastp specificity) ──────────
 # Single source of truth — imported by validate_options.py and modes/srna.py.
 ADAPTOR_ALIASES = {
     'truseq':   'TGGAATTCTCGGG',   # TruSeq sRNA 3'

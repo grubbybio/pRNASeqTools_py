@@ -12,7 +12,7 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq
 
 
 def run(opts):
@@ -68,10 +68,10 @@ def run(opts):
                 if len(sra_results) == 1:
                     unzip_file(sra_results[0], tag)
                     run_cmd(
-                        f"cutadapt -j {thread} -m 18 --trim-n -a {adaptor} "
-                        f"-o {tag}_trimmed.fastq {tag}.fastq")
+                        f"fastp -w {thread} --length_required 18 "
+                        f"-i {tag}.fastq -o {tag}_trimmed.fastq --adapter_sequence {adaptor}")
                     run_cmd(
-                        f"STAR --genomeDir Genome --alignIntronMax 5000 "
+                        f"STAR --genomeDir Genome --seedSearchStartLmax 25 --alignIntronMax 5000 "
                         f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
@@ -85,11 +85,11 @@ def run(opts):
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
                     run_cmd(
-                        f"cutadapt -j {thread} -m 18 --trim-n -a {adaptor} -A AAAAAAGAAAAAA "
-                        f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                        f"{tag}_R1.fastq {tag}_R2.fastq")
+                        f"fastp -w {thread} --length_required 18 "
+                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq --adapter_sequence {adaptor} --adapter_sequence_r2 AAAAAAGAAAAAA")
                     run_cmd(
-                        f"STAR --genomeDir Genome --alignIntronMax 5000 "
+                        f"STAR --genomeDir Genome --seedSearchStartLmax 25 --alignIntronMax 5000 "
                         f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
@@ -98,20 +98,21 @@ def run(opts):
                         os.rename("Unmapped.out.mate1", f"{tag}.unmapped_R1.fastq")
                     if os.path.exists("Unmapped.out.mate2"):
                         os.rename("Unmapped.out.mate2", f"{tag}.unmapped_R2.fastq")
-                    for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq",
-                                  f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
-                        if os.path.exists(fname):
-                            os.unlink(fname)
+                    for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
+                        gzip_fastq(_f)
+                    for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
+                        if os.path.exists(_f):
+                            os.unlink(_f)
             else:
                 f1, f2 = fpath.split(',')
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
                 run_cmd(
-                    f"cutadapt -j {thread} -m 18 --trim-n -a {adaptor} -A AAAAAAGAAAAAA "
-                    f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                    f"{tag}_R1.fastq {tag}_R2.fastq")
+                    f"fastp -w {thread} --length_required 18 "
+                    f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq --adapter_sequence {adaptor} --adapter_sequence_r2 AAAAAAGAAAAAA")
                 run_cmd(
-                    f"STAR --genomeDir Genome --alignIntronMax 5000 "
+                    f"STAR --genomeDir Genome --seedSearchStartLmax 25 --alignIntronMax 5000 "
                     f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                     f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
                     f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
@@ -120,10 +121,11 @@ def run(opts):
                     os.rename("Unmapped.out.mate1", f"{tag}.unmapped_R1.fastq")
                 if os.path.exists("Unmapped.out.mate2"):
                     os.rename("Unmapped.out.mate2", f"{tag}.unmapped_R2.fastq")
-                for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq",
-                              f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
-                    if os.path.exists(fname):
-                        os.unlink(fname)
+                    for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
+                        gzip_fastq(_f)
+                    for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
+                        if os.path.exists(_f):
+                            os.unlink(_f)
 
             os.rename("Aligned.sortedByCoord.out.bam", f"{tag}.bam")
             if os.path.exists("Log.final.out"):

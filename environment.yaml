@@ -23,7 +23,7 @@ dependencies:
   - r-essentials
 
   # ── Adapter trimming ─────────────────────────────────────────────────
-  - cutadapt
+  - fastp
 
   # ── Aligners ──────────────────────────────────────────────────────────
   - bowtie

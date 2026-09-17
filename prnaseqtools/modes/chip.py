@@ -12,7 +12,7 @@ from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq
 
 
 def run(opts):
@@ -90,50 +90,59 @@ def run(opts):
                 if len(sra_results) == 1:
                     seq_strategy = 'single'
                     unzip_file(sra_results[0], tag)
-                    if adaptor:
-                        tee.write("\nTrimming...\n")
-                        run_cmd(
-                            f"cutadapt -j {thread} -m 50 --trim-n -a {adaptor} "
-                            f"-o {tag}_trimmed.fastq {tag}.fastq")
-                        os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+                    # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
+                    tee.write("\nTrimming (fastp)...\n")
+                    fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+                    run_cmd(
+                        f"fastp -w {thread} --length_required 50 "
+                        f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
+                    os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+                    for rep in (f"{tag}.html", f"{tag}.json"):
+                        if os.path.exists(rep):
+                            os.unlink(rep)
                     run_cmd(
                         f"bowtie2 -p {thread} -x {genome}_chr_all -U {tag}.fastq "
                         f"-S {tag}.sam")
-                    if os.path.exists(f"{tag}.fastq"):
-                        os.unlink(f"{tag}.fastq")
+                    gzip_fastq(f"{tag}.fastq")
                 else:
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
-                    if adaptor:
-                        run_cmd(
-                            f"cutadapt -j {thread} -m 50 --trim-n -a {adaptor} -A {adaptor} "
-                            f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                            f"{tag}_R1.fastq {tag}_R2.fastq")
-                        os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
-                        os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+                    # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
+                    fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
+                    run_cmd(
+                        f"fastp -w {thread} --length_required 50 "
+                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
+                    os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
+                    os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+                    for rep in (f"{tag}.html", f"{tag}.json"):
+                        if os.path.exists(rep):
+                            os.unlink(rep)
                     run_cmd(
                         f"bowtie2 -p {thread} -x {genome}_chr_all "
                         f"-1 {tag}_R1.fastq -2 {tag}_R2.fastq -S {tag}.sam")
-                    for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
-                        if os.path.exists(fname):
-                            os.unlink(fname)
+                    for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
+                        gzip_fastq(_f)
             else:
                 f1, f2 = fpath.split(',')
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
-                if adaptor:
-                    run_cmd(
-                        f"cutadapt -j {thread} -m 50 --trim-n -a {adaptor} -A {adaptor} "
-                        f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                        f"{tag}_R1.fastq {tag}_R2.fastq")
-                    os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
-                    os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+                # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
+                fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
+                run_cmd(
+                    f"fastp -w {thread} --length_required 50 "
+                    f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
+                os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
+                os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+                for rep in (f"{tag}.html", f"{tag}.json"):
+                    if os.path.exists(rep):
+                        os.unlink(rep)
                 run_cmd(
                     f"bowtie2 -p {thread} -x {genome}_chr_all "
                     f"-1 {tag}_R1.fastq -2 {tag}_R2.fastq -S {tag}.sam")
-                for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
-                    if os.path.exists(fname):
-                        os.unlink(fname)
+                for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
+                        gzip_fastq(_f)
 
             # Process BAM
             run_cmd(

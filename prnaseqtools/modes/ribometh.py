@@ -14,7 +14,7 @@ from collections import defaultdict
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
                                         _resolve_path)
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq
 from prnaseqtools import reference as ref
 
 
@@ -116,8 +116,8 @@ def run(opts):
                     if adaptor:
                         tee.write("Trimming...\n")
                         run_cmd(
-                            f"cutadapt -j {thread} -m 15 --trim-n -a {adaptor} "
-                            f"-o {tag}_trimmed.fastq {tag}.fastq")
+                            f"fastp -w {thread} --length_required 15 "
+                            f"-i {tag}.fastq -o {tag}_trimmed.fastq --adapter_sequence {adaptor}")
                         os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
                     run_cmd(
                         f"STAR --genomeDir Genome --seedSearchStartLmax 15 "
@@ -125,17 +125,16 @@ def run(opts):
                         f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
                         f"--readFilesIn {tag}.fastq")
-                    if os.path.exists(f"{tag}.fastq"):
-                        os.unlink(f"{tag}.fastq")
+                    gzip_fastq(f"{tag}.fastq")
                 else:
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
                     if adaptor:
                         tee.write("Trimming...\n")
                         run_cmd(
-                            f"cutadapt -j {thread} -m 15 --trim-n -a {adaptor} -A {adaptor2} "
-                            f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                            f"{tag}_R1.fastq {tag}_R2.fastq")
+                            f"fastp -w {thread} --length_required 15 "
+                            f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                            f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq --adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor2}")
                         os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                         os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                     run_cmd(
@@ -144,18 +143,17 @@ def run(opts):
                         f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
                         f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
-                    for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
-                        if os.path.exists(fname):
-                            os.unlink(fname)
+                    for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
+                        gzip_fastq(_f)
             else:
                 f1, f2 = fpath.split(',')
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
                 if adaptor:
                     run_cmd(
-                        f"cutadapt -j {thread} -m 15 --trim-n -a {adaptor} -A {adaptor2} "
-                        f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                        f"{tag}_R1.fastq {tag}_R2.fastq")
+                        f"fastp -w {thread} --length_required 15 "
+                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq --adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor2}")
                     os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                     os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                 run_cmd(
@@ -164,9 +162,8 @@ def run(opts):
                     f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
                     f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
                     f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
-                for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
-                    if os.path.exists(fname):
-                        os.unlink(fname)
+                for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
+                        gzip_fastq(_f)
 
             run_cmd(f"samtools view -h Aligned.sortedByCoord.out.bam > {tag}.sam")
             if os.path.exists("Log.final.out"):

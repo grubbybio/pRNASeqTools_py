@@ -69,12 +69,12 @@ def run(opts):
                 if len(sra_results) == 1:
                     unzip_file(sra_results[0], tag)
                     run_cmd(
-                        f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} "
-                        f"-o {tag}_trimmed.fastq {tag}.fastq")
+                        f"fastp -w {thread} --length_required 20 "
+                        f"-i {tag}.fastq -o {tag}_trimmed.fastq --adapter_sequence {adaptor}")
                     rmvc(tag)
 
                     run_cmd(
-                        f"STAR --genomeDir Genome --alignIntronMax 5000 "
+                        f"STAR --genomeDir Genome --seedSearchStartLmax 25 --alignIntronMax 5000 "
                         f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
@@ -88,13 +88,13 @@ def run(opts):
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
                     run_cmd(
-                        f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} -A AAAAAAGAAAAAA "
-                        f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                        f"{tag}_R1.fastq {tag}_R2.fastq")
+                        f"fastp -w {thread} --length_required 20 "
+                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq --adapter_sequence {adaptor} --adapter_sequence_r2 AAAAAAGAAAAAA")
                     rmvc(f"{tag}_R1", f"{tag}_R2")
 
                     run_cmd(
-                        f"STAR --genomeDir Genome --alignIntronMax 5000 "
+                        f"STAR --genomeDir Genome --seedSearchStartLmax 25 --alignIntronMax 5000 "
                         f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
@@ -112,13 +112,13 @@ def run(opts):
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
                 run_cmd(
-                    f"cutadapt -j {thread} -m 20 --trim-n -a {adaptor} -A AAAAAAGAAAAAA "
-                    f"-o {tag}_R1_trimmed.fastq -p {tag}_R2_trimmed.fastq "
-                    f"{tag}_R1.fastq {tag}_R2.fastq")
+                    f"fastp -w {thread} --length_required 20 "
+                    f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq --adapter_sequence {adaptor} --adapter_sequence_r2 AAAAAAGAAAAAA")
                 rmvc(f"{tag}_R1", f"{tag}_R2")
 
                 run_cmd(
-                    f"STAR --genomeDir Genome --alignIntronMax 5000 "
+                    f"STAR --genomeDir Genome --seedSearchStartLmax 25 --alignIntronMax 5000 "
                     f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                     f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
                     f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "

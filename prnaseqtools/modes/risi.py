@@ -65,12 +65,12 @@ def run(opts):
                 sra_results = download_sra(fpath, thread)
                 unzip_file(sra_results[0], tag)
 
-                if adaptor:
-                    tee.write(f"\nTrimming {tag}...\n")
-                    run_cmd(
-                        f"cutadapt -j {thread} -m 18 -M 42 --discard-untrimmed --trim-n "
-                        f"-a {adaptor} -o {tag}_trimmed.fastq {tag}.fastq")
-                    os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+                tee.write(f"\nTrimming (fastp) {tag}...\n")
+                fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+                run_cmd(
+                    f"fastp -w {thread} --length_required 18 --length_limit 42 "
+                    f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
+                os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
 
                 tee.write("\nStart mapping...\n")
                 rDNA_fasta = os.path.join(prefix, "reference", f"{genome}_rDNA_chr_all.fasta")
