@@ -97,6 +97,13 @@ def _get_env_fingerprint():
     parts.append(os.environ.get('VIRTUAL_ENV', ''))
     parts.append(sys.executable)
     parts.append(_get_conda_packages())
+    # Also fingerprint the dependency definitions themselves, so that editing
+    # DEPENDENCY_REGISTRY / _CHECK_DEFS invalidates stale caches.
+    try:
+        import json as _json
+        parts.append(_json.dumps(_CHECK_DEFS, sort_keys=True))
+    except Exception:
+        pass
     
     return hashlib.md5('|'.join(parts).encode()).hexdigest()
 
@@ -349,7 +356,7 @@ _CHECK_DEFS = {
 # 2. Main check function
 # ═══════════════════════════════════════════════════════════════════════════
 
-def check_dependencies(auto_install=True, mode=None, interactive=True, genome=None):
+def check_dependencies(auto_install=True, mode=None, interactive=True, genome=None, force=False):
     """
     Check all external dependencies.  Optionally auto-install missing ones.
 
@@ -374,13 +381,17 @@ def check_dependencies(auto_install=True, mode=None, interactive=True, genome=No
     cache_key = _get_cache_key(mode)
     cache = _load_cache()
     
-    if cache_key in cache:
+    if not force and cache_key in cache:
         cached_env = cache[cache_key].get('env_fingerprint')
         current_env = _get_env_fingerprint()
         if cached_env == current_env:
             tee.write("\nSkipping dependency check (cache valid)...\n")
             tee.write("Precheck completed!\n\n")
             return
+        else:
+            tee.write("\nCache stale (environment changed) — re-running...\n")
+    elif force:
+        tee.write("\nForce precheck — ignoring cache...\n")
 
     tee.write("\nChecking dependent software...\n")
 

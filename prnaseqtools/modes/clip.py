@@ -12,7 +12,7 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, try_use_shared_star_index, save_star_index_to_reference
 
 
 def run(opts):
@@ -23,7 +23,9 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
-    prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
+    # prefix must point to the project root so that prefix/reference/{genome}_Genome
+    # resolves to ~/software/pRNASeqTools_py/reference/ (not prnaseqtools/reference/)
+    prefix = opts.get('prefix', '/Users/cjyou/software/pRNASeqTools_py')
     nomapping = opts.get('no_mapping', False)
     mappingonly = opts.get('mapping_only', False)
     foldchange = opts.get('foldchange', 2.0)
@@ -45,17 +47,19 @@ def run(opts):
             sys.exit("Please specify the 3' adaptor!")
 
         tee.write("\nBuilding STAR genome index ...\n")
-        if os.path.exists("Genome"):
-            run_cmd("rm -rf Genome")
-        os.makedirs("Genome", exist_ok=True)
+        if not try_use_shared_star_index(genome, prefix, "Genome", tee):
+            if os.path.exists("Genome"):
+                run_cmd("rm -rf Genome")
+            os.makedirs("Genome", exist_ok=True)
 
-        gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
-        fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
+            gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
+            fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
 
-        run_cmd(
-            f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
-            f"--genomeFastaFiles {fasta_path} --sjdbGTFfile {gff_path} "
-            f"--sjdbGTFtagExonParentTranscript Parent --sjdbGTFtagExonParentGene ID")
+            run_cmd(
+                f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
+                f"--genomeFastaFiles {fasta_path} --sjdbGTFfile {gff_path} "
+                f"--sjdbGTFtagExonParentTranscript Parent --sjdbGTFtagExonParentGene ID --genomeSAindexNbases 10 --sjdbOverhang 99 --limitGenomeGenerateRAM 64000000000")
+            save_star_index_to_reference(genome, prefix, "Genome", tee)
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -75,9 +79,10 @@ def run(opts):
                         f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
+                        f"--outFileNamePrefix {tag}_ "
                         f"--readFilesIn {tag}_trimmed.fastq")
-                    if os.path.exists("Unmapped.out.mate1"):
-                        os.rename("Unmapped.out.mate1", f"{tag}.unmapped.fastq")
+                    if os.path.exists(f"{tag}_Unmapped.out.mate1"):
+                        os.rename(f"{tag}_Unmapped.out.mate1", f"{tag}.unmapped.fastq")
                     for fname in (f"{tag}.fastq", f"{tag}_trimmed.fastq"):
                         if os.path.exists(fname):
                             os.unlink(fname)
@@ -93,11 +98,12 @@ def run(opts):
                         f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
+                        f"--outFileNamePrefix {tag}_ "
                         f"--readFilesIn {tag}_R1_trimmed.fastq {tag}_R2_trimmed.fastq")
-                    if os.path.exists("Unmapped.out.mate1"):
-                        os.rename("Unmapped.out.mate1", f"{tag}.unmapped_R1.fastq")
-                    if os.path.exists("Unmapped.out.mate2"):
-                        os.rename("Unmapped.out.mate2", f"{tag}.unmapped_R2.fastq")
+                    if os.path.exists(f"{tag}_Unmapped.out.mate1"):
+                        os.rename(f"{tag}_Unmapped.out.mate1", f"{tag}.unmapped_R1.fastq")
+                    if os.path.exists(f"{tag}_Unmapped.out.mate2"):
+                        os.rename(f"{tag}_Unmapped.out.mate2", f"{tag}.unmapped_R2.fastq")
                     for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
                         gzip_fastq(_f)
                     for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
@@ -116,20 +122,21 @@ def run(opts):
                     f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                     f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
                     f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
+                    f"--outFileNamePrefix {tag}_ "
                     f"--readFilesIn {tag}_R1_trimmed.fastq {tag}_R2_trimmed.fastq")
-                if os.path.exists("Unmapped.out.mate1"):
-                    os.rename("Unmapped.out.mate1", f"{tag}.unmapped_R1.fastq")
-                if os.path.exists("Unmapped.out.mate2"):
-                    os.rename("Unmapped.out.mate2", f"{tag}.unmapped_R2.fastq")
+                if os.path.exists(f"{tag}_Unmapped.out.mate1"):
+                    os.rename(f"{tag}_Unmapped.out.mate1", f"{tag}.unmapped_R1.fastq")
+                if os.path.exists(f"{tag}_Unmapped.out.mate2"):
+                    os.rename(f"{tag}_Unmapped.out.mate2", f"{tag}.unmapped_R2.fastq")
                     for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
                         gzip_fastq(_f)
                     for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
                         if os.path.exists(_f):
                             os.unlink(_f)
 
-            os.rename("Aligned.sortedByCoord.out.bam", f"{tag}.bam")
-            if os.path.exists("Log.final.out"):
-                with open("Log.final.out") as lf:
+            os.rename(f"{tag}_Aligned.sortedByCoord.out.bam", f"{tag}.bam")
+            if os.path.exists(f"{tag}_Log.final.out"):
+                with open(f"{tag}_Log.final.out") as lf:
                     tee.write(lf.read())
 
             run_cmd(f"samtools index {tag}.bam")
@@ -143,10 +150,15 @@ def run(opts):
                 f"--processors={thread} --threshold-method=binomial --min_width=20 "
                 f"-o {tag}.fitted_clusters.bed -v")
 
-        for fname in ("Log.out", "Log.progress.out", "Log.final.out", "SJ.out.tab"):
+        for fname in globmod.glob("*_Log.out") + globmod.glob("*_Log.progress.out") + \
+                     globmod.glob("*_Log.final.out") + globmod.glob("*_SJ.out.tab") + \
+                     globmod.glob("*_Aligned.sortedByCoord.out.bam") + \
+                     globmod.glob("*_Aligned.out.sam") + \
+                     globmod.glob("*_ReadsUnmapped*.fastq") + globmod.glob("*_ReadsUnmapped*.fq") + \
+                     globmod.glob("*_Unmapped.out.mate1") + globmod.glob("*_Unmapped.out.mate2"):
             if os.path.exists(fname):
                 os.unlink(fname)
-        if os.path.exists("Genome"):
+        if os.path.exists("Genome") and not os.path.islink("Genome"):
             run_cmd("rm -rf Genome")
 
         if not mappingonly and len(pars) > 1:

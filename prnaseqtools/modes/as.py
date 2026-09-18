@@ -218,7 +218,7 @@ def _do_mapping(tags, files, pars, ref_fasta, genome_size,
                f"--genomeDir {star_idx} "
                f"--genomeFastaFiles {ref_fasta} "
                f"--runThreadN {thread} "
-               f"--genomeSAindexNbases {genome_size}")
+               f"--genomeSAindexNbases {genome_size} --sjdbOverhang 99 --limitGenomeGenerateRAM 64000000000")
         run_cmd(cmd, tee)
 
     for i, tag in enumerate(tags):

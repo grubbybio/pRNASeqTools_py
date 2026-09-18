@@ -14,7 +14,7 @@ from collections import defaultdict
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
                                         _resolve_path)
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, try_use_shared_star_index, save_star_index_to_reference
 from prnaseqtools import reference as ref
 
 
@@ -26,7 +26,9 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
-    prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
+    # prefix must point to the project root so that prefix/reference/{genome}_Genome
+    # resolves to ~/software/pRNASeqTools_py/reference/ (not prnaseqtools/reference/)
+    prefix = opts.get('prefix', '/Users/cjyou/software/pRNASeqTools_py')
     nomapping = opts.get('no_mapping', False)
     reference = opts.get('ref_file', 'genome')
     read_length = opts.get('readlength', 50)
@@ -92,16 +94,20 @@ def run(opts):
                 gff_fh.write(f"{gene_id}\treference\texon\t1\t{length}\t.\t+\t.\t"
                            f"ID={gene_id}:exon:1;Parent={gene_id}.{tid}\n")
 
-        # STAR index
-        if os.path.exists("Genome"):
-            run_cmd("rm -rf Genome")
-        os.makedirs("Genome", exist_ok=True)
+        # STAR index — task-specific (reference.fa/gff are filtered gene sets).
+        # We still check reference/{genome}_Genome in case the user pre-built
+        # an index matching this mode's reference.fa/gff.
+        if not try_use_shared_star_index(genome, prefix, "Genome", tee):
+            if os.path.exists("Genome"):
+                run_cmd("rm -rf Genome")
+            os.makedirs("Genome", exist_ok=True)
 
-        run_cmd(
-            f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
-            f"--genomeFastaFiles reference.fa --sjdbGTFfile reference.gff "
-            f"--sjdbGTFtagExonParentTranscript Parent --sjdbGTFtagExonParentGene ID "
-            f"--limitGenomeGenerateRAM 64000000000 --genomeSAindexNbases 5")
+            run_cmd(
+                f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
+                f"--genomeFastaFiles reference.fa --sjdbGTFfile reference.gff "
+                f"--sjdbGTFtagExonParentTranscript Parent --sjdbGTFtagExonParentGene ID "
+                f"--sjdbOverhang 99 --limitGenomeGenerateRAM 64000000000 --genomeSAindexNbases 5")
+            save_star_index_to_reference(genome, prefix, "Genome", tee)
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -124,6 +130,7 @@ def run(opts):
                         f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
+                        f"--outFileNamePrefix {tag}_ "
                         f"--readFilesIn {tag}.fastq")
                     gzip_fastq(f"{tag}.fastq")
                 else:
@@ -142,6 +149,7 @@ def run(opts):
                         f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                         f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
                         f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
+                        f"--outFileNamePrefix {tag}_ "
                         f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
                     for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
                         gzip_fastq(_f)
@@ -161,13 +169,14 @@ def run(opts):
                     f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
                     f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
                     f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
+                    f"--outFileNamePrefix {tag}_ "
                     f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
                 for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
                         gzip_fastq(_f)
 
-            run_cmd(f"samtools view -h Aligned.sortedByCoord.out.bam > {tag}.sam")
-            if os.path.exists("Log.final.out"):
-                with open("Log.final.out") as lf:
+            run_cmd(f"samtools view -h {tag}_Aligned.sortedByCoord.out.bam > {tag}.sam")
+            if os.path.exists(f"{tag}_Log.final.out"):
+                with open(f"{tag}_Log.final.out") as lf:
                     tee.write(lf.read())
 
             # Count reads per gene
@@ -237,7 +246,7 @@ def run(opts):
             run_cmd(f"samtools view -Sb {tag}.filtered.sam > {tag}.filtered.bam")
             run_cmd(f"samtools index {tag}.filtered.bam")
 
-            for fname in ("Aligned.sortedByCoord.out.bam", f"{tag}.sam", f"{tag}.filtered.sam"):
+            for fname in (f"{tag}_Aligned.sortedByCoord.out.bam", f"{tag}.sam", f"{tag}.filtered.sam"):
                 if os.path.exists(fname):
                     os.unlink(fname)
 
@@ -249,8 +258,12 @@ def run(opts):
         for fname in ("reference.fa", "reference.gff"):
             if os.path.exists(fname):
                 os.unlink(fname)
-        for fname in globmod.glob("Log.*") + ["SJ.out.tab"]:
+        for fname in globmod.glob("*_Log.out") + globmod.glob("*_Log.progress.out") + \
+                     globmod.glob("*_Log.final.out") + globmod.glob("*_SJ.out.tab") + \
+                     globmod.glob("*_Aligned.sortedByCoord.out.bam") + \
+                     globmod.glob("*_Aligned.out.sam") + \
+                     globmod.glob("*_ReadsUnmapped*.fastq") + globmod.glob("*_ReadsUnmapped*.fq"):
             if os.path.exists(fname):
                 os.unlink(fname)
-        if os.path.exists("Genome"):
+        if os.path.exists("Genome") and not os.path.islink("Genome"):
             run_cmd("rm -rf Genome")

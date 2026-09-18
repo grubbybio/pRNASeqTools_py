@@ -59,6 +59,8 @@ def build_parser():
                         help='Auto-install missing dependencies (default)')
     parser.add_argument('--no-auto-install', action='store_false', dest='auto_install',
                         help='Disable automatic dependency installation')
+    parser.add_argument('--force-precheck', action='store_true', default=False,
+                        help='Force re-run dependency check (ignore stale cache)')
 
     sub = parser.add_subparsers(dest='mode', title='Analysis modes')
 
@@ -477,7 +479,7 @@ def main():
         _cleanup_log = False
 
         auto_install = getattr(args, 'auto_install', True)
-        check_dependencies(auto_install=auto_install, mode=args.mode, genome=args.genome)
+        check_dependencies(auto_install=auto_install, mode=args.mode, genome=args.genome, force=getattr(args, "force_precheck", False))
 
         # Convert namespace to dict
         opts = vars(args)

@@ -18,7 +18,7 @@ from pathlib import Path
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
                                         _resolve_path)
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, try_use_shared_star_index, save_star_index_to_reference
 
 
 def run(opts):
@@ -29,7 +29,9 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
-    prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
+    # prefix must point to the project root so that prefix/reference/{genome}_Genome
+    # resolves to ~/software/pRNASeqTools_py/reference/ (not prnaseqtools/reference/)
+    prefix = opts.get('prefix', '/Users/cjyou/software/pRNASeqTools_py')
     run_mode = opts.get('run_mode', 'whole')
     control = opts.get('control', '')
     treatment = opts.get('treatment')
@@ -104,18 +106,22 @@ def run(opts):
         # ── Build STAR index (shared for FASTQ and cell-tagged BAM) ──
         tee.write("\nBuilding STARsolo genome index ...\n")
 
-        if os.path.exists("Genome"):
-            run_cmd("rm -rf Genome")
-        os.makedirs("Genome", exist_ok=True)
-
+        # Define reference paths first — they are also needed by the gffread call
+        # below even when try_use_shared_star_index returns True.
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
 
-        run_cmd(
-            f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
-            f"--genomeSAindexNbases {genome_size} --genomeFastaFiles {fasta_path} "
-            f"--sjdbGTFfile {gff_path} --sjdbGTFtagExonParentTranscript Parent "
-            f"--sjdbGTFtagExonParentGene ID --limitGenomeGenerateRAM 64000000000")
+        if not try_use_shared_star_index(genome, prefix, "Genome", tee):
+            if os.path.exists("Genome"):
+                run_cmd("rm -rf Genome")
+            os.makedirs("Genome", exist_ok=True)
+
+            run_cmd(
+                f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
+                f"--genomeSAindexNbases {genome_size} --genomeFastaFiles {fasta_path} "
+                f"--sjdbGTFfile {gff_path} --sjdbGTFtagExonParentTranscript Parent "
+                f"--sjdbGTFtagExonParentGene ID --sjdbOverhang 99 --limitGenomeGenerateRAM 64000000000")
+            save_star_index_to_reference(genome, prefix, "Genome", tee)
 
         gtf_file = f"{genome}_genes.gtf"
         run_cmd(f"gffread -T -o {gtf_file} -g {fasta_path} {gff_path}")
@@ -197,6 +203,7 @@ def run(opts):
                 f"--outFilterMultimapNmax 50 "
                 f"--outFilterMismatchNoverLmax 0.1 "
                 f"--runThreadN {thread} "
+                f"--outFileNamePrefix {tag}_ "
                 f"--soloOutDir {solo_outdir} "
                 f"--soloCBwhitelist None "
                 f"--soloCellFilter EmptyDroplets "
@@ -212,8 +219,8 @@ def run(opts):
             run_cmd(star_cmd)
 
             # Show mapping stats
-            if os.path.exists("Log.final.out"):
-                with open("Log.final.out") as lf:
+            if os.path.exists(f"{tag}_Log.final.out"):
+                with open(f"{tag}_Log.final.out") as lf:
                     tee.write(lf.read())
 
             # Clean up raw FASTQ files
@@ -223,10 +230,14 @@ def run(opts):
                     os.unlink(fname)
 
         # Clean up STAR files
-        for fname in ("Log.out", "Log.progress.out", "Log.final.out", "SJ.out.tab"):
+        for fname in globmod.glob("*_Log.out") + globmod.glob("*_Log.progress.out") + \
+                     globmod.glob("*_Log.final.out") + globmod.glob("*_SJ.out.tab") + \
+                     globmod.glob("*_Aligned.sortedByCoord.out.bam") + \
+                     globmod.glob("*_Aligned.out.sam") + \
+                     globmod.glob("*_ReadsUnmapped*.fastq") + globmod.glob("*_ReadsUnmapped*.fq"):
             if os.path.exists(fname):
                 os.unlink(fname)
-        if os.path.exists("Genome"):
+        if os.path.exists("Genome") and not os.path.islink("Genome"):
             run_cmd("rm -rf Genome")
 
         # ── Convert STARsolo output and BAM counts to .rds ───────────────
@@ -462,18 +473,20 @@ def _quantify_celltagged_bam(tag, thread, gtf_file, prefix, genome):
     tee = _tee()
     bam_file = f"{tag}.bam"
 
-    # STARsolo quant mode: needs genome index. Build if missing.
+    # STARsolo quant mode: needs genome index. Reuse shared if available.
     if not os.path.exists("Genome"):
-        tee.write("  Building STAR genome index for quantification...\n")
-        os.makedirs("Genome", exist_ok=True)
-        gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
-        fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
-        run_cmd(
-            f"STAR --runThreadN {thread} --genomeDir Genome --seedSearchStartLmax 25 "
-            f"--runMode genomeGenerate "
-            f"--genomeSAindexNbases 10 --genomeFastaFiles {fasta_path} "
-            f"--sjdbGTFfile {gtf_file} --limitGenomeGenerateRAM 64000000000"
-        )
+        if not try_use_shared_star_index(genome, prefix, "Genome", tee):
+            tee.write("  Building STAR genome index for quantification...\n")
+            os.makedirs("Genome", exist_ok=True)
+            gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
+            fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
+            run_cmd(
+                f"STAR --runThreadN {thread} --genomeDir Genome --seedSearchStartLmax 25 "
+                f"--runMode genomeGenerate "
+                f"--genomeSAindexNbases 10 --genomeFastaFiles {fasta_path} "
+                f"--sjdbGTFfile {gtf_file} --sjdbOverhang 99 --limitGenomeGenerateRAM 64000000000"
+            )
+            save_star_index_to_reference(genome, prefix, "Genome", tee)
 
     tee.write(f"  Running STARsolo quant for {tag}...\n")
     solo_outdir = f"Solo_out/{tag}"

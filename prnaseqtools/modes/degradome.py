@@ -13,7 +13,7 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee, run_cmd, gzip_fastq
+from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee, run_cmd, gzip_fastq, try_use_shared_star_index, save_star_index_to_reference
 from prnaseqtools import reference as ref
 
 
@@ -25,7 +25,9 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
-    prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
+    # prefix must point to the project root so that prefix/reference/{genome}_Genome
+    # resolves to ~/software/pRNASeqTools_py/reference/ (not prnaseqtools/reference/)
+    prefix = opts.get('prefix', '/Users/cjyou/software/pRNASeqTools_py')
     nomapping = opts.get('no_mapping', False)
     mappingonly = opts.get('mapping_only', False)
     targets = opts.get('targets', 'all')
@@ -53,24 +55,27 @@ def run(opts):
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
         run_cmd(f"gffread -T {gff_path} -o {genome}.gtf")
 
-        # Build transcriptome index
+        # Build transcriptome index (special — uses {genome}.fa, not the standard
+# {genome}_chr_all.fasta; index is task-local so we don't share across runs).
         if os.path.exists("Genome"):
             run_cmd("rm -rf Genome")
         os.makedirs("Genome", exist_ok=True)
         run_cmd(
             f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
-            f"--genomeFastaFiles {genome}.fa --limitGenomeGenerateRAM 64000000000")
+            f"--genomeFastaFiles {genome}.fa --genomeSAindexNbases 10 --limitGenomeGenerateRAM 64000000000")
 
-        # Build genome index
-        if os.path.exists("Genome2"):
-            run_cmd("rm -rf Genome2")
-        os.makedirs("Genome2", exist_ok=True)
-        fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
-        run_cmd(
-            f"STAR --runThreadN {thread} --genomeDir Genome2 --runMode genomeGenerate "
-            f"--genomeFastaFiles {fasta_path} --sjdbGTFfile {gff_path} "
-            f"--sjdbGTFtagExonParentTranscript Parent --sjdbGTFtagExonParentGene ID "
-            f"--limitGenomeGenerateRAM 64000000000")
+        # Build genome index (shared via reference/{genome}_Genome2)
+        if not try_use_shared_star_index(genome, prefix, "Genome2", tee):
+            if os.path.exists("Genome2"):
+                run_cmd("rm -rf Genome2")
+            os.makedirs("Genome2", exist_ok=True)
+            fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
+            run_cmd(
+                f"STAR --runThreadN {thread} --genomeDir Genome2 --runMode genomeGenerate "
+                f"--genomeFastaFiles {fasta_path} --sjdbGTFfile {gff_path} "
+                f"--sjdbGTFtagExonParentTranscript Parent --sjdbGTFtagExonParentGene ID --genomeSAindexNbases 10 --sjdbOverhang 99 "
+                f"--limitGenomeGenerateRAM 64000000000")
+            save_star_index_to_reference(genome, prefix, "Genome2", tee)
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -100,10 +105,11 @@ def run(opts):
                 f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
                 f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
                 f"--limitOutSJcollapsed 10000000 --limitIObufferSize 280000000 "
-                f"--runThreadN {thread} --readFilesIn {tag}.fastq")
-            os.rename("Aligned.sortedByCoord.out.bam", f"{tag}.bam")
-            if os.path.exists("Log.final.out"):
-                with open("Log.final.out") as lf:
+                f"--runThreadN {thread} --outFileNamePrefix {tag}_tx_ "
+                f"--readFilesIn {tag}.fastq")
+            os.rename(f"{tag}_tx_Aligned.sortedByCoord.out.bam", f"{tag}.bam")
+            if os.path.exists(f"{tag}_tx_Log.final.out"):
+                with open(f"{tag}_tx_Log.final.out") as lf:
                     tee.write(lf.read())
 
             run_cmd(f"samtools index {tag}.bam")
@@ -117,10 +123,11 @@ def run(opts):
                 f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
                 f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
                 f"--limitOutSJcollapsed 10000000 --limitIObufferSize 280000000 "
-                f"--runThreadN {thread} --readFilesIn {tag}.fastq")
-            os.rename("Aligned.sortedByCoord.out.bam", f"{tag}.genomic.bam")
-            if os.path.exists("Log.final.out"):
-                with open("Log.final.out") as lf:
+                f"--runThreadN {thread} --outFileNamePrefix {tag}_gn_ "
+                f"--readFilesIn {tag}.fastq")
+            os.rename(f"{tag}_gn_Aligned.sortedByCoord.out.bam", f"{tag}.genomic.bam")
+            if os.path.exists(f"{tag}_gn_Log.final.out"):
+                with open(f"{tag}_gn_Log.final.out") as lf:
                     tee.write(lf.read())
 
             run_cmd(f"samtools index {tag}.genomic.bam")
@@ -155,13 +162,18 @@ def run(opts):
                 f"Rscript --vanilla {prefix}/scripts/CRI.R {par_str}")
 
         # Cleanup
-        for fname in globmod.glob("Log.*"):
-            os.unlink(fname)
-        for fname in ("SJ.out.tab", f"{genome}.fa", f"{genome}.gtf", f"{genome}.fa.fai"):
+        for fname in globmod.glob("*_Log.out") + globmod.glob("*_Log.progress.out") + \
+                     globmod.glob("*_Log.final.out") + globmod.glob("*_SJ.out.tab") + \
+                     globmod.glob("*_Aligned.sortedByCoord.out.bam") + \
+                     globmod.glob("*_Aligned.out.sam") + \
+                     globmod.glob("*_ReadsUnmapped*.fastq") + globmod.glob("*_ReadsUnmapped*.fq"):
+            if os.path.exists(fname):
+                os.unlink(fname)
+        for fname in (f"{genome}.fa", f"{genome}.gtf", f"{genome}.fa.fai"):
             if os.path.exists(fname):
                 os.unlink(fname)
         for d in ("Genome", "Genome2"):
-            if os.path.exists(d):
+            if os.path.exists(d) and not os.path.islink(d):
                 run_cmd(f"rm -rf {d}")
 
     else:

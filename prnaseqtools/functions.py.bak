@@ -8,7 +8,6 @@ import re
 import math
 import subprocess
 import sys
-import shutil
 
 
 # ── Helper to get the TEE output handle ──────────────────────────────────

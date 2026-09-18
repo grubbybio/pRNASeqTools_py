@@ -27,7 +27,7 @@ from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, try_use_shared_star_index, save_star_index_to_reference
 
 
 # ── Helper: detect last completed step from log ────────────────────────────
@@ -130,7 +130,9 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
-    prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
+    # prefix must point to the project root so that prefix/reference/{genome}_Genome
+    # resolves to ~/software/pRNASeqTools_py/reference/ (not prnaseqtools/reference/)
+    prefix = opts.get('prefix', '/Users/cjyou/software/pRNASeqTools_py')
 
     # ── RIBO Taper-specific options ──────────────────────────────────
     contam = opts.get('contam')                # contamination fasta
@@ -466,15 +468,17 @@ def run(opts):
 
         # Build STAR genome index for RNA-seq
         star_rna_index = "STAR_RNA_index"
-        if os.path.exists(star_rna_index):
-            run_cmd(f"rm -rf {star_rna_index}")
-        os.makedirs(star_rna_index, exist_ok=True)
+        if not try_use_shared_star_index(genome, prefix, star_rna_index, tee):
+            if os.path.exists(star_rna_index):
+                run_cmd(f"rm -rf {star_rna_index}")
+            os.makedirs(star_rna_index, exist_ok=True)
 
-        run_cmd(
-            f"STAR --runThreadN {thread} --runMode genomeGenerate "
-            f"--genomeDir {star_rna_index} --genomeFastaFiles {fasta_path} "
-            f"--sjdbGTFfile {anno_path} --sjdbOverhang 99 "
-            f"--limitGenomeGenerateRAM 64000000000")
+            run_cmd(
+                f"STAR --runThreadN {thread} --runMode genomeGenerate "
+                f"--genomeDir {star_rna_index} --genomeSAindexNbases 10 --genomeFastaFiles {fasta_path} "
+                f"--sjdbGTFfile {anno_path} --sjdbOverhang 99 "
+                f"--limitGenomeGenerateRAM 64000000000")
+            save_star_index_to_reference(genome, prefix, star_rna_index, tee)
 
         # STAR 1st pass for each RNA-seq sample
         star_sj_dir = "STAR_SJ"
@@ -733,7 +737,7 @@ def run(opts):
 
         run_cmd(
             f"STAR --runThreadN {thread} --runMode genomeGenerate "
-            f"--genomeDir {star_ribo_idx} --genomeFastaFiles {fasta_path} "
+            f"--genomeDir {star_ribo_idx} --genomeSAindexNbases 10 --genomeFastaFiles {fasta_path} "
             f"--sjdbGTFfile {expressed_gtf} --sjdbOverhang {ribo_overhang} "
             f"--limitGenomeGenerateRAM 64000000000")
 
@@ -773,7 +777,7 @@ def run(opts):
 
         run_cmd(
             f"STAR --runThreadN {thread} --runMode genomeGenerate "
-            f"--genomeDir {star_rna_new_idx} --genomeFastaFiles {fasta_path} "
+            f"--genomeDir {star_rna_new_idx} --genomeSAindexNbases 10 --genomeFastaFiles {fasta_path} "
             f"--sjdbGTFfile {expressed_gtf} --sjdbOverhang 99 "
             f"--limitGenomeGenerateRAM 64000000000")
 
