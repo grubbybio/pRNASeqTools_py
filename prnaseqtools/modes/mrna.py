@@ -13,7 +13,7 @@ from pathlib import Path
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
                                         _resolve_path)
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, try_use_shared_star_index, save_star_index_to_reference
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, preserve_raw_fastq, try_use_shared_star_index, save_star_index_to_reference
 
 
 def run(opts):
@@ -98,10 +98,11 @@ def run(opts):
 
             if ',' not in fpath:
                 # Single-end or paired from SRA
-                sra_results = download_sra(fpath, thread)
+                sra_results, from_sra = download_sra(fpath, thread)
                 if len(sra_results) == 1:
                     seq_strategy = 'single'
                     unzip_file(sra_results[0], tag)
+                    preserve_raw_fastq(from_sra, tag, paired=False)
 
                     # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
                     tee.write("\nTrimming (fastp)...\n")
@@ -134,12 +135,14 @@ def run(opts):
                     if os.path.exists(f"{tag}_Log.final.out"):
                         with open(f"{tag}_Log.final.out") as lf:
                             tee.write(lf.read())
-                    gzip_fastq(f"{tag}.fastq")
+                    if from_sra:
+                        gzip_fastq(f"{tag}.raw.fastq")
                 else:
                     # Paired from SRA
                     seq_strategy = 'paired'
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
+                    preserve_raw_fastq(from_sra, tag, paired=True)
 
                     # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
                     tee.write("\nTrimming (fastp)...\n")
@@ -172,10 +175,11 @@ def run(opts):
                         f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
                         f"--runThreadN {thread} --outFileNamePrefix {tag}_ "
                         f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
-                    for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
-                        gzip_fastq(_f)
+                    if from_sra:
+                        for _f in (f"{tag}_R1.raw.fastq", f"{tag}_R2.raw.fastq"):
+                            gzip_fastq(_f)
             else:
-                # Explicit paired-end
+                # Explicit paired-end (local files; no SRA preservation)
                 f1, f2 = fpath.split(',')
                 seq_strategy = 'paired'
                 unzip_file(f1, f"{tag}_R1")
@@ -213,8 +217,6 @@ def run(opts):
                     f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
                     f"--outFileNamePrefix {tag}_ "
                     f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
-                for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
-                        gzip_fastq(_f)
 
             os.rename(f"{tag}_Aligned.sortedByCoord.out.bam", f"{tag}.bam")
 

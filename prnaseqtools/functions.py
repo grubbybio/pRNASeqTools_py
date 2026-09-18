@@ -78,12 +78,14 @@ def download_sra(srr, threads=4):
     """
     Download SRA file if input is an SRR accession.
     Two-step: prefetch (parallel FTP download) → fasterq-dump (local conversion).
-    Returns file path(s): single-end returns (file,), paired-end returns (r1, r2).
+    Returns (file_paths_tuple, from_sra_bool).
+      - from_sra=False: input was a local file or already-existing path
+      - from_sra=True : input was an SRR accession and was downloaded via prefetch
     """
     import shutil
     m = re.search(r'([SED]RR\d+)', srr)
     if not m or os.path.exists(srr):
-        return (srr,)
+        return (srr,), False
 
     srr_id = m.group(1)
     tee = _tee()
@@ -123,19 +125,41 @@ def download_sra(srr, threads=4):
         # True paired-end
         if os.path.exists(f"{srr_id}.fastq"):
             os.unlink(f"{srr_id}.fastq")
-        return (f"{srr_id}_1.fastq", f"{srr_id}_2.fastq")
+        return (f"{srr_id}_1.fastq", f"{srr_id}_2.fastq"), True
     elif has_r1 and not has_r2:
         # PE data but R2 was all 0-length / empty — R1 only
         tee.write("Warning: R2 reads are empty (0-length), treating as single-end\n")
-        return (f"{srr_id}_1.fastq",)
+        return (f"{srr_id}_1.fastq",), True
     else:
         # Single-end (or fallback to interleaved)
         if os.path.exists(f"{srr_id}.fastq"):
-            return (f"{srr_id}.fastq",)
+            return (f"{srr_id}.fastq",), True
         raise FileNotFoundError(
             f"fasterq-dump produced no FASTQ output for {srr_id}. "
             f"Expected {srr_id}.fastq or {srr_id}_1.fastq"
         )
+
+
+def preserve_raw_fastq(from_sra, tag, paired=False):
+    """
+    After unzip_file() produced {tag}.fastq (and optionally {tag}_R1.fastq / {tag}_R2.fastq),
+    if the source was SRA/prefetch, move the raw unzipped file aside as {tag}.raw.fastq
+    (and {tag}_R1.raw.fastq / {tag}_R2.raw.fastq), then re-create {tag}.fastq as a symlink
+    pointing to the raw file. Downstream tools (fastp, STAR, bowtie2) follow the symlink
+    transparently; later os.rename() onto {tag}.fastq replaces the symlink with the
+    trimmed file, leaving the raw file intact for later gzip preservation.
+
+    No-op when from_sra is False (local files are not preserved).
+    """
+    if not from_sra:
+        return
+    targets = [f"{tag}_R1.fastq", f"{tag}_R2.fastq"] if paired else [f"{tag}.fastq"]
+    for t in targets:
+        if not os.path.exists(t) or os.path.islink(t):
+            continue
+        raw = t.replace(".fastq", ".raw.fastq")
+        os.rename(t, raw)
+        os.symlink(raw, t)
 
 
 # ── Statistics ───────────────────────────────────────────────────────────

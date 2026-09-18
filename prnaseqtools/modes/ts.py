@@ -69,7 +69,7 @@ def run(opts):
             tee.write(f"\nMapping {tag}...\n")
 
             if ',' not in fpath:
-                sra_results = download_sra(fpath, thread)
+                sra_results, _from_sra = download_sra(fpath, thread)
                 if len(sra_results) == 1:
                     unzip_file(sra_results[0], tag)
                     run_cmd(

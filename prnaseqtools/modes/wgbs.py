@@ -13,7 +13,7 @@ from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, preserve_raw_fastq
 
 
 def run(opts):
@@ -61,9 +61,10 @@ def run(opts):
             tee.write(f"\nMapping {tag}...\n")
 
             if ',' not in fpath:
-                sra_results = download_sra(fpath, thread)
+                sra_results, from_sra = download_sra(fpath, thread)
                 if len(sra_results) == 1:
                     unzip_file(sra_results[0], tag)
+                    preserve_raw_fastq(from_sra, tag, paired=False)
                     if adaptor:
                         tee.write("\nStart trimming...\r")
                         run_cmd(
@@ -85,13 +86,15 @@ def run(opts):
                     run_cmd(
                         f"bismark_methylation_extractor --parallel {thread} -s --bedGraph "
                         f"--cutoff 4 --cytosine_report --CX --genome_folder . {tag}.bam")
-                    gzip_fastq(f"{tag}.fastq")
+                    if from_sra:
+                        gzip_fastq(f"{tag}.raw.fastq")
                     for fname in (f"{tag}_bismark_bt2.bam",):
                         if os.path.exists(fname):
                             os.unlink(fname)
                 else:
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
+                    preserve_raw_fastq(from_sra, tag, paired=True)
                     if adaptor:
                         run_cmd(
                             f"fastp -w {thread} --length_required 20 "
@@ -117,8 +120,9 @@ def run(opts):
                     run_cmd(
                         f"bismark_methylation_extractor --parallel {thread} -p --bedGraph "
                         f"--cutoff 4 --cytosine_report --CX --genome_folder . {tag}.bam")
-                    for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
-                        gzip_fastq(_f)
+                    if from_sra:
+                        for _f in (f"{tag}_R1.raw.fastq", f"{tag}_R2.raw.fastq"):
+                            gzip_fastq(_f)
                     for fname in (f"{tag}_R1_bismark_bt2_pe.bam",):
                         if os.path.exists(fname):
                             os.unlink(fname)

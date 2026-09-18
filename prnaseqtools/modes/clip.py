@@ -12,7 +12,7 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, try_use_shared_star_index, save_star_index_to_reference
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, preserve_raw_fastq, try_use_shared_star_index, save_star_index_to_reference
 
 
 def run(opts):
@@ -68,9 +68,10 @@ def run(opts):
             tee.write(f"\nMapping {tag}...\n")
 
             if ',' not in fpath:
-                sra_results = download_sra(fpath, thread)
+                sra_results, from_sra = download_sra(fpath, thread)
                 if len(sra_results) == 1:
                     unzip_file(sra_results[0], tag)
+                    preserve_raw_fastq(from_sra, tag, paired=False)
                     run_cmd(
                         f"fastp -w {thread} --length_required 18 "
                         f"-i {tag}.fastq -o {tag}_trimmed.fastq --adapter_sequence {adaptor}")
@@ -83,12 +84,15 @@ def run(opts):
                         f"--readFilesIn {tag}_trimmed.fastq")
                     if os.path.exists(f"{tag}_Unmapped.out.mate1"):
                         os.rename(f"{tag}_Unmapped.out.mate1", f"{tag}.unmapped.fastq")
-                    for fname in (f"{tag}.fastq", f"{tag}_trimmed.fastq"):
+                    for fname in (f"{tag}_trimmed.fastq",):
                         if os.path.exists(fname):
                             os.unlink(fname)
+                    if from_sra:
+                        gzip_fastq(f"{tag}.raw.fastq")
                 else:
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
+                    preserve_raw_fastq(from_sra, tag, paired=True)
                     run_cmd(
                         f"fastp -w {thread} --length_required 18 "
                         f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
@@ -104,11 +108,12 @@ def run(opts):
                         os.rename(f"{tag}_Unmapped.out.mate1", f"{tag}.unmapped_R1.fastq")
                     if os.path.exists(f"{tag}_Unmapped.out.mate2"):
                         os.rename(f"{tag}_Unmapped.out.mate2", f"{tag}.unmapped_R2.fastq")
-                    for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
-                        gzip_fastq(_f)
                     for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
                         if os.path.exists(_f):
                             os.unlink(_f)
+                    if from_sra:
+                        for _f in (f"{tag}_R1.raw.fastq", f"{tag}_R2.raw.fastq"):
+                            gzip_fastq(_f)
             else:
                 f1, f2 = fpath.split(',')
                 unzip_file(f1, f"{tag}_R1")
@@ -128,11 +133,9 @@ def run(opts):
                     os.rename(f"{tag}_Unmapped.out.mate1", f"{tag}.unmapped_R1.fastq")
                 if os.path.exists(f"{tag}_Unmapped.out.mate2"):
                     os.rename(f"{tag}_Unmapped.out.mate2", f"{tag}.unmapped_R2.fastq")
-                    for _f in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
-                        gzip_fastq(_f)
-                    for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
-                        if os.path.exists(_f):
-                            os.unlink(_f)
+                for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
+                    if os.path.exists(_f):
+                        os.unlink(_f)
 
             os.rename(f"{tag}_Aligned.sortedByCoord.out.bam", f"{tag}.bam")
             if os.path.exists(f"{tag}_Log.final.out"):

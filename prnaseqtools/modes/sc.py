@@ -161,7 +161,7 @@ def run(opts):
                 continue
 
             # ── FASTQ input ──
-            sra_results = download_sra(fpath, thread)
+            sra_results, _from_sra = download_sra(fpath, thread)
             if len(sra_results) == 1:
                 seq_strategy = 'single'
                 unzip_file(sra_results[0], tag)

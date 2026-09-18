@@ -24,7 +24,7 @@ from pathlib import Path
 
 from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
                                         _resolve_path)
-from prnaseqtools.functions import (_tee, run_cmd, download_sra, unzip_file, gzip_fastq, try_use_shared_star_index, save_star_index_to_reference)
+from prnaseqtools.functions import (_tee, run_cmd, download_sra, unzip_file, gzip_fastq, preserve_raw_fastq, try_use_shared_star_index, save_star_index_to_reference)
 
 
 def run(opts):
@@ -194,10 +194,11 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
         # ── Resolve fastqs ──
         if ',' not in fpath:
             # Single: could be SRA or local fastq
-            sra = download_sra(fpath, thread)
+            sra, from_sra = download_sra(fpath, thread)
             if len(sra) == 1:
                 seq_strategy = 'single'
                 unzip_file(sra[0], tag)
+                preserve_raw_fastq(from_sra, tag, paired=False)
                 # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
                 fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
                 run_cmd(
@@ -221,7 +222,8 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
                     f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
                     f"--runThreadN {thread} --outFileNamePrefix {tag}_ "
                     f"--readFilesIn {tag}.fastq")
-                gzip_fastq(f"{tag}.fastq")
+                if from_sra:
+                    gzip_fastq(f"{tag}.raw.fastq")
             else:
                 # Paired SRA
                 seq_strategy = 'paired'

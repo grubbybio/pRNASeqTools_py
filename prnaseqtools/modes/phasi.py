@@ -67,7 +67,7 @@ def run(opts):
                 tee.write(f"  Total reads: {bam_count}\n")
                 continue
 
-            sra_results = download_sra(fpath, thread)
+            sra_results, _from_sra = download_sra(fpath, thread)
             unzip_file(sra_results[0], tag)
 
             tee.write(f"\nTrimming (fastp) {tag}...\n")

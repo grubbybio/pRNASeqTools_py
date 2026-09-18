@@ -27,7 +27,7 @@ from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, try_use_shared_star_index, save_star_index_to_reference
+from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, preserve_raw_fastq, try_use_shared_star_index, save_star_index_to_reference
 
 
 # ── Helper: detect last completed step from log ────────────────────────────
@@ -329,7 +329,7 @@ def run(opts):
 
             if ',' not in fpath:
                 # Download / unzip (SRA or single file)
-                sra_results = download_sra(fpath, thread)
+                sra_results, from_sra = download_sra(fpath, thread)
                 is_paired = len(sra_results) > 1
 
                 if is_paired:
@@ -342,6 +342,7 @@ def run(opts):
                     r1_fq = f"{tag}.fastq"
             else:
                 # Explicit paired-end (file1,file2)
+                from_sra = False
                 is_paired = True
                 f1, f2 = fpath.split(',')
                 unzip_file(f1, f"{tag}_r1")
@@ -438,11 +439,12 @@ def run(opts):
                     if os.path.exists(fname):
                         os.unlink(fname)
 
-            if not is_paired:
-                gzip_fastq(f"{tag}.fastq")
-            if is_paired:
-                gzip_fastq(f"{tag}_r1.fastq")
-                gzip_fastq(f"{tag}_r2.fastq")
+            if from_sra:
+                if not is_paired:
+                    gzip_fastq(f"{tag}.fastq")
+                if is_paired:
+                    gzip_fastq(f"{tag}_r1.fastq")
+                    gzip_fastq(f"{tag}_r2.fastq")
 
         tee.write("\n  Ribo-seq decontamination complete.\n")
         tee.write("  STEP 2 COMPLETE\n")
@@ -488,7 +490,7 @@ def run(opts):
             tee.write(f"\n  --- RNA-seq STAR 1st pass: {tag} ---\n")
 
             if ',' not in fpath:
-                sra_r = download_sra(fpath, thread)
+                sra_r, _from_sra_rna = download_sra(fpath, thread)
                 rna_paired = len(sra_r) > 1
 
                 if rna_paired:

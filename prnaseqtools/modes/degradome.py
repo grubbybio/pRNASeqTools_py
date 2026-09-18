@@ -13,7 +13,7 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee, run_cmd, gzip_fastq, try_use_shared_star_index, save_star_index_to_reference
+from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee, run_cmd, gzip_fastq, preserve_raw_fastq, try_use_shared_star_index, save_star_index_to_reference
 from prnaseqtools import reference as ref
 
 
@@ -83,8 +83,9 @@ def run(opts):
 
             tee.write(f"\nWorking on {tag}...\n")
 
-            sra_results = download_sra(fpath, thread)
+            sra_results, from_sra = download_sra(fpath, thread)
             unzip_file(sra_results[0], tag)
+            preserve_raw_fastq(from_sra, tag, paired=False)
 
             # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
             tee.write("\nTrimming (fastp)...\n")
@@ -148,7 +149,8 @@ def run(opts):
                 for seq, count in fq_demux.items():
                     fh.write(f"{seq}\t{count}\n")
 
-            gzip_fastq(f"{tag}.fastq")
+            if from_sra:
+                gzip_fastq(f"{tag}.raw.fastq")
 
         if not mappingonly:
             tee.write("Finding peaks...\n")

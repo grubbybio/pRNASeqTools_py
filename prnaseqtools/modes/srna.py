@@ -120,7 +120,7 @@ def run(opts):
             if not bam_input:
 
                 # SRA download if needed
-                sra_results = download_sra(fpath, thread)
+                sra_results, _from_sra = download_sra(fpath, thread)
                 unzip_file(sra_results[0], tag)
 
                 # UMI extraction for single-cell mode

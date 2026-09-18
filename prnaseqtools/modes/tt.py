@@ -48,7 +48,7 @@ def run(opts):
 
         tee.write(f"\nMapping {tag}...\n")
 
-        sra_results = download_sra(fpath, thread)
+        sra_results, _from_sra = download_sra(fpath, thread)
         unzip_file(sra_results[0], tag)
 
         tee.write("\nTrimming (fastp)...\n")
