@@ -38,6 +38,7 @@ def run(opts):
 
     tags = []
     files = []
+    seq_strategy_map = {}
 
     control_tags = []
     input_opt = opts.get('control')
@@ -75,20 +76,24 @@ def run(opts):
     if not nomapping:
         tee.write("\nBuilding index...\n")
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
-        os.symlink(fasta_path, f"{genome}_chr_all.fasta")
+        if not os.path.exists(fasta_path):
+            sys.exit(f"Reference fasta not found: {fasta_path}")
+        if not os.path.lexists(f"{genome}_chr_all.fasta"):
+            os.symlink(fasta_path, f"{genome}_chr_all.fasta")
         run_cmd(
             f"bowtie2-build --threads {thread} -q {genome}_chr_all.fasta {genome}_chr_all")
 
         for i in range(len(tags)):
             tag = tags[i]
             fpath = files[i]
+            seq_strategy_map[tag] = seq_strategy
 
             tee.write(f"\nMapping {tag}...\n")
 
             if ',' not in fpath:
                 sra_results, from_sra = download_sra(fpath, thread)
                 if len(sra_results) == 1:
-                    seq_strategy = 'single'
+                    seq_strategy_map[tag] = 'single'
                     unzip_file(sra_results[0], tag)
                     preserve_raw_fastq(from_sra, tag, paired=False)
                     # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
@@ -96,7 +101,8 @@ def run(opts):
                     fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
                     run_cmd(
                         f"fastp -w {thread} --length_required 50 "
-                        f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
+                        f"-i {tag}.fastq -o {tag}_trimmed.fastq "
+                        f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
                     os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
                     for rep in (f"{tag}.html", f"{tag}.json"):
                         if os.path.exists(rep):
@@ -115,7 +121,8 @@ def run(opts):
                     run_cmd(
                         f"fastp -w {thread} --length_required 50 "
                         f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                    f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
                     os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                     os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                     for rep in (f"{tag}.html", f"{tag}.json"):
@@ -136,7 +143,8 @@ def run(opts):
                 run_cmd(
                     f"fastp -w {thread} --length_required 50 "
                     f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
+                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                    f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
                 os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                 os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                 for rep in (f"{tag}.html", f"{tag}.json"):
@@ -167,9 +175,10 @@ def run(opts):
 
         if not mappingonly:
             for g in treatment_groups:
+                g_strategy = seq_strategy_map.get(g['ip_tags'][0], seq_strategy)
                 if peak_caller == 'macs3':
                     _run_macs3(g['ip_tags'], control_tags,
-                               g['ip_tag'], seq_strategy, genome_size,
+                               g['ip_tag'], g_strategy, genome_size,
                                qvalue, pvalue, tee,
                                genome=genome, prefix=prefix,
                                tss_distance=tss_distance)
@@ -177,25 +186,41 @@ def run(opts):
                     genrich_ip = "-t " + ','.join(
                         f"{t}.sorted.name.bam" for t in g['ip_tags'])
                     _run_genrich(genrich_ip, genrich_input, g['ip_tag'],
-                                 seq_strategy, qvalue, pvalue, auc, tee,
+                                 g_strategy, qvalue, pvalue, auc, tee,
                                  genome=genome, prefix=prefix,
                                  tss_distance=tss_distance)
 
     else:
         for pre in tags:
-            os.symlink(f"../{pre}.sorted.name.bam", f"{pre}.sorted.name.bam")
+            if not os.path.lexists(f"{pre}.sorted.name.bam"):
+                os.symlink(f"../{pre}.sorted.name.bam", f"{pre}.sorted.name.bam")
+            if not os.path.lexists(f"{pre}.sorted.bam"):
+                os.symlink(f"../{pre}.sorted.bam", f"{pre}.sorted.bam")
+            if (os.path.exists(f"../{pre}.sorted.bam.bai")
+                    and not os.path.lexists(f"{pre}.sorted.bam.bai")):
+                os.symlink(f"../{pre}.sorted.bam.bai", f"{pre}.sorted.bam.bai")
 
         for g in treatment_groups:
-            genrich_ip = "-t " + ','.join(
-                f"{t}.sorted.name.bam" for t in g['ip_tags'])
-            _run_genrich(genrich_ip, genrich_input, g['ip_tag'],
-                         seq_strategy, qvalue, pvalue, auc, tee,
-                         genome=genome, prefix=prefix,
-                         tss_distance=tss_distance)
+            g_strategy = seq_strategy_map.get(g['ip_tags'][0], seq_strategy)
+            if peak_caller == 'macs3':
+                _run_macs3(g['ip_tags'], control_tags,
+                           g['ip_tag'], g_strategy, genome_size,
+                           qvalue, pvalue, tee,
+                           genome=genome, prefix=prefix,
+                           tss_distance=tss_distance)
+            else:
+                genrich_ip = "-t " + ','.join(
+                    f"{t}.sorted.name.bam" for t in g['ip_tags'])
+                _run_genrich(genrich_ip, genrich_input, g['ip_tag'],
+                             g_strategy, qvalue, pvalue, auc, tee,
+                             genome=genome, prefix=prefix,
+                             tss_distance=tss_distance)
 
         for pre in tags:
-            if os.path.exists(f"{pre}.sorted.name.bam"):
-                os.unlink(f"{pre}.sorted.name.bam")
+            for bam in (f"{pre}.sorted.name.bam", f"{pre}.sorted.bam",
+                        f"{pre}.sorted.bam.bai"):
+                if os.path.lexists(bam):
+                    os.unlink(bam)
 
 
 def _peak_qc(ip_tag, narrow_file, ip_bam_list, tee, caller='MACS3'):
@@ -315,7 +340,10 @@ def _run_macs3(ip_tags, control_tags,
         tee.write(f"  P-value threshold: {pvalue}\n")
         cmd += f" -p {pvalue}"
     cmd += " --bdg"
-    run_cmd(cmd)
+    ret = run_cmd(cmd, check=False)
+    if ret != 0 or not os.path.exists(f"{ip_tag}_peaks.narrowPeak"):
+        tee.write("  MACS3 model building failed; retrying with --nomodel --extsize 147\n")
+        run_cmd(cmd + " --nomodel --extsize 147")
 
     # ── Peak QC ──────────────────────────────────────────────────────────
     _peak_qc(ip_tag, f"{ip_tag}_peaks.narrowPeak", ip_bam_list, tee, caller='MACS3')
@@ -335,7 +363,7 @@ def _run_macs3(ip_tags, control_tags,
 def _run_genrich(genrich_ip, genrich_input, ip_tag, seq_strategy, qvalue, pvalue, auc, tee,
                  genome=None, prefix=None, tss_distance=3000):
     """Run Genrich peak calling + QC."""
-    command = f"Genrich -r -v {genrich_ip} {genrich_input} -o {ip_tag}.narrowPeak.txt"
+    command = f"Genrich -r -v -a {auc} {genrich_ip} {genrich_input} -o {ip_tag}.narrowPeak.txt"
 
     if seq_strategy == 'single':
         tee.write("\nSingle-end mode is On...")

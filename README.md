@@ -16,21 +16,21 @@ pRNASeqTools is a comprehensive NGS data analysis pipeline for plant genomics. I
 | Mode | Description | Key Tools |
 |------|-------------|-----------|
 | `srna` | Small RNA-seq — bulk & single-cell | ShortStack, bowtie, fastp, umi_tools |
-| `mrna` | mRNA-seq — DE analysis | STAR, featureCounts, DESeq2 |
-| `lncrna` | lncRNA-seq — transcriptome assembly & lncRNA classification | STAR, StringTie, FEELnc / PLEK2 / ORF-fallback |
-| `sc` | Single-cell RNA-seq — Seurat clustering + marker genes | STARsolo, Seurat, Harmony |
-| `degradome` | Degradome-seq (PARE/GMUCT) — miRNA target cleavage | STAR (dual-alignment), sPARTA, riboWaltz |
+| `mrna` | mRNA-seq — DE analysis | HISAT2, featureCounts, DESeq2 |
+| `lncrna` | lncRNA-seq — transcriptome assembly & lncRNA classification | HISAT2, StringTie, FEELnc / PLEK2 / ORF-fallback |
+| `sc` | Single-cell RNA-seq — Seurat clustering + marker genes | HISAT2 + featureCounts, Seurat, Harmony |
+| `degradome` | Degradome-seq (PARE/GMUCT) — miRNA target cleavage | HISAT2 (dual-alignment), sPARTA, riboWaltz |
 | `phasi` | phasiRNA analysis — phased secondary siRNA detection | ShortStack, bowtie |
 | `tt` | miRNA truncation/tailing analysis | bowtie (iterative), ShortStack |
-| `ribo` | Ribo-seq — translated ORF detection + Translation Efficiency | Bowtie2, STAR, StringTie, RSEM, RiboTaper, DESeq2 |
+| `ribo` | Ribo-seq — translated ORF detection + Translation Efficiency | Bowtie2, HISAT2, StringTie, RSEM, RiboTaper, DESeq2 |
 | `cips` | CiPS uORF analysis — translated upstream ORF detection | ORFik, GenomicFeatures (R) |
 | `chip` | ChIP-seq — peak calling | bowtie2, Genrich / MACS3 |
 | `atac` | ATAC-seq — open chromatin analysis | bowtie2, Genrich / MACS3, deepTools |
 | `tf` | Two-factor DE — multi-condition differential analysis (mRNA/sRNA/ChIP) | DESeq2, DiffBind, bdgdiff, ChIPseeker |
 | `wgbs` | Whole-genome bisulfite — differential methylation | Bismark, DMRcaller |
-| `clip` | CLIP-seq — protein-RNA interaction | STAR, CLIPper |
-| `ts` | TS-CLIP-seq — target-specific CLIP | STAR, CLIPper |
-| `ribometh` | RiboMeth-seq — 2'-O-methylation analysis | STAR, RNAmodR.RiboMethSeq |
+| `clip` | CLIP-seq — protein-RNA interaction | HISAT2, CLIPper |
+| `ts` | TS-CLIP-seq — target-specific CLIP | HISAT2, CLIPper |
+| `ribometh` | RiboMeth-seq — 2'-O-methylation analysis | HISAT2, RNAmodR.RiboMethSeq |
 | `risi` | risiRNA analysis | ShortStack, bowtie |
 
 ---
@@ -186,11 +186,11 @@ Full pipeline for small RNA-seq, supporting both bulk and single-cell (UMI-based
 
 ### `mrna` — mRNA-seq
 
-STAR-based mRNA-seq with featureCounts quantification and DESeq2 differential expression.
+HISAT2-based mRNA-seq with featureCounts quantification and DESeq2 differential expression.
 
 **Pipeline steps:**
-1. STAR genome index + gffread GFF→GTF conversion
-2. Per-sample: SRA download → fastp trimming → optional mask filtering → STAR alignment
+1. HISAT2 genome index + gffread GFF→GTF conversion
+2. Per-sample: SRA download → fastp trimming → optional mask filtering → HISAT2 alignment
 3. samtools index + bamCoverage (CPM bigWig)
 4. featureCounts gene-level quantification
 5. DESeq2 differential expression (DEG.R)
@@ -200,7 +200,7 @@ STAR-based mRNA-seq with featureCounts quantification and DESeq2 differential ex
 | `--mode_mrna` | `whole` | `whole`=full pipeline, `mapping-only`=alignment+count, `bam`=BAM→DE, `count-table`=count-table→DE |
 | `--seqstrategy` | — | `single` or `paired` |
 | `--total` | — | Total RNA mode (include ncRNA in GTF) |
-| `--genomesize` | `10` | STAR genomeSAindexNbases |
+| `--genomesize` | `10` | HISAT2 index build |
 | `--deseq2norm` | `DESeq2` | Normalization: `DESeq2` or `RPM` |
 | `--foldchange` | `2.0` | Fold-change cutoff |
 | `--fdr` | `1.0` | FDR cutoff |
@@ -210,7 +210,7 @@ STAR-based mRNA-seq with featureCounts quantification and DESeq2 differential ex
 
 | File | Description |
 |------|-------------|
-| `{tag}.bam` | STAR 排序 BAM |
+| `{tag}.bam` | HISAT2 排序 BAM |
 | `{tag}.bw` | CPM 归一化 bigWig (bamCoverage, bs=5, MAPQ≥10) |
 | `{tag}.txt` | Per-sample count table (`Gene / Count / Length`)，DESeq2 输入 |
 | `DEG_overview.pdf` | 3-panel 合页：top 1000 基因 heatmap + PCA plot + 样本距离热力图 |
@@ -228,8 +228,8 @@ STAR-based mRNA-seq with featureCounts quantification and DESeq2 differential ex
 De novo transcriptome assembly and lncRNA classification pipeline. Supports three classifier backends and an ORF-based heuristic fallback.
 
 **Pipeline steps (mode-dependent):**
-1. STAR genome index + fastp trimming (if `mode_lncrna` includes mapping)
-2. Per-sample STAR alignment → BAM files
+1. HISAT2 genome index + fastp trimming (if `mode_lncrna` includes mapping)
+2. Per-sample HISAT2 alignment → BAM files
 3. StringTie transcriptome assembly (per-sample + merge)
 4. gffcompare → novel transcript filtering (class codes `u`, `i`, `x`, `o`)
 5. lncRNA classification:
@@ -242,7 +242,7 @@ De novo transcriptome assembly and lncRNA classification pipeline. Supports thre
 | Mode | Description |
 |------|-------------|
 | `whole` | Full pipeline: mapping → assembly → classification → DE (default) |
-| `mapping-only` | STAR alignment only |
+| `mapping-only` | HISAT2 alignment only |
 | `assemble-only` | Assembly + classification, no mapping |
 | `de-only` | Classification + DE from pre-assembled GTF |
 | `count-table` | DE analysis from pre-computed count table |
@@ -260,12 +260,12 @@ De novo transcriptome assembly and lncRNA classification pipeline. Supports thre
 | `--foldchange` | `2.0` | Fold-change cutoff |
 | `--pvalue` | `0.01` | P-value cutoff |
 | `--fdr` | `1.0` | FDR cutoff |
-| `--genomesize` | `10` | STAR genomeSAindexNbases |
+| `--genomesize` | `10` | HISAT2 index build |
 
 **Dependencies:**
 - FEELnc via conda: `conda install -c bioconda feelnc`
 - PLEK2 via manual clone: `git clone https://github.com/emanlee/plek2 ~/PLEK2` (requires `keras==2.4.3`, `tensorflow==2.4.1`, `numpy==1.19.2`)
-- gffcompare, StringTie, STAR, featureCounts
+- gffcompare, StringTie, HISAT2, featureCounts
 
 ---
 
@@ -274,7 +274,7 @@ De novo transcriptome assembly and lncRNA classification pipeline. Supports thre
 STARsolo-based mapping followed by Seurat integration, clustering, and marker gene identification. Supports multiple integration backends.
 
 **Pipeline steps:**
-1. STAR genome index + fastp trimming (if input is FASTQ)
+1. HISAT2 genome index + fastp trimming (if input is FASTQ)
 2. STARsolo mapping + quantification (`--quantMode GeneCounts`, cell barcode CB/BZ tags)
 3. Seurat object creation (or direct import from `.rds` / `.mtx` / `.csv` / STARsolo dir)
 4. Per-sample QC: filter low-cells/low-features/high-mt cells
@@ -312,7 +312,7 @@ STARsolo-based mapping followed by Seurat integration, clustering, and marker ge
 
 **Dependencies:**
 - R: `Seurat` (GitHub: `satijalab/seurat`), `harmony` (Bioconductor)
-- Python: `STAR`, `fastp`
+- Python: `hisat2`, `fastp`
 
 ---
 
@@ -321,8 +321,8 @@ STARsolo-based mapping followed by Seurat integration, clustering, and marker ge
 Dual-alignment strategy (transcriptome + genome) with sPARTA peak-calling and CRI-based miRNA target cleavage analysis.
 
 **Pipeline steps:**
-1. Build transcriptome STAR index + genome STAR index with splice junctions
-2. Per-sample: fastp trimming → transcriptome STAR → genome STAR alignment
+1. Build transcriptome HISAT2 index + genome HISAT2 index with splice junctions
+2. Per-sample: fastp trimming → transcriptome HISAT2 → genome HISAT2 alignment
 3. Deduplicate reads, create library file (read counts)
 4. sPARTA: build miRNA FASTA → target prediction, scoring, validation
 5. CRI calculation based on CDS frame distribution (riboWaltz)
@@ -381,10 +381,10 @@ Full RIBO Taper workflow for translated ORF detection from Ribo-seq data, follow
 **Pipeline steps (12 steps total):**
 1. Bowtie2 contamination removal (rRNA, tRNA, snRNA, snoRNA)
 2. Preprocess Ribo-seq reads
-3. RNA-seq STAR 2-pass + StringTie transcriptome assembly
+3. RNA-seq HISAT2 2-pass + StringTie transcriptome assembly
 4. gffcompare → novel transcript filtering + gene_biotype annotation
 5. RSEM quantification → expressed isoform filtering (TPM threshold)
-6. STAR re-mapping with expressed annotation (Ribo-seq + RNA-seq)
+6. HISAT2 re-mapping with expressed annotation (Ribo-seq + RNA-seq)
 7. RIBO Taper annotation files (create_annotations_files.bash)
 8. Merge BAMs → metaplots → interactive parameter confirmation → Ribotaper.sh ORF detection
 9. P-site analysis & visualization (frame distribution + bedtools-closest metagene plots)
@@ -588,7 +588,7 @@ Bismark-based alignment and DMRcaller differential methylation analysis.
 
 ### `clip` / `ts` — CLIP-seq / TS-CLIP-seq
 
-STAR alignment with CLIPper peak calling for protein-RNA interaction sites.
+HISAT2 alignment with CLIPper peak calling for protein-RNA interaction sites.
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -601,11 +601,11 @@ STAR alignment with CLIPper peak calling for protein-RNA interaction sites.
 
 ### `ribometh` — RiboMeth-seq
 
-STAR alignment to reference transcripts with RNAmodR.RiboMethSeq for 2'-O-methylation analysis.
+HISAT2 alignment to reference transcripts with RNAmodR.RiboMethSeq for 2'-O-methylation analysis.
 
 **Pipeline steps:**
-1. Build STAR index from reference transcriptome
-2. Per-sample: fastp trimming → STAR alignment
+1. Build HISAT2 index from reference transcriptome
+2. Per-sample: fastp trimming → HISAT2 alignment
 3. Parse CIGAR, compute coverage and 5'/3' end distributions
 4. RNAmodR.RiboMethSeq analysis
 
@@ -765,7 +765,7 @@ pRNASeqTools_py/
 | Category | Tools |
 |----------|-------|
 | **Runtimes** | Python ≥3.9, R ≥4.0, Perl |
-| **Aligners** | STAR ≥2.7 (STARsolo), bowtie, bowtie2, Bismark, ShortStack ≥3.0 |
+| **Aligners** | HISAT2 ≥2.2.0, bowtie, bowtie2, Bismark, ShortStack ≥3.0 |
 | **Processing** | fastp, samtools ≥1.0, htslib, bedtools, gffread, deepTools, picard-slim (openjdk ≥17) |
 | **Counting** | featureCounts (subread), RSEM, StringTie |
 | **Peak calling** | Genrich, MACS3 |

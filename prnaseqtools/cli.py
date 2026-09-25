@@ -55,9 +55,8 @@ def build_parser():
         description='Integrated High-throughput Sequencing Data Analysis for Plant (Python3)',
     )
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
-    parser.add_argument('--auto-install', action='store_true', default=True,
-                        help='Auto-install missing dependencies (default)')
     parser.add_argument('--no-auto-install', action='store_false', dest='auto_install',
+                        default=True,
                         help='Disable automatic dependency installation')
     parser.add_argument('--force-precheck', action='store_true', default=False,
                         help='Force re-run dependency check (ignore stale cache)')
@@ -73,7 +72,8 @@ def build_parser():
     p.add_argument('--pvalue', default=0.01, type=float, help='P-value threshold')
     p.add_argument('--norm', default='rRNA,total', help='Normalization')
     p.add_argument('--binsize', default=100, type=int, help='Window size')
-    p.add_argument('--mode_srna', default='bulk', dest='run_mode', help='bulk or sc')
+    p.add_argument('--mode_srna', default='bulk', dest='run_mode',
+                   choices=['bulk', 'sc'], help='bulk or sc')
     p.add_argument('--pattern', default='NNNNNNNNCA', help='UMI pattern')
     p.add_argument('--promoter', default=1000, type=int, help='Promoter length')
     p.add_argument('--spike-in', default=None, help='Spike-in sequences')
@@ -94,7 +94,7 @@ def build_parser():
     p.add_argument('--seqstrategy', default=None, dest='seq_strategy',
                    help='single or paired')
     p.add_argument('--genomesize', default=10, type=int, dest='genome_size',
-                   help='genomeSAindexNbases')
+                   help='Genome assembly size (bp) for index build hint')
 
     # lncrna (lncRNA-seq: de novo transcript assembly + coding/lncRNA classification)
     p = sub.add_parser('lncrna', help='lncRNA-seq analysis '
@@ -104,8 +104,8 @@ def build_parser():
                    choices=['whole', 'mapping-only', 'assemble-only',
                             'de-only', 'count-table'],
                    help='whole=mapping+assemble+classify+quantify+DE, '
-                        'mapping-only=STAR+BAM only, '
-                        'assemble-only=STAR→StringTie→classify only, '
+                        'mapping-only=HISAT2+BAM only, '
+                        'assemble-only=HISAT2→StringTie→classify only, '
                         'de-only=skip mapping/assembly, '
                         'count-table=use existing GTF + BAM/count tables')
     p.add_argument('--foldchange', default=2.0, type=float, help='FC threshold')
@@ -114,7 +114,7 @@ def build_parser():
     p.add_argument('--seqstrategy', default=None, dest='seq_strategy',
                    help='single or paired')
     p.add_argument('--genomesize', default=10, type=int, dest='genome_size',
-                   help='genomeSAindexNbases')
+                   help='Genome assembly size (bp) for index build hint')
     p.add_argument('--classifier', default='feelnc',
                    choices=['feelnc', 'plek2', 'fallback'],
                    help='Coding/lncRNA classifier. '
@@ -144,8 +144,8 @@ def build_parser():
                    choices=['whole', 'mapping-only', 'build-only',
                             'quantify-only', 'voila-only'],
                    help='whole=mapping+build+quantify+voila, '
-                        'mapping-only=STAR+BAM only, '
-                        'build-only=STAR→majiq build, '
+                        'mapping-only=HISAT2+BAM only, '
+                        'build-only=HISAT2→majiq build, '
                         'quantify-only=skip mapping/build, '
                         'voila-only=仅跑 voila tsv/modulize/view')
     p.add_argument('--classifier', default='deltapsi',
@@ -168,7 +168,7 @@ def build_parser():
     p.add_argument('--seqstrategy', default=None, dest='seq_strategy',
                    help='single or paired')
     p.add_argument('--genomesize', default=10, type=int, dest='genome_size',
-                   help='genomeSAindexNbases')
+                   help='Genome assembly size (bp) for index build hint')
     p.add_argument('--view', action='store_true',
                    help='启动 VOILA view 交互式浏览器 '
                         '(在量化 + tsv 输出之后)')
@@ -186,7 +186,7 @@ def build_parser():
     p.add_argument('--seqstrategy', default=None, dest='seq_strategy',
                    help='single or paired')
     p.add_argument('--genomesize', default=10, type=int, dest='genome_size',
-                   help='genomeSAindexNbases')
+                   help='Genome assembly size (bp) for index build hint')
     p.add_argument('--mincells', default=3, type=int, dest='min_cells',
                    help='Min cells per gene (Seurat QC)')
     p.add_argument('--minfeatures', default=200, type=int, dest='min_features',
@@ -326,6 +326,8 @@ def build_parser():
     p.add_argument('--auc', default=20, type=float, help='AUC threshold (Genrich only)')
     p.add_argument('--qvalue', default=1.0, type=float, help='Q-value threshold')
     p.add_argument('--pvalue', default=0.01, type=float, help='P-value threshold')
+    p.add_argument('--cutoff', default=3.0, type=float,
+                   help='Log-likelihood ratio cutoff for MACS3 bdgdiff (default: 3.0)')
     p.add_argument('--treatment2', default=None,
                    help='Second ATAC group for MACS3 bdgdiff: name=file1+file2...')
     p.add_argument('--tss-distance', default=3000, type=int,
@@ -373,6 +375,10 @@ def build_parser():
     p.add_argument('--mapping-only', action='store_true', help='Only mapping')
     p.add_argument('--norm', default='total', help='Normalization')
     p.add_argument('--binsize', default=10, type=int, help='Window size')
+    p.add_argument('--no-steprna', action='store_false', dest='steprna', default=True,
+                   help='Disable stepRNA Dicer overhang analysis')
+    p.add_argument('--steprna-mode', default='rdna', choices=['rdna', 'self'],
+                   help='stepRNA mode: rdna (reads vs rDNA) or self (reads vs reads)')
 
     # tf
     p = sub.add_parser('tf', help='Two-factor DE analysis')
@@ -408,7 +414,7 @@ def build_parser():
     p.add_argument('--chip-method', default='diffbind',
                    choices=['bdgdiff', 'diffbind'],
                    help='Differential peak calling method: bdgdiff (MACS3, no replicates) '
-                        'or diffbind (DESeq2/edgeR, with replicates). Default: bdgdiff')
+                        'or diffbind (DESeq2/edgeR, with replicates). Default: diffbind')
     # bdgdiff-specific
     p.add_argument('--cutoff', default=3, type=float,
                    help='log2 fold-change cutoff for bdgdiff (default: 3)')
@@ -418,7 +424,7 @@ def build_parser():
                    choices=['affinity', 'dual_factor'],
                    help='DiffBind analysis mode: affinity (IP-only DESeq2, design=~Condition) '
                         'or dual_factor (IP+Input joint DESeq2, design=~Condition+Factor+Condition:Factor). '
-                        'Default: affinity')
+                        'Default: dual_factor')
     p.add_argument('--chip-norm', default='deseq2',
                    choices=['deseq2', 'total', 'mito', 'chloro', 'rdna'],
                    help='DiffBind normalization: deseq2 (size factors), '
@@ -462,6 +468,7 @@ def main():
     # analysis pipeline runs to completion.  Empty invocations, --help,
     # --version, and argument errors all clean up after themselves.
     _cleanup_log = True
+    _success = True
 
     # Setup logging
     TEE = setup_logging(PREFIX, START_TIME)
@@ -486,9 +493,6 @@ def main():
         opts['prefix'] = PREFIX
         opts['_start_time'] = START_TIME
 
-        # Normalize option names (Click -> argparse differences)
-        _normalize_opts(opts)
-
         # Dispatch to mode
         module_name = MODE_RUNNERS.get(args.mode)
         if not module_name:
@@ -499,26 +503,18 @@ def main():
         mod = importlib.import_module(module_name)
         mod.run(opts)
 
-    except SystemExit:
+    except SystemExit as e:
+        _success = e.code in (None, 0)
         raise
     except Exception as e:
+        _success = False
         TEE.write(f"Error: {e}\n")
         import traceback
         traceback.print_exc(file=TEE if TEE else sys.stderr)
         sys.exit(1)
     finally:
         if TEE:
-            finalize_logging(TEE, START_TIME, cleanup=_cleanup_log)
-
-
-def _normalize_opts(opts):
-    """Normalize argparse option names to match internal naming convention."""
-    # Map argparse dest names to expected internal names
-    renames = {
-        'no_mapping': 'no_mapping',
-        'mapping_only': 'mapping_only',
-    }
-    # The rest should already match since we used dest= appropriately
+            finalize_logging(TEE, START_TIME, cleanup=_cleanup_log, success=_success)
 
 
 if __name__ == '__main__':

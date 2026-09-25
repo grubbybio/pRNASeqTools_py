@@ -3,16 +3,16 @@ Ribo-seq analysis mode — RIBO Taper pipeline.
 
 Workflow:
   1. Bowtie2 decontamination (rRNA, tRNA, snRNA, snoRNA)
-  2. RNA-seq STAR 2-pass mapping + StringTie transcriptome assembly
+  2. RNA-seq HISAT2 2-pass mapping + StringTie transcriptome assembly
   3. gffcompare → R filter novel transcripts → updated GTF with gene_biotype
   4. RSEM quantification → R filter expressed isoforms (TPM > 0)
-  5. STAR re-mapping (RNA-seq + Ribo-seq) with expressed annotation
+  5. HISAT2 re-mapping (RNA-seq + Ribo-seq) with expressed annotation
   6. RIBO Taper annotation + ORF detection
   7. RSEM CDS quantification
   8. P-site analysis & visualization (metagene plots)
   9. Translation Efficiency (TE) = Ribo TPM / RNA TPM per gene
 
-Requires: Bowtie2, STAR, samtools, bedtools, StringTie, gffcompare, RSEM,
+Requires: Bowtie2, HISAT2, samtools, bedtools, StringTie, gffcompare, RSEM,
           RIBO Taper scripts, R (dplyr)
 """
 
@@ -27,7 +27,9 @@ from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, preserve_raw_fastq, try_use_shared_star_index, save_star_index_to_reference
+from prnaseqtools.functions import (download_sra, unzip_file, _tee, run_cmd,
+                                     try_use_shared_hisat_index, save_hisat_index_to_reference,
+                                     hisat2_build_index, hisat2_align_single, hisat2_align_paired)
 
 
 # ── Helper: detect last completed step from log ────────────────────────────
@@ -132,7 +134,7 @@ def run(opts):
     adaptor = opts.get('adaptor')
     # prefix must point to the project root so that prefix/reference/{genome}_Genome
     # resolves to ~/software/pRNASeqTools_py/reference/ (not prnaseqtools/reference/)
-    prefix = opts.get('prefix', '/Users/cjyou/software/pRNASeqTools_py')
+    prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
 
     # ── RIBO Taper-specific options ──────────────────────────────────
     contam = opts.get('contam')                # contamination fasta
@@ -213,9 +215,9 @@ def run(opts):
     expressed_gtf = None       # STEP 5 → STEP 6, 7, 10, 12
     rsem_index = None          # STEP 5 → STEP 10
     rsem_dir = None            # STEP 5 → STEP 12
-    star_bin = None            # STEP 5 → STEP 10
-    star_rna_new_map = None    # STEP 6 → STEP 8, 10
-    star_ribo_new_map = None    # STEP 6 → STEP 8, 10
+    rsem_aligner = None            # STEP 5 → STEP 10
+    hisat_rna_new_map = None    # STEP 6 → STEP 8, 10
+    hisat_ribo_map = None    # STEP 6 → STEP 8, 10
     te_dir = "TE_results"      # STEP 10 → STEP 11
     te_pairs = []              # STEP 10 → STEP 11
     rps_dir = "rPS_results"    # STEP 10 → STEP 11
@@ -241,15 +243,12 @@ def run(opts):
     # Use GTF as the annotation reference throughout
     anno_path = gtf_path
 
-    # ── Utility: find bedtools ───────────────────────────────────────
-    bedtools_bin = shutil.which("bedtools") or "bedtools"
-
     # ── Shared directory variables ───────────────────────────────────
     expressed_gtf = f"{genome}_expressed.gtf"
     updated_gtf = f"{genome}_updated.gtf"
     rsem_dir = "RSEM_results"
-    ribo_map_dir = "STAR_Ribo_map"
-    star_rna_new_map = "STAR_RNA_map_new"
+    ribo_map_dir = "Hisat_Ribo_map"
+    hisat_rna_new_map = "Hisat_RNA_map_new"
     contam_index = "Contam"
     ribo_anno_dir = "RiboTaper_annotation"
     # Defined here (not inside step 3) so step 4 can use them when resuming
@@ -439,143 +438,122 @@ def run(opts):
                     if os.path.exists(fname):
                         os.unlink(fname)
 
-            if from_sra:
-                if not is_paired:
-                    gzip_fastq(f"{tag}.fastq")
-                if is_paired:
-                    gzip_fastq(f"{tag}_r1.fastq")
-                    gzip_fastq(f"{tag}_r2.fastq")
-
         tee.write("\n  Ribo-seq decontamination complete.\n")
         tee.write("  STEP 2 COMPLETE\n")
 
     # ==================================================================
-    # STEP 3 — RNA-seq STAR mapping + StringTie transcriptome assembly
+    # STEP 3 — RNA-seq HISAT2 2-pass mapping + StringTie transcriptome assembly
     # ==================================================================
     if last_step < 3:
         tee.write("\n" + "=" * 60 + "\n")
-        tee.write("STEP 3: RNA-seq transcriptome assembly (STAR + StringTie)\n")
+        tee.write("STEP 3: RNA-seq transcriptome assembly (HISAT2 + StringTie)\n")
         tee.write("=" * 60 + "\n")
 
         # Cleanup previous incomplete step 3
-        for d in ["STAR_RNA_index", "STAR_SJ", "STAR_RNA_2nd", "assembledGTF"]:
+        for d in ["HisatRNAIdx", "Hisat_SJ", "HisatRNA_2nd", "assembledGTF"]:
             if os.path.exists(d):
                 import shutil as _shutil
                 _shutil.rmtree(d, ignore_errors=True)
-        for tag in rna_tags:
-            for d in [f"star_{tag}_1st"]:
-                if os.path.exists(d):
-                    import shutil as _shutil
-                    _shutil.rmtree(d, ignore_errors=True)
 
-        # Build STAR genome index for RNA-seq
-        star_rna_index = "STAR_RNA_index"
-        if not try_use_shared_star_index(genome, prefix, star_rna_index, tee):
-            if os.path.exists(star_rna_index):
-                run_cmd(f"rm -rf {star_rna_index}")
-            os.makedirs(star_rna_index, exist_ok=True)
+        # Build/use HISAT2 genome index (带 splice sites from GTF)
+        hisat_rna_idx = "HisatRNAIdx"
+        tee.write("\n  Building/using HISAT2 RNA-seq index ...\n")
+        if not try_use_shared_hisat_index(genome, prefix, hisat_rna_idx, tee):
+            hisat2_build_index(fasta_path, anno_path, hisat_rna_idx, thread, tee=tee)
+            save_hisat_index_to_reference(genome, prefix, hisat_rna_idx, tee)
 
-            run_cmd(
-                f"STAR --runThreadN {thread} --runMode genomeGenerate "
-                f"--genomeDir {star_rna_index} --genomeSAindexNbases 10 --genomeFastaFiles {fasta_path} "
-                f"--sjdbGTFfile {anno_path} --sjdbOverhang 99 "
-                f"--limitGenomeGenerateRAM 64000000000")
-            save_star_index_to_reference(genome, prefix, star_rna_index, tee)
+        hisat_sj_dir = "Hisat_SJ"
+        os.makedirs(hisat_sj_dir, exist_ok=True)
 
-        # STAR 1st pass for each RNA-seq sample
-        star_sj_dir = "STAR_SJ"
-        os.makedirs(star_sj_dir, exist_ok=True)
+        hisat_extra = "--max-hits 20 --mp 3,3 --score-min L,0,-0.4"
+
+        # ── 1st pass ───────────────────────────────────────────────────
+        tee.write("\n  --- RNA-seq HISAT2 1st pass (collect novel SJ) ---\n")
+        rna_reads = {}  # tag → (fq1, fq2 or None) 记录解压后的 reads 路径
 
         for tag, fpath in zip(rna_tags, rna_files):
-            tee.write(f"\n  --- RNA-seq STAR 1st pass: {tag} ---\n")
+            tee.write(f"  {tag} ...\n")
 
             if ',' not in fpath:
-                sra_r, _from_sra_rna = download_sra(fpath, thread)
-                rna_paired = len(sra_r) > 1
-
-                if rna_paired:
+                sra_r, _ = download_sra(fpath, thread)
+                if len(sra_r) > 1:
                     unzip_file(sra_r[0], f"{tag}_r1")
                     unzip_file(sra_r[1], f"{tag}_r2")
-                    run_cmd(f"gzip -f {tag}_r1.fastq")
-                    run_cmd(f"gzip -f {tag}_r2.fastq")
-                    read_files = f"{tag}_r1.fastq.gz {tag}_r2.fastq.gz"
+                    rna_reads[tag] = (f"{tag}_r1.fastq", f"{tag}_r2.fastq")
                 else:
                     unzip_file(sra_r[0], tag)
-                    run_cmd(f"gzip -f {tag}.fastq")
-                    read_files = f"{tag}.fastq.gz"
+                    rna_reads[tag] = (f"{tag}.fastq", None)
             else:
-                # Explicit paired-end (file1,file2)
-                rna_paired = True
                 f1, f2 = fpath.split(',')
                 unzip_file(f1, f"{tag}_r1")
                 unzip_file(f2, f"{tag}_r2")
-                run_cmd(f"gzip -f {tag}_r1.fastq")
-                run_cmd(f"gzip -f {tag}_r2.fastq")
-                read_files = f"{tag}_r1.fastq.gz {tag}_r2.fastq.gz"
+                rna_reads[tag] = (f"{tag}_r1.fastq", f"{tag}_r2.fastq")
 
-            star_out_1st = f"star_{tag}_1st"
-            os.makedirs(star_out_1st, exist_ok=True)
+            fq1, fq2 = rna_reads[tag]
+            os.makedirs(f"hisat_{tag}_1st", exist_ok=True)
+            os.chdir(f"hisat_{tag}_1st")
+            if fq2:
+                hisat2_align_paired(tag, os.path.abspath(fq1), os.path.abspath(fq2),
+                                    f"../{hisat_rna_idx}", thread,
+                                    extra_args=hisat_extra,
+                                    nov_sj_file=f"{tag}_SJ.out.tab")
+            else:
+                hisat2_align_single(tag, os.path.abspath(fq1),
+                                    f"../{hisat_rna_idx}", thread,
+                                    extra_args=hisat_extra,
+                                    nov_sj_file=f"{tag}_SJ.out.tab")
+            os.chdir("..")
 
-            run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir {star_rna_index} --seedSearchStartLmax 25 "
-                f"--readFilesCommand zcat --readFilesIn {read_files} "
-                f"--alignIntronMax 5000 --alignIntronMin 15 "
-                f"--outFilterMismatchNmax 2 --outFilterMultimapNmax 20 "
-                f"--outFilterType BySJout --alignSJoverhangMin 8 "
-                f"--alignSJDBoverhangMin 2 "
-                f"--outSAMtype BAM SortedByCoordinate "
-                f"--quantMode TranscriptomeSAM --outSAMmultNmax 1 "
-                f"--outMultimapperOrder Random "
-                f"--outFileNamePrefix {star_out_1st}/star_{tag}_ ")
-
-            # Collect splice junctions
-            sj_src = f"{star_out_1st}/star_{tag}_SJ.out.tab"
+            # 移动 SJ 文件到汇总目录
+            sj_src = f"hisat_{tag}_1st/{tag}_SJ.out.tab"
             if os.path.exists(sj_src):
-                os.rename(sj_src, os.path.join(star_sj_dir, f"{tag}_SJ.out.tab"))
+                os.rename(sj_src, os.path.join(hisat_sj_dir, f"{tag}_SJ.out.tab"))
 
-            # Remove transcriptome BAM (not needed for assembly)
-            tx_bam = f"{star_out_1st}/star_{tag}_Aligned.toTranscriptome.out.bam"
-            if os.path.exists(tx_bam):
-                os.unlink(tx_bam)
+        # ── Merge SJ files → known splice sites for 2nd pass ───────────
+        merged_sj = "merged_SJ.tab"
+        sj_paths = sorted([os.path.join(hisat_sj_dir, f)
+                           for f in os.listdir(hisat_sj_dir) if f.endswith('.tab')])
+        if sj_paths:
+            cat_cmd = "cat " + " ".join(sj_paths)
+            run_cmd(f"{cat_cmd} | sort -u > {merged_sj}")
+            tee.write(f"  Merged novel splice sites → {merged_sj}\n")
+        else:
+            run_cmd(f"touch {merged_sj}")
+            tee.write("  No novel splice sites detected\n")
 
-        # STAR 2nd pass with all splice junctions
-        sj_files = ' '.join(sorted([
-            os.path.join(star_sj_dir, f)
-            for f in os.listdir(star_sj_dir) if f.endswith('.tab')
-        ]))
-
-        star_out_2nd = "STAR_RNA_2nd"
-        os.makedirs(star_out_2nd, exist_ok=True)
+        # ── 2nd pass with merged SJ ────────────────────────────────────
+        tee.write("\n  --- RNA-seq HISAT2 2nd pass ---\n")
+        hisat_rna_2nd_out = "HisatRNA_2nd"
+        os.makedirs(hisat_rna_2nd_out, exist_ok=True)
 
         for tag in rna_tags:
-            tee.write(f"\n  --- RNA-seq STAR 2nd pass: {tag} ---\n")
+            tee.write(f"  {tag} ...\n")
+            fq1, fq2 = rna_reads[tag]
 
-            r1_gz = f"{tag}_r1.fastq.gz"
-            r2_gz = f"{tag}_r2.fastq.gz"
-            if os.path.exists(r2_gz):
-                read_files = f"{r1_gz} {r2_gz}"
+            # HISAT2 直接输出 {tag}.bam，放到 2nd 目录里作为 StringTie 输入
+            target_bam = os.path.join(hisat_rna_2nd_out, f"{tag}.bam")
+            target_sj = os.path.join(hisat_rna_2nd_out, f"{tag}_SJ.out.tab")
+
+            if fq2:
+                hisat2_align_paired(tag, fq1, fq2, hisat_rna_idx, thread,
+                                    extra_args=hisat_extra,
+                                    known_sj_file=merged_sj)
             else:
-                read_files = f"{tag}.fastq.gz"
+                hisat2_align_single(tag, fq1, hisat_rna_idx, thread,
+                                    extra_args=hisat_extra,
+                                    known_sj_file=merged_sj)
 
-            run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir {star_rna_index} --seedSearchStartLmax 25 "
-                f"--sjdbFileChrStartEnd {sj_files} "
-                f"--readFilesCommand zcat --readFilesIn {read_files} "
-                f"--alignIntronMax 5000 --alignIntronMin 15 "
-                f"--outFilterMismatchNmax 2 --outFilterMultimapNmax 20 "
-                f"--outFilterType BySJout --alignSJoverhangMin 8 "
-                f"--alignSJDBoverhangMin 2 "
-                f"--outSAMtype BAM SortedByCoordinate "
-                f"--quantMode TranscriptomeSAM --outSAMmultNmax 1 "
-                f"--outMultimapperOrder Random "
-                f"--outFileNamePrefix {star_out_2nd}/star_{tag}_ ")
+            # 移动输出 BAM 到 2nd 目录
+            os.rename(f"{tag}.bam", target_bam)
+            os.rename(f"{tag}.bam.bai", target_bam + ".bai")
+            if os.path.exists(f"{tag}_SJ.out.tab"):
+                os.rename(f"{tag}_SJ.out.tab", target_sj)
 
-            bam_file = f"{star_out_2nd}/star_{tag}_Aligned.sortedByCoord.out.bam"
-            run_cmd(f"samtools index {bam_file}")
-
-            tx_bam = f"{star_out_2nd}/star_{tag}_Aligned.toTranscriptome.out.bam"
-            if os.path.exists(tx_bam):
-                os.unlink(tx_bam)
+        # 解压后的 FASTQ 不再需要
+        for tag, (fq1, fq2) in rna_reads.items():
+            for fn in (fq1, fq2):
+                if fn and os.path.exists(fn):
+                    os.unlink(fn)
 
         # ── StringTie per sample ─────────────────────────────────────────
         tee.write("\n  --- StringTie assembly ---\n")
@@ -584,7 +562,7 @@ def run(opts):
         merge_list_paths = []
         for tag in rna_tags:
             tee.write(f"  StringTie: {tag}\n")
-            bam_file = f"{star_out_2nd}/star_{tag}_Aligned.sortedByCoord.out.bam"
+            bam_file = os.path.join(hisat_rna_2nd_out, f"{tag}.bam")
             gtf_out = os.path.join(assembled_gtf_dir, f"{tag}.gtf")
 
             run_cmd(
@@ -632,7 +610,7 @@ def run(opts):
                 annotated_gtf = candidates[0]
             else:
                 # Recovery: if the merged GTF from Step 3 still exists,
-                # re-run gffcompare only (skip STAR/StringTie).
+                # re-run gffcompare only (skip StringTie).
                 merged_gtf = os.path.join(assembled_gtf_dir, f"{genome}_merged.gtf")
                 if os.path.exists(merged_gtf):
                     tee.write("  gffcompare output missing but merged GTF found -"
@@ -671,12 +649,10 @@ def run(opts):
         # Build RSEM index
         rsem_index = "RSEM_index"
         os.makedirs(rsem_index, exist_ok=True)
-        star_bin = shutil.which("STAR") or "STAR"
 
         run_cmd(
             f"rsem-prepare-reference --gtf {updated_gtf} "
-            f"--star --star-path {os.path.dirname(star_bin)} "
-            f"--star-sjdboverhang 99 -p {thread} "
+            f"--hisat2 -p {thread} "
             f"{fasta_path} {rsem_index}/RNA", quiet=True)
 
         # Run RSEM for each RNA-seq sample
@@ -695,11 +671,10 @@ def run(opts):
                 paired_flag = ""
                 read_files = f"{tag}.fastq.gz"
 
-            # Use RSEM's built-in STAR alignment
+            # Use RSEM's built-in HISAT2 alignment
             run_cmd(
                 f"rsem-calculate-expression {paired_flag} "
-                f"--star --star-path {os.path.dirname(star_bin)} "
-                f"--star-gzipped-read-file "
+                f"--hisat2 "
                 f"-p {thread} --time --strandedness reverse "
                 f"--no-bam-output "
                 f"{read_files} {rsem_index}/RNA {rsem_dir}/{tag}", quiet=True)
@@ -718,39 +693,33 @@ def run(opts):
         tee.write("  STEP 5 COMPLETE\n")
 
     # ==================================================================
-    # STEP 6 — STAR re-mapping with expressed annotation
+    # STEP 6 — HISAT2 re-mapping with expressed annotation
     # ==================================================================
     if last_step < 6:
         tee.write("\n" + "=" * 60 + "\n")
-        tee.write("STEP 6: STAR re-mapping with expressed annotation\n")
+        tee.write("STEP 6: HISAT2 re-mapping with expressed annotation\n")
         tee.write("=" * 60 + "\n")
 
         # Cleanup previous incomplete step 6
-        for d in ["STAR_Ribo_index", "STAR_Ribo_map",
-                   "STAR_RNA_index_new", "STAR_RNA_map_new"]:
+        for d in ["HisatRiboIdx", "Hisat_Ribo_map",
+                   "HisatRNAIdx_new", "Hisat_RNA_map_new"]:
             if os.path.exists(d):
                 import shutil as _shutil
                 _shutil.rmtree(d, ignore_errors=True)
 
-        # 6a — Build Ribo-seq STAR index (sjdbOverhang based on read length)
-        star_ribo_idx = "STAR_Ribo_index"
-        os.makedirs(star_ribo_idx, exist_ok=True)
-        ribo_overhang = min(int(ribo_len.split(',')[0]) - 1, 99)
-
-        run_cmd(
-            f"STAR --runThreadN {thread} --runMode genomeGenerate "
-            f"--genomeDir {star_ribo_idx} --genomeSAindexNbases 10 --genomeFastaFiles {fasta_path} "
-            f"--sjdbGTFfile {expressed_gtf} --sjdbOverhang {ribo_overhang} "
-            f"--limitGenomeGenerateRAM 64000000000")
+        # ── 6a — Ribo-seq HISAT2 index (用 expressed_gtf) ───────────
+        hisat_ribo_idx = "HisatRiboIdx"
+        tee.write("\n  Building HISAT2 Ribo-seq index (expressed GTF)...\n")
+        hisat2_build_index(fasta_path, expressed_gtf, hisat_ribo_idx, thread, tee=tee)
 
         # Map Ribo-seq reads
+        ribo_map_dir = "Hisat_Ribo_map"
         os.makedirs(ribo_map_dir, exist_ok=True)
 
         for tag in all_ribo_tags:
-            tee.write(f"\n  STAR Ribo-seq: {tag}\n")
+            tee.write(f"  Ribo-seq: {tag}\n")
             fq_gz = f"{tag}.noContam.fastq.gz"
             if not os.path.exists(fq_gz):
-                # Try paired naming
                 r1 = f"{tag}.noContam_r1.fastq.gz"
                 if os.path.exists(r1):
                     fq_gz = r1
@@ -758,55 +727,57 @@ def run(opts):
                     tee.write(f"  Warning: Ribo-seq fastq not found for {tag}, skipping\n")
                     continue
 
-            run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir {star_ribo_idx} --seedSearchStartLmax 25 "
-                f"--alignEndsType EndToEnd --readFilesCommand zcat "
-                f"--readFilesIn {fq_gz} "
-                f"--alignIntronMax 5000 --alignIntronMin 15 "
-                f"--outFilterMismatchNmax 2 --outFilterMultimapNmax 20 "
-                f"--outFilterType BySJout --alignSJoverhangMin 4 "
-                f"--alignSJDBoverhangMin 1 "
-                f"--outSAMtype BAM SortedByCoordinate "
-                f"--quantMode TranscriptomeSAM --outSAMmultNmax 1 "
-                f"--outMultimapperOrder Random "
-                f"--outFileNamePrefix {ribo_map_dir}/star_{tag}_ ")
+            # HISAT2 不支持直接读 gzip — gunzip 到临时文件
+            fq = fq_gz[:-3]  # strip .gz
+            run_cmd(f"gunzip -c {fq_gz} > {fq}")
+            hisat2_align_single(tag, os.path.abspath(fq), hisat_ribo_idx, thread,
+                                extra_args="--max-hits 20 --mp 3,3 --score-min L,0,-0.4")
+            os.unlink(fq)
+            # 把输出 BAM 移到 ribo_map_dir（扁平目录，后续步骤引用）
+            for fn in (f"{tag}.bam", f"{tag}.bam.bai", f"{tag}_Log.txt"):
+                if os.path.exists(fn):
+                    os.rename(fn, os.path.join(ribo_map_dir, fn))
 
-    # ── STEP 6b: RNA-seq STAR mapping ──
+    # ── STEP 6b: RNA-seq HISAT2 mapping ──
     if last_step < 6:
-        # 6b — Build updated RNA-seq STAR index
-        star_rna_new_idx = "STAR_RNA_index_new"
-        os.makedirs(star_rna_new_idx, exist_ok=True)
-
-        run_cmd(
-            f"STAR --runThreadN {thread} --runMode genomeGenerate "
-            f"--genomeDir {star_rna_new_idx} --genomeSAindexNbases 10 --genomeFastaFiles {fasta_path} "
-            f"--sjdbGTFfile {expressed_gtf} --sjdbOverhang 99 "
-            f"--limitGenomeGenerateRAM 64000000000")
+        # 6b — Build updated RNA-seq HISAT2 index (用 expressed_gtf)
+        hisat_rna_new_idx = "HisatRNAIdx_new"
+        tee.write("\n  Building HISAT2 RNA-seq index (expressed GTF)...\n")
+        hisat2_build_index(fasta_path, expressed_gtf, hisat_rna_new_idx, thread, tee=tee)
 
         # Map RNA-seq with new annotation
-        star_rna_new_map = "STAR_RNA_map_new"
-        os.makedirs(star_rna_new_map, exist_ok=True)
+        hisat_rna_new_map = "Hisat_RNA_map_new"
+        os.makedirs(hisat_rna_new_map, exist_ok=True)
 
         for tag in all_rna_tags:
-            tee.write(f"\n  STAR RNA-seq (updated): {tag}\n")
+            tee.write(f"  RNA-seq (updated): {tag}\n")
             r1_gz = f"{tag}_r1.fastq.gz"
             r2_gz = f"{tag}_r2.fastq.gz"
-            if os.path.exists(r2_gz):
-                read_files = f"{r1_gz} {r2_gz}"
-            else:
-                read_files = f"{tag}.fastq.gz"
 
-            run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir {star_rna_new_idx} --seedSearchStartLmax 25 "
-                f"--readFilesCommand zcat --readFilesIn {read_files} "
-                f"--alignIntronMax 5000 --alignIntronMin 15 "
-                f"--outFilterMismatchNmax 2 --outFilterMultimapNmax 20 "
-                f"--outFilterType BySJout --alignSJoverhangMin 2 "
-                f"--alignSJDBoverhangMin 1 "
-                f"--outSAMtype BAM SortedByCoordinate "
-                f"--quantMode TranscriptomeSAM --outSAMmultNmax 1 "
-                f"--outMultimapperOrder Random "
-                f"--outFileNamePrefix {star_rna_new_map}/star_{tag}_ ")
+            # gunzip
+            run_cmd(f"gunzip -c {r1_gz} > {tag}_r1.fastq")
+            paired = os.path.exists(r2_gz)
+            if paired:
+                run_cmd(f"gunzip -c {r2_gz} > {tag}_r2.fastq")
+
+            if paired:
+                hisat2_align_paired(tag, f"{tag}_r1.fastq", f"{tag}_r2.fastq",
+                                    hisat_rna_new_idx, thread,
+                                    extra_args="--max-hits 20 --mp 3,3 --score-min L,0,-0.4")
+            else:
+                hisat2_align_single(tag, f"{tag}_r1.fastq", hisat_rna_new_idx, thread,
+                                    extra_args="--max-hits 20 --mp 3,3 --score-min L,0,-0.4")
+
+            # 把输出 BAM 移到 hisat_rna_new_map
+            for fn in (f"{tag}.bam", f"{tag}.bam.bai", f"{tag}_Log.txt"):
+                if os.path.exists(fn):
+                    os.rename(fn, os.path.join(hisat_rna_new_map, fn))
+
+            # 删除临时 gunzip 文件
+            os.unlink(f"{tag}_r1.fastq")
+            if paired:
+                os.unlink(f"{tag}_r2.fastq")
+
         tee.write("  STEP 6 COMPLETE\n")
 
     # ==================================================================
@@ -859,7 +830,7 @@ def run(opts):
                 os.unlink(f)
         # Clean per-sample R1-only BAMs
         for tag in all_ribo_tags:
-            r1 = f"{ribo_map_dir}/star_{tag}_Aligned.sortedByCoord.out_r1.bam"
+            r1 = f"{ribo_map_dir}/{tag}.bam"
             for f in [r1, r1 + '.bai']:
                 if os.path.exists(f):
                     os.unlink(f)
@@ -881,7 +852,7 @@ def run(opts):
         # Merge RNA-seq BAMs
         tee.write("\n  Merging RNA-seq BAMs...\n")
         rna_bam_list = [
-            f"{star_rna_new_map}/star_{tag}_Aligned.sortedByCoord.out.bam"
+            f"{hisat_rna_new_map}/{tag}.bam"
             for tag in all_rna_tags
         ]
         rna_bam_list = [b for b in rna_bam_list if os.path.exists(b)]
@@ -892,7 +863,7 @@ def run(opts):
         # Merge Ribo-seq BAMs (R1 only for RIBO Taper)
         tee.write("  Merging Ribo-seq BAMs...\n")
         ribo_bam_list = [
-            f"{ribo_map_dir}/star_{tag}_Aligned.sortedByCoord.out.bam"
+            f"{ribo_map_dir}/{tag}.bam"
             for tag in all_ribo_tags
         ]
         ribo_bam_list = [b for b in ribo_bam_list if os.path.exists(b)]
@@ -991,7 +962,7 @@ def run(opts):
         if os.path.exists(_len_pdf):
             os.unlink(_len_pdf)
         _ribo_bam_files = [
-            os.path.join(ribo_map_dir, f"star_{tag}_Aligned.sortedByCoord.out.bam")
+            os.path.join(ribo_map_dir, f"{tag}.bam")
             for tag in all_ribo_tags
         ]
         _ribo_bam_files = [b for b in _ribo_bam_files if os.path.exists(b)]
@@ -1049,20 +1020,15 @@ def run(opts):
         os.makedirs(te_dir, exist_ok=True)
 
         # Build RSEM index if not already done (reuse from step 5)
-        # Different RSEM versions lay out the STAR index differently: some
-        # put it directly under RSEM_index/, others in RSEM_index/RNA/.
+        # RSEM HISAT2 index marker: RSEM_index/RNA/RNA.*.ht2  (hisat2 index files)
         rsem_index = "RSEM_index"
-        _rsem_idx_markers = [
-            os.path.join(rsem_index, "sjdbList.out.tab"),
-            os.path.join(rsem_index, "RNA", "sjdbList.out.tab"),
-        ]
-        if not any(os.path.exists(p) for p in _rsem_idx_markers):
-            tee.write("  Building RSEM index for TE calculation...\n")
-            star_bin = shutil.which("STAR") or "STAR"
+        _rsem_idx_markers = globmod.glob(os.path.join(rsem_index, "RNA", "RNA.*.ht2")) \
+                           or globmod.glob(os.path.join(rsem_index, "*.ht2"))
+        if not _rsem_idx_markers:
+            tee.write("  Building RSEM (HISAT2) index for TE calculation...\n")
             run_cmd(
                 f"rsem-prepare-reference --gtf {expressed_gtf} "
-                f"--star --star-path {os.path.dirname(star_bin)} "
-                f"--star-sjdboverhang 99 -p {thread} "
+                f"--hisat2 -p {thread} "
                 f"{fasta_path} {rsem_index}/RNA", quiet=True)
 
         # Helper: detect paired-end status
@@ -1097,15 +1063,15 @@ def run(opts):
 
                 # Find Ribo-seq BAM
                 ribo_bam_candidates = [
-                    os.path.join(ribo_map_dir, f"star_{ribo_tag}_Aligned.toTranscriptome.out.bam"),
-                    os.path.join(ribo_map_dir, f"{ribo_tag}_Aligned.toTranscriptome.out.bam"),
+                    os.path.join(ribo_map_dir, f"{ribo_tag}.bam"),
+                    os.path.join(ribo_map_dir, f"{ribo_tag}.bam"),
                 ]
                 ribo_bam = next((p for p in ribo_bam_candidates if os.path.exists(p)), None)
 
                 # Find RNA-seq BAM
                 rna_bam_candidates = [
-                    os.path.join(star_rna_new_map, f"star_{rna_tag}_Aligned.toTranscriptome.out.bam"),
-                    os.path.join(star_rna_new_map, f"{rna_tag}_Aligned.toTranscriptome.out.bam"),
+                    os.path.join(hisat_rna_new_map, f"{rna_tag}.bam"),
+                    os.path.join(hisat_rna_new_map, f"{rna_tag}.bam"),
                 ]
                 rna_bam = next((p for p in rna_bam_candidates if os.path.exists(p)), None)
 
@@ -1176,9 +1142,7 @@ def run(opts):
         tee.write("=" * 60 + "\n")
 
         # ── Per-gene TE change detection (DESeq2) ──
-        _te_method = getattr(opts, 'te_method', 'both') if 'opts' in dir() else 'both'
-        if _te_method is None:
-            _te_method = 'both'
+        _te_method = opts.get('te_method') or 'both'
 
         has_te_pairs = os.path.isdir(te_dir) and any(
             os.path.isdir(os.path.join(te_dir, d)) and "__" in d
@@ -1188,31 +1152,31 @@ def run(opts):
         if _te_method != 'none' and has_te_pairs:
             tee.write("\n  ── Per-gene TE change detection (method=" + _te_method + ") ──\n")
 
-        try:
-            rm, rm_rna, rm_coldata = _build_count_matrices_and_coldata(
-                te_dir, te_pairs, ribo_groups, rna_groups,
-                all_ribo_tags, all_rna_tags, tee
-            )
-            if rm and rm_rna and rm_coldata:
-                alpha = getattr(opts, 'pvalue', 0.05) if 'opts' in dir() else 0.05
-                # control 组名 = 第一个 group 的 name (用户在 -rc/-bc 里写的名字)
-                control_group = ribo_groups[0][0] if ribo_groups else None
-                te_results = _run_te_deseq2(
-                    rm, rm_rna, rm_coldata, te_dir,
-                    te_method=_te_method, tee=tee, alpha=alpha,
-                    control_group=control_group
+            try:
+                rm, rm_rna, rm_coldata = _build_count_matrices_and_coldata(
+                    te_dir, te_pairs, ribo_groups, rna_groups,
+                    all_ribo_tags, all_rna_tags, tee
                 )
-                tee.write(f"  Control group for DESeq2: {control_group}\n")
-                if te_results:
-                    tee.write(f"  DESeq2 TE results: "
-                              f"{', '.join(te_results.keys())}\n")
-                    tee.write("  DESeq2 results written\n")
+                if rm and rm_rna and rm_coldata:
+                    alpha = opts.get('pvalue') or 0.05
+                    # control 组名 = 第一个 group 的 name (用户在 -rc/-bc 里写的名字)
+                    control_group = ribo_groups[0][0] if ribo_groups else None
+                    te_results = _run_te_deseq2(
+                        rm, rm_rna, rm_coldata, te_dir,
+                        te_method=_te_method, tee=tee, alpha=alpha,
+                        control_group=control_group
+                    )
+                    tee.write(f"  Control group for DESeq2: {control_group}\n")
+                    if te_results:
+                        tee.write(f"  DESeq2 TE results: "
+                                  f"{', '.join(te_results.keys())}\n")
+                        tee.write("  DESeq2 results written\n")
+                    else:
+                        tee.write("  DESeq2 completed but no results produced\n")
                 else:
-                    tee.write("  DESeq2 completed but no results produced\n")
-            else:
-                tee.write("  SKIP: 无法构建 count matrices\n")
-        except Exception as _te_err:
-            tee.write(f"  ERROR: {_te_err}\n")
+                    tee.write("  SKIP: 无法构建 count matrices\n")
+            except Exception as _te_err:
+                tee.write(f"  ERROR: {_te_err}\n")
         else:
             tee.write(f"  [DESeq2 skipped] te_method={_te_method}, "
                       f"has_te_pairs={has_te_pairs}\n")
@@ -1376,7 +1340,7 @@ def _plot_ribo_lengths(ribo_map_dir, tags, tee):
     from matplotlib.backends.backend_pdf import PdfPages
 
     bam_files = [
-        os.path.join(ribo_map_dir, f"star_{tag}_Aligned.sortedByCoord.out.bam")
+        os.path.join(ribo_map_dir, f"{tag}.bam")
         for tag in tags
     ]
     bam_files = [(t, b) for t, b in zip(tags, bam_files) if os.path.exists(b)]
@@ -1954,6 +1918,11 @@ def _run_te_deseq2(ribo_mat_file, rna_mat_file, coldata_file, te_dir,
 
     return results
 
+def _te_label_to_group(label):
+    """Reduce a pair/sample label ('wt_1__wt_1' or 'wt_1') to its group name ('wt')."""
+    return re.sub(r'_\d+$', '', label.split('__')[0])
+
+
 def _te_group_stats(wide_tsv, output_dir, tee, alpha=0.05,
                     rna_groups=None, suffix='_log2te', out_prefix='TE_'):
     """Statistical testing of TE (or rPS) across conditions via external R script.
@@ -1974,13 +1943,14 @@ def _te_group_stats(wide_tsv, output_dir, tee, alpha=0.05,
         output_dir: Directory for output files (R script writes here too)
         tee: Tee writer for logging
         alpha: Significance threshold (default 0.05)
-        rna_groups: Optional list of [(group_name, n_replicates), ...] from
-                    input parameters. If None, uses each sample as one group.
+        rna_groups: Ignored. Grouping is derived from the wide table's
+                    column names in column order, as TE_stats.R requires
+                    group order to match column order.
         suffix: Column suffix identifying value columns (default '_log2te')
         out_prefix: Filename prefix for R script outputs (default 'TE_')
 
     Returns:
-        (anova_f, anova_p, letters) — letters maps sample/condition ->
+        (anova_f, anova_p, letters) — letters maps condition (group) ->
         letter string; empty dict when statistics could not be run.
     """
     letters = {}
@@ -1999,37 +1969,22 @@ def _te_group_stats(wide_tsv, output_dir, tee, alpha=0.05,
 
     tee.write(f"  Using wide TE table for R stats: {wide_tsv}\n")
 
-    # Group args: derive condition structure from rna_groups if provided,
-    # otherwise treat each sample pair as its own group with 1 replicate.
+    # Derive groups from the wide table's own column names, in column order
+    # (TE_stats.R maps groups onto consecutive columns).
     pair_names = []
     with open(wide_tsv) as f:
         header = f.readline().strip().split('\t')
         pair_names = [h[:-len(suffix)] for h in header
                       if h.endswith(suffix)]
 
-    group_args = []
-    if rna_groups and len(rna_groups) > 0:
-        # Count how many pairs map to each group based on n_replicates
-        col_idx = 0
-        for gname, n_rep in rna_groups:
-            take = min(n_rep, len(pair_names) - col_idx)
-            if take <= 0:
-                break
-            # Use the first replicate's condition name as the group label
-            label = str(gname).split('__')[0]  # strip ribo part if present
-            group_args.append(f"{label}={take}")
-            col_idx += take
-        # Handle any leftover pairs
-        while col_idx < len(pair_names):
-            left = pair_names[col_idx]
-            label = left.split('__')[0]
-            remaining_same_label = sum(
-                1 for p in pair_names[col_idx:] if p.split('__')[0] == label)
-            group_args.append(f"{label}={remaining_same_label}")
-            col_idx += remaining_same_label
-    else:
-        for p in pair_names:
-            group_args.append(f"{p}=1")
+    groups = []
+    for p in pair_names:
+        label = _te_label_to_group(p)
+        if groups and groups[-1][0] == label:
+            groups[-1][1] += 1
+        else:
+            groups.append([label, 1])
+    group_args = [f"{label}={n}" for label, n in groups]
 
     if len(group_args) < 2:
         tee.write("  Only 1 condition available, skipping statistical test\n")
@@ -2037,7 +1992,7 @@ def _te_group_stats(wide_tsv, output_dir, tee, alpha=0.05,
 
     cmd = (
         f'Rscript --vanilla "{r_script}" '
-        f'"{wide_tsv}" "{output_dir}" "{alpha}" "{out_prefix}" '
+        f'"{wide_tsv}" "{output_dir}" "{alpha}" "{out_prefix}" "{suffix}" '
         f'{" ".join(group_args)}'
     )
     run_cmd(cmd)
@@ -2360,8 +2315,9 @@ def _generate_rps_summary(all_rps_tables, output_dir, tee, ribo_groups=None):
             _pad = (_ymax - _ymin) * 0.08 if _ymax > _ymin else 1.0
             ax.set_ylim(_ymin - 0.2 * _pad, _ymax + 1.6 * _pad)
             for xi, lab in enumerate(labels):
-                if lab in sig_letters and sig_letters[lab]:
-                    ax.text(xi + 1, _ymax + 0.9 * _pad, sig_letters[lab],
+                ls = sig_letters.get(_te_label_to_group(lab), '')
+                if ls:
+                    ax.text(xi + 1, _ymax + 0.9 * _pad, ls,
                             ha='center', va='bottom', fontsize=12,
                             fontweight='bold', color='darkred')
             if sig_letters:
@@ -2493,7 +2449,7 @@ def _generate_te_summary(all_te_tables, output_dir, tee, rna_groups=None):
                 _pad = (_ymax - _ymin) * 0.08 if _ymax > _ymin else 1.0
                 ax.set_ylim(_ymin - 0.2 * _pad, _ymax + 1.6 * _pad)
                 for xi, lab in enumerate(labels):
-                    ls = sig_letters.get(lab, '')
+                    ls = sig_letters.get(_te_label_to_group(lab), '')
                     if ls:
                         ax.text(xi + 1, _ymax + 0.4 * _pad, ls,
                                 ha='center', va='bottom', fontsize=12,
@@ -2601,8 +2557,8 @@ def _read_psite_tracks(psite_file):
             # Read length (column 14)
             length = int(fields[13]) if len(fields) > 13 and fields[13].lstrip('-').isdigit() else 0
             
-            # frame is not a direct column; set to 0, computed later if needed
-            frame = 0
+            # frame is not a direct column; set to -1, computed later if needed
+            frame = -1
             
             entry = {
                 'read_name': read_name,
@@ -2851,7 +2807,7 @@ def _genomic_to_transcript(genomic_pos, starts, ends, strand):
         cumulative = 0
         for s, e in reversed(list(zip(starts, ends))):
             if genomic_pos >= s:
-                offset = max(0, e - genomic_pos)
+                offset = max(0, (e - 1) - genomic_pos)
                 return cumulative + offset
             cumulative += (e - s)
         return cumulative  # beyond first (leftmost) exon
@@ -2945,9 +2901,9 @@ def _split_psites_by_sample(psites, tags, bam_dir, tee):
     all_bam_reads = set()  # Union of all reads across all BAMs
     
     for tag in tags:
-        # Check both STAR and Ribo BAM paths
+        # Check both HISAT2 and Ribo BAM paths
         bam_candidates = [
-            os.path.join(bam_dir, f"star_{tag}_Aligned.sortedByCoord.out.bam"),
+            os.path.join(bam_dir, f"{tag}.bam"),
             os.path.join(bam_dir, f"{tag}_Ribo.bam"),
             os.path.join(bam_dir, f"{tag}.bam"),
         ]
@@ -3517,7 +3473,7 @@ def _plot_psite_analysis(ribo_map_dir, tags, ribo_anno_dir, tee):
                         metagene_by_sample[sample][key].append(dist)
                     n_unassigned_count += 1
             
-            tee.write(f"  Assigned (frame+sample): {n_assigned}, unassigned: {n_unassigned}\n")
+            tee.write(f"  Assigned (frame+sample): {n_assigned}, unassigned: {n_unassigned_count}\n")
             
             dist_positions = np.arange(DIST_MIN, DIST_MAX + 1)  # -30..30
             

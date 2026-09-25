@@ -49,7 +49,7 @@ def setup_logging(prefix, start_time):
     return tee
 
 
-def finalize_logging(tee, start_time, cleanup=False):
+def finalize_logging(tee, start_time, cleanup=False, success=True):
     """Write completion message and close log.  If *cleanup* is True the log
     file is deleted afterwards — use this for help-only or empty invocations
     where no meaningful analysis output was produced."""
@@ -58,7 +58,10 @@ def finalize_logging(tee, start_time, cleanup=False):
 
     if not cleanup:
         localtime = _time.asctime(_time.localtime(_time.time()))
-        tee.write(f"\nMission Completed!\nEnd: {localtime}\n")
+        if success:
+            tee.write(f"\nMission Completed!\nEnd: {localtime}\n")
+        else:
+            tee.write(f"\nExited with errors.\nEnd: {localtime}\n")
 
     tee.close()
 

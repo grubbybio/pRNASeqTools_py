@@ -53,6 +53,17 @@ def validate_options(opts):
                 sys.exit("Aborted by user.")
         else:
             sys.exit('Output directory exists! Please specify another output directory!')
+    # Targets validation (checked before chdir so relative paths resolve
+    # against the user's launch directory)
+    targets = opts.get('targets')
+    if targets is not None and targets != 'all' and not os.path.exists(targets):
+        sys.exit('Cannot find the target list!')
+
+    # siRNA validation
+    si_rnas = opts.get('si_rnas')
+    if si_rnas is not None and si_rnas != 'none' and not os.path.exists(si_rnas):
+        sys.exit('Cannot find the siRNA list in fasta format!')
+
     os.makedirs(outdir, exist_ok=True)
 
     # Move log file to output directory
@@ -96,7 +107,7 @@ def validate_options(opts):
 
     # Multi-map method validation
     mmap = opts.get('mmap')
-    if mmap is not None and mmap not in 'ufrn':
+    if mmap is not None and mmap not in ('u', 'f', 'r', 'n'):
         sys.exit('Please use a supported strategy for mapping!')
 
     # nomapping + mappingonly conflict (ribo mode uses auto-resume instead)
@@ -137,20 +148,10 @@ def validate_options(opts):
     if spike_in is not None and not spike_in.endswith(('.fasta', '.fa')):
         sys.exit('Please specify a fasta file for spike-in!')
 
-    # Targets validation
-    targets = opts.get('targets')
-    if targets is not None and targets != 'all' and not os.path.exists(targets):
-        sys.exit('Cannot find the target list!')
-
     # BAM mode requires seq strategy
     run_mode = opts.get('run_mode')
     if run_mode == 'bam' and not opts.get('seq_strategy'):
         sys.exit('Please provide the library type when input files are in the bam format!')
-
-    # siRNA validation
-    si_rnas = opts.get('si_rnas')
-    if si_rnas is not None and si_rnas != 'none' and not os.path.exists(si_rnas):
-        sys.exit('Cannot find the siRNA list in fasta format!')
 
     # Single-cell specific validation
     if mode == 'sc':

@@ -1,7 +1,7 @@
 """
 mRNA-seq analysis mode.
 Mirrors the Perl mode::mrna module.
-STAR alignment → featureCounts → DESeq2 DE analysis.
+HISAT2 alignment → featureCounts → DESeq2 DE analysis.
 """
 
 import os
@@ -13,7 +13,12 @@ from pathlib import Path
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
                                         _resolve_path)
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, preserve_raw_fastq, try_use_shared_star_index, save_star_index_to_reference
+from prnaseqtools.functions import (
+    download_sra, unzip_file, _tee, run_cmd, gzip_fastq, preserve_raw_fastq,
+    try_use_shared_hisat_index, save_hisat_index_to_reference,
+    cleanup_alignment_outputs, hisat2_build_index,
+    hisat2_align_single, hisat2_align_paired,
+)
 
 
 def run(opts):
@@ -64,24 +69,22 @@ def run(opts):
             os.symlink(mask_path, "mask.fa")
             run_cmd("bowtie-build -q mask.fa mask")
 
-        tee.write("\nBuilding STAR genome index ...\n")
+        tee.write("\nBuilding HISAT2 genome index ...\n")
 
         # Define reference paths first — they are also needed by the gffread call
-        # below even when try_use_shared_star_index returns True.
+        # below even when try_use_shared_hisat_index returns True.
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
+        hisat_idx = "HisatIdx"  # HISAT2 索引前缀（不是目录）
 
-        if not try_use_shared_star_index(genome, prefix, "Genome", tee):
-            if os.path.exists("Genome"):
-                run_cmd("rm -rf Genome")
-            os.makedirs("Genome", exist_ok=True)
-
+        if not try_use_shared_hisat_index(genome, prefix, hisat_idx, tee):
+            tee.write("\nBuilding HISAT2 index from FASTA + known splice sites ...\n")
+            # 用 gffread 先把 GFF → GTF（extract_splice_sites.py 偏好 GTF）
             run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
-                f"--genomeSAindexNbases {genome_size} --genomeFastaFiles {fasta_path} "
-                f"--sjdbGTFfile {gff_path} --sjdbGTFtagExonParentTranscript Parent "
-                f"--sjdbGTFtagExonParentGene ID --sjdbOverhang 99 --limitGenomeGenerateRAM 64000000000")
-            save_star_index_to_reference(genome, prefix, "Genome", tee)
+                f"gffread -T -o _hisat_genes.gtf -g {fasta_path} {gff_path}")
+            hisat2_build_index(fasta_path, "_hisat_genes.gtf", hisat_idx, thread, tee)
+            save_hisat_index_to_reference(genome, prefix, hisat_idx, tee)
+            os.unlink("_hisat_genes.gtf")
 
         if total:
             run_cmd(
@@ -100,7 +103,8 @@ def run(opts):
                 # Single-end or paired from SRA
                 sra_results, from_sra = download_sra(fpath, thread)
                 if len(sra_results) == 1:
-                    seq_strategy = 'single'
+                    if seq_strategy is None:
+                        seq_strategy = 'single'
                     unzip_file(sra_results[0], tag)
                     preserve_raw_fastq(from_sra, tag, paired=False)
 
@@ -109,7 +113,8 @@ def run(opts):
                     fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
                     run_cmd(
                         f"fastp -w {thread} --length_required 20 "
-                        f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
+                        f"-i {tag}.fastq -o {tag}_trimmed.fastq "
+                        f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
                     os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
                     # clean up fastp reports
                     for rep in (f"{tag}.html", f"{tag}.json"):
@@ -124,22 +129,15 @@ def run(opts):
                         if os.path.exists(f"{tag}.mask.out"):
                             os.unlink(f"{tag}.mask.out")
 
-                    run_cmd(
-                        f"STAR --runMode alignReads --genomeDir Genome --seedSearchStartLmax 25 --alignIntronMax 5000 "
-                        f"--outReadsUnmapped Fastx --outSAMtype BAM SortedByCoordinate "
-                        f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
-                        f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
-                        f"--runThreadN {thread} --outFileNamePrefix {tag}_ "
-                        f"--readFilesIn {tag}.fastq")
-                    os.rename(f"{tag}_Aligned.sortedByCoord.out.bam", f"{tag}.bam")
-                    if os.path.exists(f"{tag}_Log.final.out"):
-                        with open(f"{tag}_Log.final.out") as lf:
-                            tee.write(lf.read())
+                    hisat2_align_single(tag, f"{tag}.fastq", hisat_idx, thread,
+                        extra_args="--max-hits 50 --mp 3,3 --score-min L,0,-0.3",
+                        nov_sj_file=f"{tag}_SJ.out.tab")
                     if from_sra:
                         gzip_fastq(f"{tag}.raw.fastq")
                 else:
                     # Paired from SRA
-                    seq_strategy = 'paired'
+                    if seq_strategy is None:
+                        seq_strategy = 'paired'
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
                     preserve_raw_fastq(from_sra, tag, paired=True)
@@ -150,7 +148,8 @@ def run(opts):
                     run_cmd(
                         f"fastp -w {thread} --length_required 20 "
                         f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                        f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
                     os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                     os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                     for rep in (f"{tag}.html", f"{tag}.json"):
@@ -168,20 +167,18 @@ def run(opts):
                         if os.path.exists(f"{tag}.mask.out"):
                             os.unlink(f"{tag}.mask.out")
 
-                    run_cmd(
-                        f"STAR --runMode alignReads --genomeDir Genome --seedSearchStartLmax 25 --alignIntronMax 5000 "
-                        f"--outReadsUnmapped Fastx --outSAMtype BAM SortedByCoordinate "
-                        f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
-                        f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
-                        f"--runThreadN {thread} --outFileNamePrefix {tag}_ "
-                        f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
+                    hisat2_align_paired(tag, f"{tag}_R1.fastq", f"{tag}_R2.fastq",
+                        hisat_idx, thread,
+                        extra_args="--max-hits 50 --mp 3,3 --score-min L,0,-0.3",
+                        nov_sj_file=f"{tag}_SJ.out.tab")
                     if from_sra:
                         for _f in (f"{tag}_R1.raw.fastq", f"{tag}_R2.raw.fastq"):
                             gzip_fastq(_f)
             else:
                 # Explicit paired-end (local files; no SRA preservation)
                 f1, f2 = fpath.split(',')
-                seq_strategy = 'paired'
+                if seq_strategy is None:
+                    seq_strategy = 'paired'
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
 
@@ -191,7 +188,8 @@ def run(opts):
                 run_cmd(
                     f"fastp -w {thread} --length_required 20 "
                     f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
+                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                    f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
                 os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                 os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                 for rep in (f"{tag}.html", f"{tag}.json"):
@@ -210,19 +208,20 @@ def run(opts):
                         os.unlink(f"{tag}.mask.out")
 
                 tee.write("\nMapping...\n")
-                run_cmd(
-                    f"STAR --runMode alignReads --genomeDir Genome --seedSearchStartLmax 25 --alignIntronMax 5000 "
-                    f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
-                    f"--outSAMmultNmax 1 --outFilterMultimapNmax 50 "
-                    f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
-                    f"--outFileNamePrefix {tag}_ "
-                    f"--readFilesIn {tag}_R1.fastq {tag}_R2.fastq")
+                hisat2_align_paired(tag, f"{tag}_R1.fastq", f"{tag}_R2.fastq",
+                    hisat_idx, thread,
+                    extra_args="--max-hits 50 --mp 3,3 --score-min L,0,-0.3",
+                    nov_sj_file=f"{tag}_SJ.out.tab")
 
-            os.rename(f"{tag}_Aligned.sortedByCoord.out.bam", f"{tag}.bam")
+            # HISAT2 直接输出 {tag}.bam，不再需要重命名 STAR 的 _Aligned.sortedByCoord.out.bam
+            if not os.path.exists(f"{tag}.bam"):
+                _aligned_bam = f"{tag}_Aligned.sortedByCoord.out.bam"  # 兼容旧残留
+                if os.path.exists(_aligned_bam):
+                    os.rename(_aligned_bam, f"{tag}.bam")
 
-            # Show mapping stats
-            if os.path.exists(f"{tag}_Log.final.out"):
-                with open(f"{tag}_Log.final.out") as lf:
+            # Show HISAT2 mapping stats
+            if os.path.exists(f"{tag}_Log.txt"):
+                with open(f"{tag}_Log.txt") as lf:
                     tee.write(lf.read())
 
             _count_bam(tag, thread, seq_strategy, prefix, genome)
@@ -231,23 +230,13 @@ def run(opts):
         for fname in (f"{genome}_genes.gtf",):
             if os.path.exists(fname):
                 os.unlink(fname)
-        # Clean up per-tag {tag}_Log.*, {tag}_SJ.out.tab, {tag}_Aligned.*, {tag}_Unmapped*
-        for fname in globmod.glob("*_Log.out") + globmod.glob("*_Log.progress.out") + \
-                     globmod.glob("*_Log.final.out") + globmod.glob("*_SJ.out.tab") + \
-                     globmod.glob("*_Aligned.sortedByCoord.out.bam") + \
-                     globmod.glob("*_Aligned.out.sam") + \
-                     globmod.glob("*_ReadsUnmapped*.fastq") + globmod.glob("*_ReadsUnmapped*.fq"):
-            if os.path.exists(fname):
-                os.unlink(fname)
-        for fname in globmod.glob("total.count*"):
-            os.unlink(fname)
+        # Per-tag HISAT2/STAR outputs, fastp intermediates, and fastp reports
+        cleanup_alignment_outputs(extra_globs=(f"{genome}_chr_all*", "total.count*", "_hisat_genes.gtf"))
         if mask:
             for mf in globmod.glob("mask*"):
                 os.unlink(mf)
-        # NOTE: do not rm -rf "Genome" here — if it's a symlink to reference/{genome}_Genome,
-        # we'd lose the shared index. STAR overwrites Align* / Log* in place.
-        if os.path.exists("Genome") and not os.path.islink("Genome"):
-            run_cmd("rm -rf Genome")
+        # NOTE: HISAT2 index 文件 (HisatIdx.*.ht2) 不在这里删——可能是 symlink 到 reference/{genome}_HisatIdx
+        # STAR 旧版是目录 "Genome"，HISAT2 是前缀文件组，都在 cleanup_alignment_outputs 里不碰
 
         if do_de:
             tee.write(f"\nFinding DEG...\nFold Change\t{foldchange}\tP Value\t{pvalue}\tFDR\t{fdr}\n")
@@ -285,11 +274,10 @@ def run(opts):
             f"{foldchange} {prefix} {genome} {par_str}")
 
         # Clean up symlinks
-        if do_count:
-            for fname in globmod.glob("*_?.bam"):
-                os.unlink(fname)
-        else:
-            for fname in globmod.glob("*_?.txt"):
+        ext = "bam" if do_count else "txt"
+        for pre in tags:
+            fname = f"{pre}.{ext}"
+            if os.path.exists(fname):
                 os.unlink(fname)
 
 

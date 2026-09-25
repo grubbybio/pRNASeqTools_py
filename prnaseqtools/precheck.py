@@ -23,7 +23,10 @@ def _get_version(cmd, pattern=None):
             m = re.search(pattern, output)
             if m:
                 return m.group(1) if m.lastindex else m.group(0)
-        return output.strip()
+            return None
+        if result.returncode == 0 and output.strip():
+            return output.strip()
+        return None
     except Exception:
         return None
 
@@ -158,11 +161,11 @@ _CHECK_DEFS = {
         'required': True,
         'msg': 'R statistical computing',
     },
-    'STAR': {
-        'cmd': 'STAR --version',
-        'pattern': r'(\d+\.\d+\.\d+)',
+    'hisat2': {
+        'cmd': 'hisat2 --version',
+        'pattern': r'hisat2-align-s version (\S+)',
         'required': True,
-        'msg': 'RNA-seq aligner',
+        'msg': 'RNA-seq aligner (replaces STAR)',
     },
     'fasterq-dump': {
         'cmd': 'fasterq-dump -h',
@@ -255,16 +258,16 @@ _CHECK_DEFS = {
 
     # ── MAJIQ + VOILA (可变剪接) ─────────────────────────────────
     'MAJIQ': {
-        'cmd': 'conda run -n majiq_academic majiq -h 2>&1',
-        'pattern': r'majiq',
+        'cmd': 'conda run -n majiq_academic majiq -h 2>&1 | grep -im1 "^usage"',
+        'pattern': r'(?i)^usage:\s*(\S*majiq\S*)',
         'required': True,
         'msg': 'MAJIQ alternative splicer '
                '(独立 conda env: majiq_academic)',
         'mode_only': ['as'],
     },
     'VOILA': {
-        'cmd': 'conda run -n majiq_academic voila -h 2>&1',
-        'pattern': r'voila',
+        'cmd': 'conda run -n majiq_academic voila -h 2>&1 | grep -im1 "^usage"',
+        'pattern': r'(?i)^usage:\s*(\S*voila\S*)',
         'required': True,
         'msg': 'VOILA visualization (ships with MAJIQ)',
         'mode_only': ['as'],
@@ -310,13 +313,6 @@ _CHECK_DEFS = {
         'pattern': r'Arabidopsis\.h5',
         'required': False,
         'msg': 'PLEK2 pre-trained plant model (h5 file)',
-        'mode_only': ['lncrna'],
-    },
-    'featureCounts': {
-        'cmd': 'featureCounts -v 2>&1',
-        'pattern': r'version',
-        'required': False,
-        'msg': 'Read counting',
         'mode_only': ['lncrna'],
     },
     'rsem-prepare-reference': {
@@ -448,17 +444,30 @@ def check_dependencies(auto_install=True, mode=None, interactive=True, genome=No
 
     # ── Phase 3: check R packages ─────────────────────────────────────
     from prnaseqtools.auto_install import install_r_packages
+    r_ok = True
     try:
-        install_r_packages(prefix, mode=mode, tee=tee)
+        r_ok = install_r_packages(prefix, mode=mode, tee=tee)
     except Exception:
-        tee.write("Warning: R package check failed\n")
+        r_ok = False
+    if not r_ok:
+        tee.write("ERROR: R package check/install failed\n")
 
     # ── Phase 3.5: ensure mapping indices exist ───────────────────────
     from prnaseqtools.reference import check_and_build_indices
+    idx_ok = True
     try:
-        check_and_build_indices(prefix, genome=genome, mode=mode, tee=tee)
+        idx_results = check_and_build_indices(prefix, genome=genome, mode=mode,
+                                              tee=tee)
+        if isinstance(idx_results, dict):
+            flat = []
+            for v in idx_results.values():
+                flat.extend(v.values() if isinstance(v, dict) else [v])
+            idx_ok = all(flat) if flat else True
     except Exception:
         tee.write("Warning: Index check failed\n")
+        idx_ok = False
+    if not idx_ok:
+        tee.write("ERROR: mapping index check/build failed\n")
 
     # ── Phase 4: fail on remaining required missing ───────────────────
     if missing:
@@ -471,10 +480,13 @@ def check_dependencies(auto_install=True, mode=None, interactive=True, genome=No
             tee.write("Install them manually or run with --auto-install\n")
             sys.exit(1)
 
-    cache[cache_key] = {
-        'env_fingerprint': _get_env_fingerprint(),
-        'mode': mode,
-    }
-    _save_cache(cache)
+    if r_ok and idx_ok:
+        cache[cache_key] = {
+            'env_fingerprint': _get_env_fingerprint(),
+            'mode': mode,
+        }
+        _save_cache(cache)
+    else:
+        tee.write("Not caching precheck result (R packages or index build failed)\n")
 
     tee.write("Precheck completed!\n\n")

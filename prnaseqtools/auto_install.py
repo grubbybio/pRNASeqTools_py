@@ -4,13 +4,13 @@ Detects missing external tools and installs them via the best available
 package manager (mamba > conda > pip > manual).
 
 Installation sources per tool:
-  bioconda   — fastp, samtools, bowtie, bowtie2, star, subread,
+  bioconda   — fastp, samtools, bowtie, bowtie2, hisat2, subread,
                bedtools, sra-tools, gffread, deeptools, genrich,
                umi_tools, ucsc-bedgraphtobigwig, bismark, shortstack,
                stringtie, gffcompare, rsem, htslib, numpy, scipy
   conda-forge — r-base, r-essentials, bioconductor-*
   pip         — clipper (CLIPper), numpy, scipy (fallback)
-  R           — batch install via checkPackages.R (BiocManager/devtools)
+  R           — batch install via checkPackages.R (BiocManager + pak::pak)
   git+make    — CLIPper (last resort)
   manual      — RiboTaper (GitHub: hsinyenwu/RiboTaper)
 """
@@ -39,11 +39,13 @@ def _detect_pm():
     return None
 
 
-def _pm_install(pm, packages, channel=None):
+def _pm_install(pm, packages, channel=None, no_deps=False):
     """Install packages via mamba or conda. Returns True on success."""
     if isinstance(packages, str):
         packages = [packages]
     cmd = [pm, 'install', '-y', '-q']
+    if no_deps:
+        cmd.append('--no-deps')
     if channel:
         cmd += ['-c', channel]
     cmd += packages
@@ -96,9 +98,9 @@ DEPENDENCY_REGISTRY = {
         'pkg': 'r-base', 'channel': 'conda-forge',
         'install_msg': 'R statistical computing',
     },
-    'STAR': {
-        'pkg': 'star', 'channel': 'bioconda',
-        'install_msg': 'RNA-seq aligner',
+    'hisat2': {
+        'pkg': 'hisat2', 'channel': 'bioconda',
+        'install_msg': 'RNA-seq aligner (replaces STAR)',
     },
     'gffread': {
         'pkg': 'gffread', 'channel': 'bioconda',
@@ -170,13 +172,6 @@ DEPENDENCY_REGISTRY = {
         'mode_only': ['chip', 'atac', 'tf'],
     },
 
-    # ── Consensus peak counting (ChIP dual_factor) ─────────────────
-    'bedtools': {
-        'pkg': 'bedtools', 'channel': 'bioconda',
-        'install_msg': 'bedtools multicov (peak read counting, dual_factor)',
-        'mode_only': ['chip', 'tf'],
-    },
-
     # ── Transcript assembly & classification (Ribo / lncRNA) ────────
     'stringtie': {
         'pkg': 'stringtie', 'channel': 'bioconda',
@@ -187,11 +182,6 @@ DEPENDENCY_REGISTRY = {
         'pkg': 'gffcompare', 'channel': 'bioconda',
         'install_msg': 'GTF comparison & class-code annotation (Ribo-seq / lncRNA-seq)',
         'mode_only': ['ribo', 'lncrna'],
-    },
-    'featureCounts': {
-        'pkg': 'subread', 'channel': 'bioconda',
-        'install_msg': 'featureCounts read quantification (lncRNA-seq)',
-        'mode_only': ['lncrna'],
     },
     'FEELnc': {
         'pkg': 'feelnc',
@@ -210,8 +200,11 @@ DEPENDENCY_REGISTRY = {
         'requires_model_download': True,
     },
     'rsem-prepare-reference': {
-        'pkg': 'rsem', 'channel': 'bioconda',
-        'install_msg': 'RNA-seq expression quantification (RSEM)',
+        'pkg': 'rsem', 'channel': 'bioconda', 'no_deps': True,
+        # EBSeq 最高只编到 r-base 4.3, 当前环境 R >=4.5 硬冲突
+        # rsem-prepare-reference / rsem-calculate-expression 是纯 C++ binary,
+        # 只有 rsem-run-ebseq (不用) 才依赖 EBSeq
+        'install_msg': 'RNA-seq expression quantification (RSEM, --no-deps)',
         'mode_only': ['ribo'],
     },
 
@@ -296,6 +289,24 @@ def _find_htslib_env():
 
 
 
+def _apply_sed_patch(path, sed_cmd):
+    """Apply a sed 's<d>old<d>new<d>' expression in-place (cross-platform)."""
+    if len(sed_cmd) < 2 or sed_cmd[0] != 's':
+        raise ValueError(f"unsupported patch expression: {sed_cmd}")
+    delim = sed_cmd[1]
+    parts = sed_cmd[2:].split(delim)
+    if len(parts) < 2:
+        raise ValueError(f"unsupported patch expression: {sed_cmd}")
+    old = parts[0].replace('\\n', '\n')
+    new = parts[1].replace('\\n', '\n')
+    with open(path, 'r') as f:
+        content = f.read()
+    if old not in content:
+        raise ValueError(f"patch target not found in {path}")
+    with open(path, 'w') as f:
+        f.write(content.replace(old, new, 1))
+
+
 def _install_in_conda_env(env_name, info, tee):
     """在指定 conda env 里: clone + patch + pip install ."""
     github_url = info['github']
@@ -314,8 +325,7 @@ def _install_in_conda_env(env_name, info, tee):
                 full = os.path.join(clone_dir, rel_path)
                 tee.write(f"  patch {rel_path}...\n")
                 if os.path.exists(full):
-                    subprocess.run(['sed', '-i', '', sed_cmd, full],
-                                   check=True, timeout=10)
+                    _apply_sed_patch(full, sed_cmd)
         tee.write(f"  pip install {repo_name} in env '{env_name}'...\n")
         env = os.environ.copy()
         if info.get('needs_htslib'):
@@ -330,7 +340,8 @@ def _install_in_conda_env(env_name, info, tee):
         )
         tee.write(f"  ✓ installed in conda env '{env_name}'\n")
         return True
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            ValueError) as e:
         tee.write(f"  ✗ failed in conda env '{env_name}': {e}\n")
         return False
     finally:
@@ -522,16 +533,20 @@ def install_tool(name, info, tee=None):
             tee.write(f"  {info['pkg']} ... ✓ 已装\n")
             return True
         tee.write(f"  Trying {pm} install {info['pkg']}...\n")
-        if _pm_install(pm, info['pkg'], channel):
+        no_deps = info.get('no_deps', False)
+        if _pm_install(pm, info['pkg'], channel, no_deps):
             tee.write(f"  {name} installed via {pm}\n")
             return True
 
     # 2. Try pip
     if info.get('pip'):
-        tee.write(f"  Trying pip install {info['pip']}...\n")
+        pip_pkgs = info['pip']
+        if isinstance(pip_pkgs, str):
+            pip_pkgs = [pip_pkgs]
+        tee.write(f"  Trying pip install {' '.join(pip_pkgs)}...\n")
         try:
             subprocess.run(
-                [sys.executable, '-m', 'pip', 'install', '-q', info['pip']],
+                [sys.executable, '-m', 'pip', 'install', '-q'] + pip_pkgs,
                 check=True, timeout=300
             )
             tee.write(f"  {name} installed via pip\n")
@@ -572,10 +587,7 @@ def install_tool(name, info, tee=None):
                     full = os.path.join(clone_dir, rel_path)
                     tee.write(f"  patch {rel_path}...\n")
                     if os.path.exists(full):
-                        subprocess.run(
-                            ['sed', '-i', '', sed_cmd, full],
-                            check=True, timeout=10
-                        )
+                        _apply_sed_patch(full, sed_cmd)
                     else:
                         tee.write(f"    WARNING: patch target not found: {full}\n")
             # 自定义环境变量
@@ -608,7 +620,8 @@ def install_tool(name, info, tee=None):
                 )
             tee.write(f"  {name} installed from GitHub\n")
             return True
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                ValueError):
             tee.write(f"  GitHub install failed for {name}\n")
         finally:
             shutil.rmtree(clone_dir, ignore_errors=True)
@@ -770,7 +783,8 @@ def install_r_packages(prefix, mode=None, tee=None):
         # ── 都没装 → 正式安装 ──
         if pm and conda_pkg:
             tee.write(f"  [conda] {conda_pkg} ({conda_ch}) ← {r_name} ... ")
-            ok = _pm_install(pm, conda_pkg, conda_ch)
+            no_deps = info.get('no_deps', False)
+            ok = _pm_install(pm, conda_pkg, conda_ch, no_deps)
             if ok:
                 tee.write("✓\n")
                 conda_ok.append(r_name)
@@ -790,8 +804,9 @@ def install_r_packages(prefix, mode=None, tee=None):
 
     tee.write(f"\n  R fallback for: {', '.join(r_pkg_names)}\n")
     all_ok = True
+    still_missing = []
 
-    # Run checkPackages.R — this covers BiocManager::install + install.packages + devtools
+    # Run checkPackages.R — this covers BiocManager::install + install.packages + pak::pak
     if os.path.exists(rscript_path):
         pkg_names_csv = ','.join(r_pkg_names)
         try:
@@ -799,15 +814,22 @@ def install_r_packages(prefix, mode=None, tee=None):
                 f"Rscript --vanilla {rscript_path} --packages {pkg_names_csv}",
                 shell=True, check=True, timeout=1800
             )
-            tee.write("  R fallback completed successfully\n")
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            tee.write("  Some packages failed even after R fallback\n")
+            tee.write("  checkPackages.R reported failures\n")
+
+        still_missing = [p for p in r_pkg_names if not _is_r_pkg_installed(p)]
+        if still_missing:
+            tee.write(f"  Still missing after R fallback: "
+                      f"{', '.join(still_missing)}\n")
             all_ok = False
+        else:
+            tee.write("  R fallback completed successfully\n")
     else:
         tee.write("  checkPackages.R missing — cannot run R fallback\n")
+        still_missing = list(r_pkg_names)
         all_ok = False
 
     tee.write(f"\nSummary: conda={len(conda_ok)}, "
-              f"R-success={len(conda_skipped) + len(conda_failed) - (0 if all_ok else len(r_pkg_names))}, "
+              f"R-success={len(r_pkg_names) - len(still_missing)}, "
               f"total={len(pkgs)}\n")
     return all_ok

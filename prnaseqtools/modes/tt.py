@@ -69,6 +69,11 @@ def run(opts):
 
         for p in range(1, 9):
             j = p - 1
+            if not os.path.exists(f"{tag}.unmapped_{j}.fastq"):
+                break
+            if os.path.getsize(f"{tag}.unmapped_{j}.fastq") == 0:
+                os.unlink(f"{tag}.unmapped_{j}.fastq")
+                break
             with open(f"{tag}.unmapped_{j}.fastq") as fq_in, open("tmp.fastq", 'w') as fq_out:
                 for n, line in enumerate(fq_in):
                     line = line.strip()
@@ -106,11 +111,15 @@ def run(opts):
         # ShortStack alignment
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
         run_cmd(
-            f"ShortStack --outdir {tag}tmp --align_only --bowtie_m 1000 "
-            f"--ranmax 50 --mmap {mmap} --mismatches 0 --bowtie_cores {thread} "
-            f"--nohp --readfile {tag}_edited.fastq --genomefile {fasta_path}")
+            f"ShortStack --outdir {tag}tmp --align_only --mmap {mmap} "
+            f"--threads {thread} --nohp --readfile {tag}_edited.fastq "
+            f"--genomefile {fasta_path}")
 
-        run_cmd(f"samtools view -h {tag}tmp/{tag}_edited.bam > {tag}")
+        # ShortStack >= 4.1 outputs {tag}_edited_condensed.bam, older uses {tag}_edited.bam
+        ss_bam = f"{tag}tmp/{tag}_edited_condensed.bam"
+        if not os.path.exists(ss_bam):
+            ss_bam = f"{tag}tmp/{tag}_edited.bam"
+        run_cmd(f"samtools view -h {ss_bam} > {tag}")
         run_cmd(
             f"awk '{{if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".edited.sam\")}}' {tag}")
         run_cmd(f"samtools view -Sb {tag}.edited.sam > {tag}.edited.bam")

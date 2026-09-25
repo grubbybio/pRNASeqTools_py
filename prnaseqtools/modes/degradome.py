@@ -1,6 +1,6 @@
 """
 Degradome-seq (PARE/GMUCT) analysis mode.
-STAR alignment to transcriptome + genome → sPARTA peak finding → CRI calculation.
+HISAT2 alignment to transcriptome + genome → sPARTA peak finding → CRI calculation.
 """
 
 import os
@@ -13,7 +13,11 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, revcomp, _tee, run_cmd, gzip_fastq, preserve_raw_fastq, try_use_shared_star_index, save_star_index_to_reference
+from prnaseqtools.functions import (download_sra, unzip_file, revcomp, _tee, run_cmd,
+                                     gzip_fastq, preserve_raw_fastq,
+                                     cleanup_alignment_outputs,
+                                     hisat2_build_index, hisat2_align_single,
+                                     try_use_shared_hisat_index, save_hisat_index_to_reference)
 from prnaseqtools import reference as ref
 
 
@@ -46,7 +50,7 @@ def run(opts):
             files.extend(t_files)
             pars.extend(t_pars)
 
-    par_str = ' '.join(pars)
+    tag_str = ' '.join(tags)
 
     if not nomapping:
         ref.get_gene_info(prefix, genome)
@@ -54,28 +58,23 @@ def run(opts):
 
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
         run_cmd(f"gffread -T {gff_path} -o {genome}.gtf")
+        ref.primary_transcript(prefix, genome)
 
-        # Build transcriptome index (special — uses {genome}.fa, not the standard
-# {genome}_chr_all.fasta; index is task-local so we don't share across runs).
-        if os.path.exists("Genome"):
-            run_cmd("rm -rf Genome")
-        os.makedirs("Genome", exist_ok=True)
-        run_cmd(
-            f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
-            f"--genomeFastaFiles {genome}.fa --genomeSAindexNbases 10 --limitGenomeGenerateRAM 64000000000")
+        # Build transcriptome HISAT2 index (special — uses {genome}.fa, not the standard
+        # {genome}_chr_all.fasta; task-local 不共享，因为跟 genome-wide 不同)
+        tx_idx = "TxIdx"
+        tee.write("\nBuilding transcriptome HISAT2 index ...\n")
+        hisat2_build_index(f"{genome}.fa", f"{genome}.gtf", tx_idx, thread, tee=tee)
 
-        # Build genome index (shared via reference/{genome}_Genome2)
-        if not try_use_shared_star_index(genome, prefix, "Genome2", tee):
-            if os.path.exists("Genome2"):
-                run_cmd("rm -rf Genome2")
-            os.makedirs("Genome2", exist_ok=True)
+        # Build/use genome HISAT2 index (共享 via reference/{genome}_HisatIdx)
+        gn_idx = "GnIdx"
+        tee.write("Building/using genome HISAT2 index ...\n")
+        if not try_use_shared_hisat_index(genome, prefix, gn_idx, tee):
             fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
-            run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir Genome2 --runMode genomeGenerate "
-                f"--genomeFastaFiles {fasta_path} --sjdbGTFfile {gff_path} "
-                f"--sjdbGTFtagExonParentTranscript Parent --sjdbGTFtagExonParentGene ID --genomeSAindexNbases 10 --sjdbOverhang 99 "
-                f"--limitGenomeGenerateRAM 64000000000")
-            save_star_index_to_reference(genome, prefix, "Genome2", tee)
+            hisat2_build_index(fasta_path, gff_path, gn_idx, thread, tee=tee)
+            save_hisat_index_to_reference(genome, prefix, gn_idx, tee)
+
+        hisat_extra = "--max-hits 50 --mp 3,3 --score-min L,0,-0.3"
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -101,16 +100,10 @@ def run(opts):
             tee.write("\nStart mapping...\n")
 
             # Map to transcriptome
-            run_cmd(
-                f"STAR --genomeDir Genome --seedSearchStartLmax 25 --outSAMtype BAM SortedByCoordinate "
-                f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
-                f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
-                f"--limitOutSJcollapsed 10000000 --limitIObufferSize 280000000 "
-                f"--runThreadN {thread} --outFileNamePrefix {tag}_tx_ "
-                f"--readFilesIn {tag}.fastq")
-            os.rename(f"{tag}_tx_Aligned.sortedByCoord.out.bam", f"{tag}.bam")
-            if os.path.exists(f"{tag}_tx_Log.final.out"):
-                with open(f"{tag}_tx_Log.final.out") as lf:
+            hisat2_align_single(tag, f"{tag}.fastq", tx_idx, thread,
+                                extra_args=hisat_extra)
+            if os.path.exists(f"{tag}_Log.txt"):
+                with open(f"{tag}_Log.txt") as lf:
                     tee.write(lf.read())
 
             run_cmd(f"samtools index {tag}.bam")
@@ -118,17 +111,11 @@ def run(opts):
                 f"bamCoverage -b {tag}.bam --skipNAs -bs 5 -p {thread} "
                 f"--minMappingQuality 10 --ignoreDuplicates --normalizeUsing CPM -o {tag}.bw")
 
-            # Map to genome
-            run_cmd(
-                f"STAR --genomeDir Genome2 --seedSearchStartLmax 25 --outSAMtype BAM SortedByCoordinate "
-                f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
-                f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
-                f"--limitOutSJcollapsed 10000000 --limitIObufferSize 280000000 "
-                f"--runThreadN {thread} --outFileNamePrefix {tag}_gn_ "
-                f"--readFilesIn {tag}.fastq")
-            os.rename(f"{tag}_gn_Aligned.sortedByCoord.out.bam", f"{tag}.genomic.bam")
-            if os.path.exists(f"{tag}_gn_Log.final.out"):
-                with open(f"{tag}_gn_Log.final.out") as lf:
+            # Map to genome — 用 tag={tag}.genomic 让输出自动变成 {tag}.genomic.bam
+            hisat2_align_single(f"{tag}.genomic", f"{tag}.fastq", gn_idx, thread,
+                                extra_args=hisat_extra)
+            if os.path.exists(f"{tag}.genomic_Log.txt"):
+                with open(f"{tag}.genomic_Log.txt") as lf:
                     tee.write(lf.read())
 
             run_cmd(f"samtools index {tag}.genomic.bam")
@@ -154,29 +141,29 @@ def run(opts):
 
         if not mappingonly:
             tee.write("Finding peaks...\n")
-            _find_peaks(thread, prefix, genome, sirna, tags)
+            _find_peaks(thread, prefix, genome, sirna, tags, tee)
 
             tee.write("Calculating CRIs...\n")
+            os.makedirs("genomic_bam", exist_ok=True)
+            for fname in globmod.glob("*.genomic.bam*"):
+                os.rename(fname, os.path.join("genomic_bam", fname))
             run_cmd(
-                f"Rscript --vanilla {prefix}/scripts/ribo.R {genome} {par_str}")
+                f"Rscript --vanilla {prefix}/scripts/ribo.R {genome} {tag_str}")
             _calculate_cri(tags, targets)
             run_cmd(
-                f"Rscript --vanilla {prefix}/scripts/CRI.R {par_str}")
+                f"Rscript --vanilla {prefix}/scripts/CRI.R {tag_str}")
 
         # Cleanup
-        for fname in globmod.glob("*_Log.out") + globmod.glob("*_Log.progress.out") + \
-                     globmod.glob("*_Log.final.out") + globmod.glob("*_SJ.out.tab") + \
-                     globmod.glob("*_Aligned.sortedByCoord.out.bam") + \
-                     globmod.glob("*_Aligned.out.sam") + \
-                     globmod.glob("*_ReadsUnmapped*.fastq") + globmod.glob("*_ReadsUnmapped*.fq"):
+        # 注：GnIdx 可能是 symlink → reference/{genome}_HisatIdx（共享 index），cleanup_alignment_outputs
+        # 不会碰 *.ht2 / *.htl 文件，这里额外清 TxIdx（task-local，每次 run 都重建）
+        import glob as _glob
+        for pat in ("TxIdx*.ht2", "TxIdx.htl", "_TxIdx_splicesites.txt"):
+            for f in _glob.glob(pat):
+                os.unlink(f)
+        cleanup_alignment_outputs(extra_globs=(f"{genome}.fa", f"{genome}.gtf", f"{genome}.fa.fai", f"{genome}*.fai"))
+        for fname in (f"{genome}.fa", f"{genome}.gtf", f"{genome}.PrimaryTranscript.gtf", f"{genome}.fa.fai"):
             if os.path.exists(fname):
                 os.unlink(fname)
-        for fname in (f"{genome}.fa", f"{genome}.gtf", f"{genome}.fa.fai"):
-            if os.path.exists(fname):
-                os.unlink(fname)
-        for d in ("Genome", "Genome2"):
-            if os.path.exists(d) and not os.path.islink(d):
-                run_cmd(f"rm -rf {d}")
 
     else:
         # No mapping mode
@@ -187,20 +174,21 @@ def run(opts):
         tee.write("Finding peaks...\n")
         ref.get_gene_info(prefix, genome)
         os.rename("transcripts.fa", f"{genome}.fa")
-        _find_peaks(thread, prefix, genome, sirna, tags)
+        _find_peaks(thread, prefix, genome, sirna, tags, tee)
 
         tee.write("Calculating CRIs...\n")
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
         run_cmd(f"gffread -T {gff_path} -o {genome}.gtf")
+        ref.primary_transcript(prefix, genome)
         run_cmd(
-            f"Rscript --vanilla {prefix}/scripts/ribo.R {genome} {par_str}")
+            f"Rscript --vanilla {prefix}/scripts/ribo.R {genome} {tag_str}")
         _calculate_cri(tags, targets)
         run_cmd(
-            f"Rscript --vanilla {prefix}/scripts/CRI.R {par_str}")
+            f"Rscript --vanilla {prefix}/scripts/CRI.R {tag_str}")
 
         for fname in globmod.glob("*_lib.txt"):
             os.unlink(fname)
-        for fname in (f"{genome}.gtf", f"{genome}.fa"):
+        for fname in (f"{genome}.gtf", f"{genome}.PrimaryTranscript.gtf", f"{genome}.fa"):
             if os.path.exists(fname):
                 os.unlink(fname)
         for fname in globmod.glob("*.bam"):
@@ -246,62 +234,67 @@ def _calculate_cri(tags, targets):
                             fh.write(f"{target}\t{f0}\t{f1}\t{f2}\t{log_val}\n")
 
 
-def _find_peaks(thread, prefix, genome, sirna, tags):
+def _find_peaks(thread, prefix, genome, sirna, tags, tee):
     """Run sPARTA for peak finding."""
+    sparta_path = os.path.join(prefix, "sPARTA.py")
+    if not os.path.exists(sparta_path):
+        tee.write(f"\nERROR: sPARTA.py not found at {sparta_path} — please install sPARTA before running degradome analysis.\n")
+        sys.exit(1)
+
     os.makedirs("sparta", exist_ok=True)
     os.chdir("sparta")
 
-    os.symlink(f"../{genome}.fa", f"{genome}.fa")
+    try:
+        os.symlink(f"../{genome}.fa", f"{genome}.fa")
 
-    # Create miRNA FASTA
-    fas = ref.read_fasta(prefix, genome)
-    mirna_data = defaultdict(lambda: {'name': ''})
-    mir_gff = os.path.join(prefix, "reference", f"{genome}_miRNA_miRNA_star.gff")
+        # Create miRNA FASTA
+        fas = ref.read_fasta(prefix, genome)
+        mirna_data = defaultdict(lambda: {'name': ''})
+        mir_gff = os.path.join(prefix, "reference", f"{genome}_miRNA_miRNA_star.gff")
 
-    with open(mir_gff) as fh:
-        for line in fh:
-            cols = line.strip().split('\t')
-            if len(cols) < 9:
-                continue
-            miseq = fas.get(cols[0], "")[int(cols[3]) - 1:int(cols[4])]
-            if cols[6] == '-':
-                miseq = revcomp(miseq)
-            mirna_data[miseq]['name'] += cols[8] + ';'
+        with open(mir_gff) as fh:
+            for line in fh:
+                cols = line.strip().split('\t')
+                if len(cols) < 9:
+                    continue
+                miseq = fas.get(cols[0], "")[int(cols[3]) - 1:int(cols[4])]
+                if cols[6] == '-':
+                    miseq = revcomp(miseq)
+                mirna_data[miseq]['name'] += cols[8] + ';'
 
-    with open(f"{genome}_miRNA.fa", 'w') as fh:
-        for miseq in sorted(mirna_data.keys()):
-            mirna_data[miseq]['name'] = mirna_data[miseq]['name'].rstrip(';')
-            fh.write(f">{mirna_data[miseq]['name']}\n{miseq}\n")
+        with open(f"{genome}_miRNA.fa", 'w') as fh:
+            for miseq in sorted(mirna_data.keys()):
+                mirna_data[miseq]['name'] = mirna_data[miseq]['name'].rstrip(';')
+                fh.write(f">{mirna_data[miseq]['name']}\n{miseq}\n")
 
-    if sirna != 'none':
-        run_cmd(f"cat {sirna} >> {genome}_miRNA.fa")
+        if sirna != 'none':
+            run_cmd(f"cat {sirna} >> {genome}_miRNA.fa")
 
-    # Symlink sPARTA
-    sparta_path = os.path.join(prefix, "sPARTA.py")
-    os.symlink(sparta_path, "sPARTA.py")
+        # Symlink sPARTA
+        os.symlink(sparta_path, "sPARTA.py")
 
-    # Symlink library files
-    tags_lib = []
-    for tag in tags:
-        lib_file = f"{tag}_lib.txt"
-        os.symlink(f"../{lib_file}", lib_file)
-        tags_lib.append(lib_file)
+        # Symlink library files
+        tags_lib = []
+        for tag in tags:
+            lib_file = f"{tag}_lib.txt"
+            os.symlink(f"../{lib_file}", lib_file)
+            tags_lib.append(lib_file)
 
-    libs_str = ' '.join(tags_lib)
-    run_cmd(
-        f"python3 sPARTA.py -accel {thread} -featureFile {genome}.fa "
-        f"-genomeFeature 0 -miRNAFile {genome}_miRNA.fa -libs {libs_str} "
-        f"-minTagLen 18 -tarPred -tarScore --tag2FASTA --map2DD --validate")
+        libs_str = ' '.join(tags_lib)
+        run_cmd(
+            f"python3 sPARTA.py -accel {thread} -featureFile {genome}.fa "
+            f"-genomeFeature 0 -miRNAFile {genome}_miRNA.fa -libs {libs_str} "
+            f"-minTagLen 18 -tarPred -tarScore --tag2FASTA --map2DD --validate")
 
-    # Move output files
-    if os.path.exists("output"):
-        for fname in os.listdir("output"):
-            src = os.path.join("output", fname)
-            dst = os.path.join("..", fname)
-            if os.path.exists(dst):
-                os.unlink(dst)
-            os.rename(src, dst)
-        os.rmdir("output")
-
-    os.chdir("..")
-    run_cmd("rm -rf sparta")
+        # Move output files
+        if os.path.exists("output"):
+            for fname in os.listdir("output"):
+                src = os.path.join("output", fname)
+                dst = os.path.join("..", fname)
+                if os.path.exists(dst):
+                    os.unlink(dst)
+                os.rename(src, dst)
+            os.rmdir("output")
+    finally:
+        os.chdir("..")
+        run_cmd("rm -rf sparta")

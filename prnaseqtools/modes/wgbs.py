@@ -196,9 +196,10 @@ def run(opts):
                 os.unlink(symlink_target)
             os.symlink(f"../{pre}.CX_report.txt.gz", symlink_target)
 
-        tee.write("\nPerforming DMRcaller...\n")
-        run_cmd(
-            f"Rscript --vanilla {prefix}/scripts/DMRcaller.R {thread} {par_str}")
+        if len(pars) > 2:
+            tee.write("\nPerforming DMRcaller...\n")
+            run_cmd(
+                f"Rscript --vanilla {prefix}/scripts/DMRcaller.R {thread} {par_str}")
         for fname in globmod.glob("*.CX_report.txt.gz"):
             os.unlink(fname)
 
@@ -250,11 +251,19 @@ def _bin_methylation(tag, binsize, min_c, tee):
 
                     bin_idx = flag // binsize
                     fhs[ctx].write(f"{chr_name}_{bin_idx}\t{ccount_total[ctx]}\t{ctcount_total[ctx]}\t{num[ctx]}\t{covtotal[ctx]}\n")
+                    totalbin[ctx] += 1
+                    if covtotal[ctx] >= 4:
+                        passedbin[ctx] += 1
+
+                    ccount_total[ctx] = 0
+                    ctcount_total[ctx] = 0
+                    cavg[ctx] = 0.0
+                    num[ctx] = 0
+                    covtotal[ctx] = 0
 
                 flag = binsize
                 chr_name = curr_chr
                 tee.write(f"Working on {chr_name}...\n")
-                continue
 
             pos = int(cols[1])
             ctx_type = cols[5]

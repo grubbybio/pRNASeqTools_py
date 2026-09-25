@@ -2,7 +2,7 @@
 lncRNA-seq analysis mode.
 
 Pipeline:
-  1. STAR mapping (same as mrna mode)
+  1. HISAT2 mapping (same as mrna mode)
   2. StringTie transcript assembly → per-sample GTF
   3. Merge all sample GTFs with reference (gffcompare) → full transcriptome
   4. Classify novel transcripts:
@@ -13,7 +13,7 @@ Pipeline:
   6. DESeq2 differential expression, split by transcript class
   7. Output summary tables + visualization
 
-Inputs: FASTQ / BAM (existing STAR-aligned BAM supported).
+Inputs: FASTQ / BAM (existing HISAT2-aligned BAM supported).
 """
 
 import os
@@ -22,13 +22,18 @@ import glob as globmod
 import subprocess
 from pathlib import Path
 
+from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
                                         _resolve_path)
-from prnaseqtools.functions import (_tee, run_cmd, download_sra, unzip_file, gzip_fastq, preserve_raw_fastq, try_use_shared_star_index, save_star_index_to_reference)
+from prnaseqtools.functions import (_tee, run_cmd, download_sra, unzip_file, gzip_fastq, preserve_raw_fastq,
+                                     try_use_shared_hisat_index, save_hisat_index_to_reference,
+                                     hisat2_build_index, hisat2_align_single, hisat2_align_paired,
+                                     cleanup_alignment_outputs)
 
 
 def run(opts):
     """Main entry point for lncRNA-seq analysis."""
+    opts = validate_options(opts)
     tee = _tee()
 
     thread = opts.get('thread', 4)
@@ -36,7 +41,7 @@ def run(opts):
     adaptor = opts.get('adaptor')
     # prefix must point to the project root so that prefix/reference/{genome}_Genome
     # resolves to ~/software/pRNASeqTools_py/reference/ (not prnaseqtools/reference/)
-    prefix = opts.get('prefix', '/Users/cjyou/software/pRNASeqTools_py')
+    prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent.parent))
     foldchange = opts.get('foldchange', 2.0)
     pvalue = opts.get('pvalue', 0.01)
     fdr = opts.get('fdr', 1.0)
@@ -54,8 +59,8 @@ def run(opts):
     min_tx_len = opts.get('min_tx_len', 200)         # min transcript length
 
     mapping = run_mode in ('whole', 'mapping-only')
-    do_assemble = run_mode in ('whole', 'mapping-only', 'assemble-only')
-    do_quantify = run_mode != 'mapping-only'
+    do_assemble = run_mode in ('whole', 'assemble-only')
+    do_quantify = run_mode in ('whole', 'de-only', 'count-table')
     do_de = run_mode in ('whole', 'de-only', 'count-table')
 
     # ── Reference paths ─────────────────────────────────────────────────
@@ -79,11 +84,11 @@ def run(opts):
     par_str = ' '.join(pars)
 
     # ── Stage 1: Mapping ────────────────────────────────────────────────
-    # Reuse mrna-style STAR mapping for each sample.
+    # Reuse mrna-style HISAT2 mapping for each sample.
     # After this stage we expect {tag}.bam for each sample.
     if mapping:
-        _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
-                    thread, genome_size, ref_fasta, ref_gff, prefix, tee)
+        seq_strategy = _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
+                                   thread, genome_size, genome, ref_fasta, ref_gff, prefix, tee)
 
     # ── Stage 2: StringTie transcript assembly ──────────────────────────
     if do_assemble:
@@ -119,7 +124,7 @@ def run(opts):
 
         # Ensure ref GTF exists
         if not os.path.exists(ref_gtf):
-            run_cmd(f"gffread -T -C -o {ref_gtf} -g {ref_fasta} {ref_gff}")
+            run_cmd(f"gffread -T -o {ref_gtf} -g {ref_fasta} {ref_gff}")
 
         for tag in tags:
             if mapping or do_assemble:
@@ -137,7 +142,7 @@ def run(opts):
     # ── Stage 4: DE analysis (DESeq2, split by tx class) ────────────────
     if do_de:
         if not os.path.exists(ref_gtf):
-            run_cmd(f"gffread -T -C -o {ref_gtf} -g {ref_fasta} {ref_gff}")
+            run_cmd(f"gffread -T -o {ref_gtf} -g {ref_fasta} {ref_gff}")
 
         full_gtf = "transcripts_final.gtf"
         if not os.path.exists(full_gtf):
@@ -166,28 +171,36 @@ def run(opts):
 # ═══════════════════════════════════════════════════════════════════════
 
 def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
-                thread, genome_size, ref_fasta, ref_gff, prefix, tee):
-    """Run STAR mapping for every sample. Mirrors mrna._run mapping block."""
+                thread, genome_size, genome, ref_fasta, ref_gff, prefix, tee):
+    """Run HISAT2 mapping for every sample.
 
-    tee.write("\nBuilding STAR genome index ...\n")
-    if not try_use_shared_star_index(genome, prefix, "Genome", tee):
-        if os.path.exists("Genome"):
-            run_cmd("rm -rf Genome")
-        os.makedirs("Genome", exist_ok=True)
+    HISAT2 参数对应原 STAR 参数的功能：
+      STAR --outFilterMultimapNmax 50    → HISAT2 --max-hits 50
+      STAR --outFilterMismatchNoverLmax  → HISAT2 --score-min L,0,-0.3 + --mp 3,3
+      STAR --alignIntronMax 5000         → HISAT2 默认 (不设，hisat2-build 用 --ss 包含已知外显子边界)
+      STAR --novel splice sites          → HISAT2 --novel-splicesite-outfile
+    """
 
-        run_cmd(
-            f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
-            f"--genomeSAindexNbases {genome_size} --genomeFastaFiles {ref_fasta} "
-            f"--sjdbGTFfile {ref_gff} --sjdbGTFtagExonParentTranscript Parent "
-            f"--sjdbGTFtagExonParentGene ID --sjdbOverhang 99 --limitGenomeGenerateRAM 64000000000")
-        save_star_index_to_reference(genome, prefix, "Genome", tee)
+    hisat_idx = "HisatIdx"
+    tee.write("\nBuilding HISAT2 genome index ...\n")
+    if not try_use_shared_hisat_index(genome, prefix, hisat_idx, tee):
+        hisat2_build_index(ref_fasta, ref_gff, hisat_idx, thread, tee=tee)
+        save_hisat_index_to_reference(genome, prefix, hisat_idx, tee)
 
     if mask:
         mask_path = _resolve_path(mask)
+        if os.path.lexists("mask.fa"):
+            os.unlink("mask.fa")
         os.symlink(mask_path, "mask.fa")
         run_cmd("bowtie-build -q mask.fa mask")
 
+    hisat_extra = "--max-hits 50 --mp 3,3 --score-min L,0,-0.3"
+
     for i, tag in enumerate(tags):
+        if i >= len(files):
+            tee.write(f"\n✗ No input file for sample '{tag}': "
+                      f"mapping requires FASTQ/BAM inputs\n")
+            sys.exit(1)
         fpath = files[i]
         tee.write(f"\nMapping {tag}...\n")
 
@@ -199,7 +212,7 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
                 seq_strategy = 'single'
                 unzip_file(sra[0], tag)
                 preserve_raw_fastq(from_sra, tag, paired=False)
-                # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
+                # fastp trimming
                 fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
                 run_cmd(
                     f"fastp -w {thread} --length_required 20 "
@@ -214,14 +227,9 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
                         f"{tag}.fastq {tag}.mask.out")
                     os.rename("tmp.fastq", f"{tag}.fastq")
 
-                run_cmd(
-                    f"STAR --runMode alignReads --genomeDir Genome --seedSearchStartLmax 25 "
-                    f"--alignIntronMax 5000 --outReadsUnmapped Fastx "
-                    f"--outSAMtype BAM SortedByCoordinate "
-                    f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
-                    f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
-                    f"--runThreadN {thread} --outFileNamePrefix {tag}_ "
-                    f"--readFilesIn {tag}.fastq")
+                hisat2_align_single(tag, f"{tag}.fastq", hisat_idx, thread,
+                                    extra_args=hisat_extra,
+                                    nov_sj_file=f"{tag}_SJ.out.tab")
                 if from_sra:
                     gzip_fastq(f"{tag}.raw.fastq")
             else:
@@ -229,7 +237,8 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
                 seq_strategy = 'paired'
                 unzip_file(sra[0], f"{tag}_R1")
                 unzip_file(sra[1], f"{tag}_R2")
-                # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
+                preserve_raw_fastq(from_sra, tag, paired=True)
+                # fastp trimming
                 fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
                 run_cmd(
                     f"fastp -w {thread} --length_required 20 "
@@ -249,25 +258,21 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
                     if os.path.exists("tmp_2.fastq"):
                         os.rename("tmp_2.fastq", f"{tag}_R2.fastq")
 
-                run_cmd(
-                    f"STAR --runMode alignReads --genomeDir Genome --seedSearchStartLmax 25 "
-                    f"--alignIntronMax 5000 --outReadsUnmapped Fastx "
-                    f"--outSAMtype BAM SortedByCoordinate "
-                    f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
-                    f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
-                    f"--runThreadN {thread} --outFileNamePrefix {tag}_ "
-                    f"--readFilesIn "
-                    f"{tag}_R1.fastq {tag}_R2.fastq")
+                hisat2_align_paired(tag, f"{tag}_R1.fastq", f"{tag}_R2.fastq",
+                                    hisat_idx, thread,
+                                    extra_args=hisat_extra,
+                                    nov_sj_file=f"{tag}_SJ.out.tab")
                 for fn in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
                     if os.path.exists(fn):
                         os.unlink(fn)
         else:
             # Explicit local paired-end
             f1, f2 = fpath.split(',')
-            seq_strategy = 'paired'
+            if seq_strategy is None:
+                seq_strategy = 'paired'
             unzip_file(f1, f"{tag}_R1")
             unzip_file(f2, f"{tag}_R2")
-            # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
+            # fastp trimming
             fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
             run_cmd(
                 f"fastp -w {thread} --length_required 20 "
@@ -287,35 +292,23 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
                 if os.path.exists("tmp_2.fastq"):
                     os.rename("tmp_2.fastq", f"{tag}_R2.fastq")
 
-            run_cmd(
-                f"STAR --runMode alignReads --genomeDir Genome --seedSearchStartLmax 25 "
-                f"--alignIntronMax 5000 --outSAMtype BAM SortedByCoordinate "
-                f"--limitBAMsortRAM 10000000000 --outSAMmultNmax 1 "
-                f"--outFilterMultimapNmax 50 --outFilterMismatchNoverLmax 0.1 "
-                f"--runThreadN {thread} --outFileNamePrefix {tag}_ "
-                f"--readFilesIn "
-                f"{tag}_R1.fastq {tag}_R2.fastq")
+            hisat2_align_paired(tag, f"{tag}_R1.fastq", f"{tag}_R2.fastq",
+                                hisat_idx, thread,
+                                extra_args=hisat_extra,
+                                nov_sj_file=f"{tag}_SJ.out.tab")
             for fn in (f"{tag}_R1.fastq", f"{tag}_R2.fastq"):
                 if os.path.exists(fn):
                     os.unlink(fn)
 
-        os.rename(f"{tag}_Aligned.sortedByCoord.out.bam", f"{tag}.bam")
-
-        if os.path.exists(f"{tag}_Log.final.out"):
-            with open(f"{tag}_Log.final.out") as lf:
+        # HISAT2 直接输出 {tag}.bam
+        if os.path.exists(f"{tag}_Log.txt"):
+            with open(f"{tag}_Log.txt") as lf:
                 tee.write(lf.read())
 
     # Cleanup
-    for fname in globmod.glob("*_Log.out") + globmod.glob("*_Log.progress.out") + \
-                 globmod.glob("*_Log.final.out") + globmod.glob("*_SJ.out.tab") + \
-                 globmod.glob("*_Aligned.sortedByCoord.out.bam") + \
-                 globmod.glob("*_Aligned.out.sam") + \
-                 globmod.glob("*_ReadsUnmapped*.fastq") + globmod.glob("*_ReadsUnmapped*.fq") + \
-                 globmod.glob("*_Unmapped.out.mate1") + globmod.glob("*_Unmapped.out.mate2"):
-        if os.path.exists(fname):
-            os.unlink(fname)
-    if os.path.exists("Genome") and not os.path.islink("Genome"):
-        run_cmd("rm -rf Genome")
+    cleanup_alignment_outputs(extra_globs=(f"{genome}_chr_all*", f"{genome}*.bt2"))
+
+    return seq_strategy
 
 
 def _do_assembly(tags, thread, ref_gtf, prefix, genome, min_fpkm, tee):
@@ -328,7 +321,7 @@ def _do_assembly(tags, thread, ref_gtf, prefix, genome, min_fpkm, tee):
         ref_gff_orig = os.path.join(prefix, "reference", f"{genome}_genes.gff")
         ref_fasta = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
         run_cmd(
-            f"gffread -T -C -o {ref_gtf} -g {ref_fasta} {ref_gff_orig}")
+            f"gffread -T -o {ref_gtf} -g {ref_fasta} {ref_gff_orig}")
 
     # StringTie uses annotation as a guide; novel transcripts still emitted
     for tag in tags:
@@ -341,7 +334,7 @@ def _do_assembly(tags, thread, ref_gtf, prefix, genome, min_fpkm, tee):
         run_cmd(
             f"stringtie {bam} -G {ref_gtf} -o {tag}_assembled.gtf "
             f"-p {thread} -f {min_fpkm} -l {tag} "
-            f"--merge -A {tag}_gene_abund.tab "
+            f"-A {tag}_gene_abund.tab "
             f"-C {tag}_cov.gtf")
 
     # Clean auxiliary StringTie outputs we don't need right now
@@ -379,7 +372,8 @@ def _do_gffcompare(merged_gtf, ref_gtf, tee):
     """
     Run gffcompare merged.gtf vs reference.
 
-    gffcompare produces 'merged.gtf.class_code' file + 'gffcmp.annotated.gtf'
+    gffcompare writes per-transcript class codes as attributes in
+    'gffcmp.annotated.gtf'
     class codes we care about:
       '=' complete match to reference isoform
       'c' contained in reference
@@ -402,8 +396,6 @@ def _do_gffcompare(merged_gtf, ref_gtf, tee):
         f"gffcompare -r {ref_gtf} -o {out_prefix} {merged_gtf}")
 
     class_gtf = f"{out_prefix}.annotated.gtf"
-    class_tbl = f"{out_prefix}.tmap"          # transcript map w/ class codes
-    class_code = f"{out_prefix}.class_code.tsv"  # per-transcript class
 
     if not os.path.exists(class_gtf):
         tee.write(f"  ✗ gffcompare output missing ({class_gtf})\n")
@@ -412,22 +404,40 @@ def _do_gffcompare(merged_gtf, ref_gtf, tee):
     tee.write(f"  gffcompare annotated GTF → {class_gtf}\n")
     tee.write(f"  Transcripts: {_count_gtf_transcripts(class_gtf)}\n")
 
-    _summarize_class_codes(class_code, tee)
+    _summarize_class_codes(class_gtf, tee)
     return class_gtf
 
 
-def _summarize_class_codes(class_code_file, tee):
-    """Print class-code summary."""
-    if not os.path.exists(class_code_file):
-        return
-    codes = {}
-    with open(class_code_file) as fh:
-        next(fh, None)
+def _parse_class_codes(annotated_gtf):
+    """Parse per-transcript class codes from gffcompare annotated GTF.
+
+    Returns dict: tid -> {'code': class_code, 'ref_gene': ref_gene_id}.
+    """
+    tx_info = {}
+    if not os.path.exists(annotated_gtf):
+        return tx_info
+    with open(annotated_gtf) as fh:
         for line in fh:
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) >= 2:
-                c = parts[0]
-                codes[c] = codes.get(c, 0) + 1
+            if line.startswith('#'):
+                continue
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) < 9 or parts[2] != 'transcript':
+                continue
+            attrs = _parse_gtf_attrs(line)
+            tid = attrs.get('transcript_id')
+            if not tid:
+                continue
+            tx_info[tid] = {'code': attrs.get('class_code', ''),
+                            'ref_gene': attrs.get('ref_gene_id', '')}
+    return tx_info
+
+
+def _summarize_class_codes(annotated_gtf, tee):
+    """Print class-code summary."""
+    codes = {}
+    for info in _parse_class_codes(annotated_gtf).values():
+        c = info['code']
+        codes[c] = codes.get(c, 0) + 1
 
     tee.write("  Class-code summary:\n")
     for c, n in sorted(codes.items(), key=lambda x: -x[1]):
@@ -471,37 +481,36 @@ def _do_classification(class_gtf, ref_gtf, ref_fasta, classifier,
     tee.write("\n━━━━ Stage 2d — Coding/lncRNA classification ━━━━\n")
 
     # ── Parse class codes from gffcompare output ──────────────────────
-    class_code_file = "gffcmp.class_code.tsv"
     novel_class_set = {'u', 'x', 'i', 's', '.', 'p', 'o', 'e', 'j'}
 
-    tx_info = {}  # tid -> {'code': ..., 'ref_gene': ...}
-    if os.path.exists(class_code_file):
-        with open(class_code_file) as fh:
-            next(fh, None)
-            for line in fh:
-                parts = line.rstrip("\n").split("\t")
-                if len(parts) >= 2:
-                    tid, code = parts[1], parts[0]
-                    ref_gene = parts[2] if len(parts) > 2 else ''
-                    tx_info[tid] = {'code': code, 'ref_gene': ref_gene}
+    tx_info = _parse_class_codes(class_gtf)
 
     # ── Extract novel transcripts into novel.gtf ──────────────────────
-    novel_tids = set()
+    tx_len = {}
+    with open(class_gtf) as fh:
+        for line in fh:
+            if line.startswith('#'):
+                continue
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) < 9 or parts[2] != 'exon':
+                continue
+            tid = _parse_gtf_attrs(line).get('transcript_id')
+            if tid:
+                tx_len[tid] = (tx_len.get(tid, 0)
+                               + int(parts[4]) - int(parts[3]) + 1)
+
+    novel_tids = {tid for tid, info in tx_info.items()
+                  if info['code'] in novel_class_set
+                  and tx_len.get(tid, 0) >= min_tx_len}
+
     with open(class_gtf) as fh, open("novel.gtf", 'w') as out:
         for line in fh:
             if line.startswith('#'):
                 out.write(line)
                 continue
-            attrs = _parse_gtf_attrs(line)
-            tid = attrs.get('transcript_id')
-            if tid and tid in tx_info:
-                code = tx_info[tid]['code']
-                if code in novel_class_set:
-                    # Length filter
-                    length = _tx_length_from_gtf_line(line)
-                    if length >= min_tx_len:
-                        novel_tids.add(tid)
-                        out.write(line)
+            tid = _parse_gtf_attrs(line).get('transcript_id')
+            if tid and tid in novel_tids:
+                out.write(line)
 
     tee.write(f"  Novel transcripts retained (≥ {min_tx_len} bp): "
               f"{len(novel_tids)}\n")
@@ -849,6 +858,7 @@ def _write_final_gtf(class_gtf, tx_class, tee):
 
     summary = {'protein_coding': 0, 'known_ncRNA': 0,
                'novel_coding': 0, 'novel_lncRNA': 0, 'unassigned': 0}
+    counted = set()
 
     with open(class_gtf) as fh, open("transcripts_final.gtf", 'w') as out, \
          open("transcript_classification.tsv", 'w') as cls:
@@ -863,7 +873,9 @@ def _write_final_gtf(class_gtf, tx_class, tee):
             gid = attrs.get('gene_id', '')
             cls_name = tx_class.get(tid, 'unassigned')
 
-            summary[cls_name] = summary.get(cls_name, 0) + 1
+            if tid and tid not in counted:
+                counted.add(tid)
+                summary[cls_name] = summary.get(cls_name, 0) + 1
 
             # Append class attribute
             attrs['class'] = cls_name
@@ -898,16 +910,6 @@ def _parse_gtf_attrs(line):
             k, _, v = kv.partition(' ')
             attrs[k] = v.strip('"')
     return attrs
-
-
-def _tx_length_from_gtf_line(line):
-    parts = line.rstrip('\n').split('\t')
-    if len(parts) < 9:
-        return 0
-    # For transcript lines, compute from exon ranges.
-    if parts[2] == 'exon':
-        return int(parts[4]) - int(parts[3]) + 1
-    return 0
 
 
 def _count_gtf_transcripts(gtf_path):

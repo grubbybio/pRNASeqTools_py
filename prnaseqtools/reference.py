@@ -224,6 +224,8 @@ def split_gff(prefix, genome, promoter_length=1000, workdir=None):
             if not line:
                 continue
             cols = line.split('\t')
+            if len(cols) < 9:
+                continue
 
             if 'gene' in cols[2]:
                 m = re.search(r'ID=([A-Za-z0-9_.]+);', cols[8])
@@ -242,7 +244,7 @@ def split_gff(prefix, genome, promoter_length=1000, workdir=None):
                 # Promoter
                 cols[8] = f"{new_id}_promoter"
                 if cols[6] == '+':
-                    cols[4] = str(int(cols[3]) - 1)
+                    cols[4] = str(max(1, int(cols[3]) - 1))
                     new_start = max(1, int(cols[3]) - promoter_length)
                     cols[3] = str(new_start)
                 else:
@@ -259,6 +261,8 @@ def split_gff(prefix, genome, promoter_length=1000, workdir=None):
                 if not line:
                     continue
                 cols = line.split('\t')
+                if len(cols) < 9:
+                    continue
 
                 if 'transposable_element' in cols[2]:
                     m = re.search(r'ID=([A-Za-z0-9_.]+);', cols[8])
@@ -423,8 +427,9 @@ def read_gene_annotation(prefix, genome):
             if not line:
                 continue
             cols = line.split('\t')
+            cols += ["NA"] * (5 - len(cols))
             for j in range(1, 5):
-                if j < len(cols) and cols[j] == "":
+                if cols[j] == "":
                     cols[j] = "NA"
 
             m = re.match(r'(\w+)\.1$', cols[0])

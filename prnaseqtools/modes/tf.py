@@ -8,6 +8,7 @@ import sys
 import shutil
 import glob as globmod
 import subprocess
+import tempfile
 from pathlib import Path
 
 from prnaseqtools.validate_options import validate_options
@@ -47,6 +48,11 @@ def run(opts):
     # 返回 (group_name, [(label1, rep_count1), (label2, rep_count2), ...],
     #         flat_list_for_R_scripts)
     def _parse_spec(spec):
+        if not spec or not isinstance(spec, str):
+            sys.exit(
+                "Both --control and --treatment are required. "
+                "Format: groupName=label1,N1,label2,N2  "
+                f"(got: {spec!r})")
         parts = spec.split('=')
         if len(parts) != 2:
             sys.exit(
@@ -99,8 +105,10 @@ def run(opts):
             f"Rscript --vanilla {prefix}/scripts/tf_mrna.R "
             f"{deseq2_norm} {pvalue} {foldchange} {par_str}")
 
-        for fname in globmod.glob("*_?.txt"):
-            os.unlink(fname)
+        for pre in tags:
+            fname = f"{pre}.txt"
+            if os.path.islink(fname):
+                os.unlink(fname)
 
     elif run_mode == 'srna':
         for pre in tags:
@@ -372,8 +380,7 @@ def run(opts):
                 sorted_bam = local_sorted
 
             # ── 3. Picard: /tmp 临时目录跑 ──
-            picard_tmp = "/tmp/picard_dedup"
-            os.makedirs(picard_tmp, exist_ok=True)
+            picard_tmp = tempfile.mkdtemp(prefix="picard_dedup_")
             rg_bam_tmp = f"{picard_tmp}/{tag}.sorted.rg.bam"
             dedup_bam_tmp = f"{picard_tmp}/{tag}.sorted.dedup.bam"
             metrics_tmp = f"{picard_tmp}/{tag}.sorted.dup_metrics.txt"
@@ -420,6 +427,8 @@ def run(opts):
 
             def _safe_copy(src, dst):
                 """Copy src → dst, 处理跨设备 / 权限失败. 失败返回 False."""
+                if os.path.abspath(src) == os.path.abspath(dst):
+                    return True
                 try:
                     if os.path.exists(dst):
                         os.remove(dst)
@@ -464,6 +473,7 @@ def run(opts):
                     os.remove(src)
                 except OSError:
                     pass
+            shutil.rmtree(picard_tmp, ignore_errors=True)
 
             # Step 4b: 把 cwd 里的文件搬到 sorted.bam 同级目录
             final_bam, final_bam_loc = _final_path(
@@ -786,12 +796,6 @@ def run(opts):
                 run_cmd(cmd)
                 return peak
 
-            # 按位置配对 Input→IP
-            def _pairs(input_tags, ip_tags):
-                n = min(len(input_tags), len(ip_tags))
-                return [(ip_tags[i], tag_to_bam[ip_tags[i]], tag_to_bam[input_tags[i]])
-                         for i in range(n)]
-
             # all_pairs 格式: (input_tag, ip_tag, ip_bam, input_bam)
             all_pairs = (
                 [(in_t, ipt, tag_to_bam[ipt], tag_to_bam[in_t])
@@ -799,6 +803,9 @@ def run(opts):
                 + [(in_t, ipt, tag_to_bam[ipt], tag_to_bam[in_t])
                     for in_t, ipt in zip(g2_input_tags, g2_ip_tags)]
             )
+            # IP tag → group 名 (直接来自 _parse_spec, 不从标签字符串反推)
+            ip_group = {t: group1_name for t in g1_ip_tags}
+            ip_group.update({t: group2_name for t in g2_ip_tags})
             for _in_t, ipt, ip_b, inp_b in all_pairs:
                 _callpeak_one(ipt, ip_b, inp_b)
 
@@ -807,16 +814,10 @@ def run(opts):
             ss_file = os.path.join(diffbind_dir, "samplesheet.csv")
             rows = ["SampleID,Condition,Factor,Replicate,bamReads,bamControl,Peaks"]
             for _in_t, ipt, ip_b, inp_b in all_pairs:
-                # tag = WT_IP_1 → group=WT, rep=1
+                # tag = WT_IP_1 → group=WT (来自 _parse_spec), rep=1
                 parts = ipt.rsplit('_', 1)
                 rep = parts[1]
-                remainder = parts[0]
-                if remainder.endswith('_IP'):
-                    group = remainder[:-3]
-                elif remainder.endswith('_Input'):
-                    group = remainder[:-6]
-                else:
-                    group = remainder
+                group = ip_group[ipt]
                 peak_path = os.path.abspath(f"{ipt}_peaks.narrowPeak")
                 rows.append(f"{ipt},{group},IP,{rep},{os.path.abspath(ip_b)},{os.path.abspath(inp_b)},{peak_path}")
             with open(ss_file, 'w') as f:
@@ -1039,14 +1040,15 @@ cat("Consensus peaks:", nrow(bed), "\\n")
             counts_tsv = os.path.join(diffbind_dir, "peak_counts.tsv")
             bam_list_str = ' '.join(f'"{b}"' for _, b in all_bams)
             tee.write(f"    Counting peaks in {len(all_bams)} BAMs...\n")
-            run_cmd(
+            ret = run_cmd(
                 f"bedtools multicov -bams {bam_list_str} -bed {peaks_bed} "
-                f"-q 10 > {counts_tsv}"
+                f"-q 10 > {counts_tsv}",
+                check=False
             )
             # 检查 bedtools multicov 是否可用 (有些版本用 -bedFiles)
-            import subprocess as _sp
             # 如果上面命令失败, 尝试 -bedFiles 替代 -bed
-            if not os.path.exists(counts_tsv) or os.path.getsize(counts_tsv) == 0:
+            if (ret != 0 or not os.path.exists(counts_tsv)
+                    or os.path.getsize(counts_tsv) == 0):
                 tee.write("    [FALLBACK] trying bedtools multicov -bedFiles ...\n")
                 run_cmd(
                     f"bedtools multicov -bams {bam_list_str} -bedFiles {peaks_bed} "
@@ -1068,8 +1070,10 @@ cat("Consensus peaks:", nrow(bed), "\\n")
             with open(counts_tsv, 'w') as f:
                 f.write(header_line + '\n' + body)
 
+            with open(counts_tsv) as _cf:
+                n_peaks = sum(1 for _ in _cf) - 1
             tee.write(f"    Peak counts: {counts_tsv} "
-                      f"({sum(1 for _ in open(counts_tsv))-1} peaks x "
+                      f"({n_peaks} peaks x "
                       f"{len(all_bams)} samples)\n")
 
             # 3.8e) 写 sample_metadata.tsv (直接给 R 读, 不用 regex 猜)
@@ -1077,15 +1081,7 @@ cat("Consensus peaks:", nrow(bed), "\\n")
             with open(meta_tsv, 'w') as mf:
                 mf.write("sample\tcondition\tfactor\n")
                 for in_t, ipt, _ip_b, _inp_b in all_pairs:
-                    # 从 IP 标签提取 group (和 samplesheet 一致)
-                    parts = ipt.rsplit('_', 1)
-                    remainder = parts[0]
-                    if remainder.endswith('_IP'):
-                        group = remainder[:-3]
-                    elif remainder.endswith('_Input'):
-                        group = remainder[:-6]
-                    else:
-                        group = remainder
+                    group = ip_group[ipt]
                     # IP 样本
                     mf.write(f"{ipt}\t{group}\tIP\n")
                     # Input 样本 (沿用 IP 的 condition)

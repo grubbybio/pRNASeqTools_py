@@ -27,11 +27,22 @@ ADAPTOR_ALIASES = {
 
 
 def _parse_to_dict(arg_str):
-    """Parse 'name=value' string to dict. Empty/missing → {}."""
+    """Parse 'name=value' string to dict. Empty/missing → {}.
+
+    Raises ValueError on malformed non-empty input (missing '=' or extra
+    '=' in the value) so typos fail fast instead of silently yielding
+    an empty sample dict.
+    """
+    if not arg_str or not arg_str.strip():
+        return {}
     parts = arg_str.split('=')
-    if len(parts) == 2:
-        return {parts[0]: parts[1]}
-    return {}
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(
+            f"Malformed sample specification: {arg_str!r}\n"
+            f"  Expected format: name=file1+file2 "
+            f"(e.g. control=rep1.fastq+rep2.fastq)"
+        )
+    return {parts[0]: parts[1]}
 
 
 def _resolve_path(filepath):

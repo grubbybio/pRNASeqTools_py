@@ -1,6 +1,6 @@
 """
 CLIP-seq analysis mode.
-STAR alignment → CLIPper peak finding → differential peak analysis.
+HISAT2 alignment → CLIPper peak finding → differential peak analysis.
 """
 
 import os
@@ -12,7 +12,13 @@ from collections import defaultdict
 
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import parse_input, _parse_to_dict
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, preserve_raw_fastq, try_use_shared_star_index, save_star_index_to_reference
+from prnaseqtools.functions import (download_sra, unzip_file, _tee, run_cmd,
+                                     gzip_fastq, preserve_raw_fastq,
+                                     try_use_shared_hisat_index,
+                                     save_hisat_index_to_reference,
+                                     hisat2_build_index,
+                                     hisat2_align_single, hisat2_align_paired,
+                                     cleanup_alignment_outputs)
 
 
 def run(opts):
@@ -23,13 +29,14 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
-    # prefix must point to the project root so that prefix/reference/{genome}_Genome
-    # resolves to ~/software/pRNASeqTools_py/reference/ (not prnaseqtools/reference/)
-    prefix = opts.get('prefix', '/Users/cjyou/software/pRNASeqTools_py')
+    prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
     nomapping = opts.get('no_mapping', False)
     mappingonly = opts.get('mapping_only', False)
     foldchange = opts.get('foldchange', 2.0)
     pvalue = opts.get('pvalue', 0.05)
+
+    # CLIP-seq HISAT2 参数：严格唯一比对，小内含子 (CLIP 是 RBP 结合位点)
+    _HISAT_EXTRA = "--max-hits 1 --mp 3,3 --np 1 --score-min L,0,-0.3 --max-intronlen 5000"
 
     control_dict = _parse_to_dict(opts.get('control', ''))
     tags, files, pars = parse_input(control_dict)
@@ -46,20 +53,14 @@ def run(opts):
         if not adaptor:
             sys.exit("Please specify the 3' adaptor!")
 
-        tee.write("\nBuilding STAR genome index ...\n")
-        if not try_use_shared_star_index(genome, prefix, "Genome", tee):
-            if os.path.exists("Genome"):
-                run_cmd("rm -rf Genome")
-            os.makedirs("Genome", exist_ok=True)
-
+        tee.write("\nBuilding HISAT2 genome index ...\n")
+        hisat_idx = "HisatIdx"
+        if not try_use_shared_hisat_index(genome, prefix, hisat_idx, tee):
+            # HISAT2 index 是前缀文件组 (HisatIdx.1.ht2 ...)，不是目录
             gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
             fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
-
-            run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
-                f"--genomeFastaFiles {fasta_path} --sjdbGTFfile {gff_path} "
-                f"--sjdbGTFtagExonParentTranscript Parent --sjdbGTFtagExonParentGene ID --genomeSAindexNbases 10 --sjdbOverhang 99 --limitGenomeGenerateRAM 64000000000")
-            save_star_index_to_reference(genome, prefix, "Genome", tee)
+            hisat2_build_index(fasta_path, gff_path, hisat_idx, thread, tee)
+            save_hisat_index_to_reference(genome, prefix, hisat_idx, tee)
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -74,16 +75,17 @@ def run(opts):
                     preserve_raw_fastq(from_sra, tag, paired=False)
                     run_cmd(
                         f"fastp -w {thread} --length_required 18 "
-                        f"-i {tag}.fastq -o {tag}_trimmed.fastq --adapter_sequence {adaptor}")
-                    run_cmd(
-                        f"STAR --genomeDir Genome --seedSearchStartLmax 25 --alignIntronMax 5000 "
-                        f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
-                        f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
-                        f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
-                        f"--outFileNamePrefix {tag}_ "
-                        f"--readFilesIn {tag}_trimmed.fastq")
-                    if os.path.exists(f"{tag}_Unmapped.out.mate1"):
-                        os.rename(f"{tag}_Unmapped.out.mate1", f"{tag}.unmapped.fastq")
+                        f"-i {tag}.fastq -o {tag}_trimmed.fastq "
+                        f"--adapter_sequence {adaptor}")
+                    hisat2_align_single(
+                        tag, f"{tag}_trimmed.fastq", hisat_idx, thread,
+                        extra_args=_HISAT_EXTRA,
+                        nov_sj_file=f"{tag}_SJ.out.tab")
+                    # 提取 unmapped reads 到 fastq（兼容旧版 cleanup）
+                    if os.path.exists(f"{tag}.bam"):
+                        run_cmd(
+                            f"samtools view -b -f 4 {tag}.bam | "
+                            f"samtools fastq - > {tag}.unmapped.fastq 2>/dev/null || true")
                     for fname in (f"{tag}_trimmed.fastq",):
                         if os.path.exists(fname):
                             os.unlink(fname)
@@ -96,18 +98,18 @@ def run(opts):
                     run_cmd(
                         f"fastp -w {thread} --length_required 18 "
                         f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq --adapter_sequence {adaptor} --adapter_sequence_r2 AAAAAAGAAAAAA")
-                    run_cmd(
-                        f"STAR --genomeDir Genome --seedSearchStartLmax 25 --alignIntronMax 5000 "
-                        f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
-                        f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
-                        f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
-                        f"--outFileNamePrefix {tag}_ "
-                        f"--readFilesIn {tag}_R1_trimmed.fastq {tag}_R2_trimmed.fastq")
-                    if os.path.exists(f"{tag}_Unmapped.out.mate1"):
-                        os.rename(f"{tag}_Unmapped.out.mate1", f"{tag}.unmapped_R1.fastq")
-                    if os.path.exists(f"{tag}_Unmapped.out.mate2"):
-                        os.rename(f"{tag}_Unmapped.out.mate2", f"{tag}.unmapped_R2.fastq")
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                        f"--adapter_sequence {adaptor} "
+                        f"--adapter_sequence_r2 AAAAAAGAAAAAA")
+                    hisat2_align_paired(
+                        tag, f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq",
+                        hisat_idx, thread,
+                        extra_args=_HISAT_EXTRA,
+                        nov_sj_file=f"{tag}_SJ.out.tab")
+                    if os.path.exists(f"{tag}.bam"):
+                        run_cmd(
+                            f"samtools view -b -f 4 {tag}.bam | "
+                            f"samtools fastq - > {tag}.unmapped.fastq 2>/dev/null || true")
                     for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
                         if os.path.exists(_f):
                             os.unlink(_f)
@@ -121,31 +123,32 @@ def run(opts):
                 run_cmd(
                     f"fastp -w {thread} --length_required 18 "
                     f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq --adapter_sequence {adaptor} --adapter_sequence_r2 AAAAAAGAAAAAA")
-                run_cmd(
-                    f"STAR --genomeDir Genome --seedSearchStartLmax 25 --alignIntronMax 5000 "
-                    f"--outSAMtype BAM SortedByCoordinate --limitBAMsortRAM 10000000000 "
-                    f"--outReadsUnmapped Fastx --outSAMmultNmax 1 "
-                    f"--outFilterMismatchNoverLmax 0.1 --runThreadN {thread} "
-                    f"--outFileNamePrefix {tag}_ "
-                    f"--readFilesIn {tag}_R1_trimmed.fastq {tag}_R2_trimmed.fastq")
-                if os.path.exists(f"{tag}_Unmapped.out.mate1"):
-                    os.rename(f"{tag}_Unmapped.out.mate1", f"{tag}.unmapped_R1.fastq")
-                if os.path.exists(f"{tag}_Unmapped.out.mate2"):
-                    os.rename(f"{tag}_Unmapped.out.mate2", f"{tag}.unmapped_R2.fastq")
+                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                    f"--adapter_sequence {adaptor} "
+                    f"--adapter_sequence_r2 AAAAAAGAAAAAA")
+                hisat2_align_paired(
+                    tag, f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq",
+                    hisat_idx, thread,
+                    extra_args=_HISAT_EXTRA,
+                    nov_sj_file=f"{tag}_SJ.out.tab")
+                if os.path.exists(f"{tag}.bam"):
+                    run_cmd(
+                        f"samtools view -b -f 4 {tag}.bam | "
+                        f"samtools fastq - > {tag}.unmapped.fastq 2>/dev/null || true")
                 for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
                     if os.path.exists(_f):
                         os.unlink(_f)
 
-            os.rename(f"{tag}_Aligned.sortedByCoord.out.bam", f"{tag}.bam")
-            if os.path.exists(f"{tag}_Log.final.out"):
-                with open(f"{tag}_Log.final.out") as lf:
+            # HISAT2 直接输出 {tag}.bam，不需要 rename
+            # HISAT2 日志
+            if os.path.exists(f"{tag}_Log.txt"):
+                with open(f"{tag}_Log.txt") as lf:
                     tee.write(lf.read())
 
-            run_cmd(f"samtools index {tag}.bam")
             run_cmd(
                 f"bamCoverage -b {tag}.bam --skipNAs -bs 5 -p {thread} "
-                f"--minMappingQuality 10 --ignoreDuplicates --normalizeUsing CPM -o {tag}.bw")
+                f"--minMappingQuality 10 --ignoreDuplicates "
+                f"--normalizeUsing CPM -o {tag}.bw")
 
             tee.write("\nAlignment completed!\nFinding peaks...\n")
             run_cmd(
@@ -153,16 +156,17 @@ def run(opts):
                 f"--processors={thread} --threshold-method=binomial --min_width=20 "
                 f"-o {tag}.fitted_clusters.bed -v")
 
-        for fname in globmod.glob("*_Log.out") + globmod.glob("*_Log.progress.out") + \
-                     globmod.glob("*_Log.final.out") + globmod.glob("*_SJ.out.tab") + \
-                     globmod.glob("*_Aligned.sortedByCoord.out.bam") + \
-                     globmod.glob("*_Aligned.out.sam") + \
-                     globmod.glob("*_ReadsUnmapped*.fastq") + globmod.glob("*_ReadsUnmapped*.fq") + \
-                     globmod.glob("*_Unmapped.out.mate1") + globmod.glob("*_Unmapped.out.mate2"):
-            if os.path.exists(fname):
-                os.unlink(fname)
-        if os.path.exists("Genome") and not os.path.islink("Genome"):
-            run_cmd("rm -rf Genome")
+        cleanup_alignment_outputs(extra_globs=(f"{genome}_chr_all*",
+                                                f"{genome}*.bt2",
+                                                "unmapped*.fastq"))
+        # 清理 HISAT2 index 临时文件（如果不是 symlink）
+        import glob as _glob
+        for f in _glob.glob(f"{hisat_idx}.*.ht2") + _glob.glob(f"{hisat_idx}.htl"):
+            if not os.path.islink(f):
+                try:
+                    os.unlink(f)
+                except OSError:
+                    pass
 
         if not mappingonly and len(pars) > 1:
             _differential_analysis(pars, prefix, pvalue, foldchange, tee)
@@ -172,7 +176,8 @@ def run(opts):
             os.symlink(f"../{pre}.bam", f"{pre}.bam")
             os.symlink(f"../{pre}.fitted_clusters.bed", f"{pre}.fitted_clusters.bed")
 
-        _differential_analysis(pars, prefix, pvalue, foldchange, tee)
+        if len(pars) > 2:
+            _differential_analysis(pars, prefix, pvalue, foldchange, tee)
 
         for fname in globmod.glob("*.bed"):
             os.unlink(fname)
@@ -202,7 +207,7 @@ def _differential_analysis(pars, prefix, pvalue, foldchange, tee):
             all_tags.append(tag)
             command += f"{tag}.fitted_clusters.bed "
 
-    par_str = ' '.join(p_list)
+    par_str = ' '.join(pars)
 
     # Merge peaks
     run_cmd(

@@ -13,13 +13,12 @@ name: prnaseqtools
 channels:
   - conda-forge
   - bioconda
-  - defaults
 
 dependencies:
   # ── Core language runtimes ────────────────────────────────────────────
   - python >=3.9,<3.13
   - perl                          # ShortStack and some helper scripts
-  - r-base >=4.0
+  - r-base >=4.4,<4.5
   - r-essentials
 
   # ── Adapter trimming ─────────────────────────────────────────────────
@@ -28,7 +27,7 @@ dependencies:
   # ── Aligners ──────────────────────────────────────────────────────────
   - bowtie
   - bowtie2
-  - star >=2.7
+  - hisat2 >=2.2.0
   - bismark                       # WGBS bisulfite alignment
 
   # ── sRNA alignment & analysis ─────────────────────────────────────────
@@ -45,7 +44,6 @@ dependencies:
   - bedtools
 
   # ── SRA download ─────────────────────────────────────────────────────
-  - sra-tools                     # fasterq-dump, prefetch
 
   # ── GFF/GTF utilities ────────────────────────────────────────────────
   - gffread
@@ -57,7 +55,7 @@ dependencies:
 
   # ── Transcript assembly & quantification (RIBO Taper) ───────────────
   - stringtie                     # Transcript assembly
-  - rsem                          # RNA-seq expression quantification
+  # rsem 由 auto_install.py precheck 用 --no-deps 安装 (EBSeq 硬冲突)
 
   # ── Peak calling ─────────────────────────────────────────────────────
   - macs3                         # MACS3 peak caller (ChIP/ATAC)
@@ -74,23 +72,38 @@ dependencies:
   - numpy
   - scipy
 
-  # ── R packages (available on conda) ──────────────────────────────────
+  # ── Bioconductor packages (bioconda) ─────────────────────────────────
   - bioconductor-deseq2
-  - bioconductor-dmrcaller
   - bioconductor-rnamodr.ribomethseq
+  - bioconductor-diffbind         # ChIP-seq differential binding analysis
+  - bioconductor-chipseeker       # ChIP-seq peak annotation + enrichment
   - bioconductor-complexheatmap   # TE summary heatmap plotting
+
+  # ── Pure R packages (conda-forge / defaults) ────────────────────────
   - r-pheatmap
   - r-dplyr
   - r-devtools
+  - r-pak                          # R 包管理器 (conda-forge 预编译 arm64)
   - r-emmeans                     # Estimated marginal means + paired comparisons (TE stats)
   - r-car                         # ANOVA table type II/III, Levene's test (TE stats)
-  - r-agricolae                   # Tukey HSD / LSD compact letter display (TE stats)
   - r-multcomp                    # Post-hoc multiple comparison letters (TE stats backup)
   - r-ggpubr                      # Publication-ready stat annotations (TE stats)
+  # NMF / ComplexHeatmap 等的依赖链（移到 conda 一次性装完，跳过 pak::pak 慢 bootstrap）
+  - r-pkgmaker
+  - r-registry
+  - r-rngtools
+  - r-gridbase
+  - r-dendextend
+  - r-viridis
+  - r-locfit                       # DESeq2 等的局部回归依赖 (arm64 预编译)
+  - r-ps                           # pak 等的进程管理依赖 (arm64 预编译)
 
   # ── pip-installed tools not on conda ─────────────────────────────────
   - pip
   - pip:
+      # stepRNA — Dicer cleavage overhang signature + passenger strand analysis
+      # (used by 'risi' mode; requires bowtie2 for local alignment)
+      - stepRNA
       # CLIPper — CLIP-seq peak caller
       # (only needed for 'clip' and 'ts' modes)
       # - clipper @ git+https://github.com/YeoLab/clipper.git

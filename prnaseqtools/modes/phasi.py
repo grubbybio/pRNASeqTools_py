@@ -58,7 +58,7 @@ def run(opts):
                 tee.write("  BAM input detected, skipping alignment.\n")
                 bam_src = fpath if os.path.isabs(fpath) else f"../{fpath}"
                 os.symlink(bam_src, f"{tag}.bam")
-                bam_count = run_cmd(
+                bam_count = subprocess.run(
                     f"samtools view -c {tag}.bam",
                     shell=True, capture_output=True, text=True
                 ).stdout.strip()
@@ -89,9 +89,9 @@ def run(opts):
             # ShortStack alignment
             fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
             run_cmd(
-                f"ShortStack --outdir ShortStack_{tag} --align_only --bowtie_m 1000 "
-                f"--ranmax 50 --mmap {mmap} --mismatches 0 --bowtie_cores {thread} "
-                f"--nohp --readfile {tag}.fastq --genomefile {fasta_path}")
+                f"ShortStack --outdir ShortStack_{tag} --align_only --mmap {mmap} "
+                f"--threads {thread} --nohp --readfile {tag}.fastq "
+                f"--genomefile {fasta_path}")
 
             for fname in globmod.glob(f"{tag}*.fastq"):
                 os.unlink(fname)
@@ -101,7 +101,10 @@ def run(opts):
             tee.write("\nAlignment Completed!\n")
 
             # Process SAM/BAM
-            run_cmd(f"samtools view -h ShortStack_{tag}/{tag}.bam > {tag}")
+            ss_bam = f"ShortStack_{tag}/{tag}_condensed.bam"
+            if not os.path.exists(ss_bam):
+                ss_bam = f"ShortStack_{tag}/{tag}.bam"
+            run_cmd(f"samtools view -h {ss_bam} > {tag}")
             run_cmd(
                 f"awk '{{if($0~/^@/) print > (FILENAME\".unmapped.sam\"); "
                 f"if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".sam\"); "
@@ -141,8 +144,8 @@ def _phasi_analysis(pars, period, norms, prefix, genome, binsize, phasing_score_
         tee.write("\nphasiRNA analysis...\n")
 
         count = 0
-        data1 = defaultdict(lambda: defaultdict(int))  # forward strand
-        data2 = defaultdict(lambda: defaultdict(int))  # reverse strand
+        data1 = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # forward strand
+        data2 = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # reverse strand
         data0 = defaultdict(lambda: defaultdict(int))  # all reads
         normc = defaultdict(int)
 
@@ -202,7 +205,7 @@ def _phasi_analysis(pars, period, norms, prefix, genome, binsize, phasing_score_
                 data1[chr_name][pos + 2][0] += data2[chr_name][pos][16]
 
         for mnorm in norms:
-            data3 = defaultdict(lambda: defaultdict(int))
+            data3 = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
             rc = normc.get(mnorm, 1)
             if rc == 0:
                 rc = 1

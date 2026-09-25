@@ -34,6 +34,9 @@ def run(opts):
     pvalue = opts.get('pvalue', 0.01)
     binsize = opts.get('binsize', 10)
     mnorm = opts.get('norm', 'total')
+    # stepRNA Dicer overhang signature analysis (附加分析，识别 2nt 3' overhang)
+    steprna = opts.get('steprna', True)
+    steprna_mode = opts.get('steprna_mode', 'rdna')   # 'rdna' (reads vs rDNA) or 'self' (reads vs reads, -u)
 
     control_dict = _parse_to_dict(opts.get('control', ''))
     tags, files, pars = parse_input(control_dict)
@@ -60,6 +63,12 @@ def run(opts):
                 bam_src = fpath if os.path.isabs(fpath) else f"../{fpath}"
                 os.symlink(bam_src, f"{tag}.bam")
                 run_cmd(f"samtools index {tag}.bam")
+                bam_count = subprocess.run(
+                    f"samtools view -c {tag}.bam",
+                    shell=True, capture_output=True, text=True
+                ).stdout.strip()
+                with open(f"{tag}.nf", 'w') as nf_fh:
+                    nf_fh.write(f"total\t{bam_count}\n")
                 tee.write(f"  Using BAM: {bam_src}\n")
             if not bam_input:
                 sra_results, _from_sra = download_sra(fpath, thread)
@@ -75,15 +84,23 @@ def run(opts):
                 tee.write("\nStart mapping...\n")
                 rDNA_fasta = os.path.join(prefix, "reference", f"{genome}_rDNA_chr_all.fasta")
                 run_cmd(
-                    f"ShortStack --outdir ShortStack_{tag} --align_only --bowtie_m 1000 "
-                    f"--ranmax 50 --mmap {mmap} --mismatches 1 --bowtie_cores {thread} "
-                    f"--nohp --readfile {tag}.fastq --genomefile {rDNA_fasta}")
+                    f"ShortStack --outdir ShortStack_{tag} --align_only --mmap {mmap} "
+                    f"--threads {thread} --nohp --readfile {tag}.fastq "
+                    f"--genomefile {rDNA_fasta}")
 
                 tee.write("\nAlignment Completed!\n")
 
-                condensed = bam_is_condensed(f"ShortStack_{tag}/{tag}.bam")
+                # stepRNA Dicer overhang signature analysis (在删 {tag}.fastq 之前调用)
+                if steprna:
+                    _maybe_run_stepRNA(tag, f"{tag}.fastq", rDNA_fasta, steprna_mode, thread, tee)
 
-                run_cmd(f"samtools view -h ShortStack_{tag}/{tag}.bam > {tag}")
+                ss_bam = f"ShortStack_{tag}/{tag}_condensed.bam"
+                if not os.path.exists(ss_bam):
+                    ss_bam = f"ShortStack_{tag}/{tag}.bam"
+
+                condensed = bam_is_condensed(ss_bam)
+
+                run_cmd(f"samtools view -h {ss_bam} > {tag}")
                 run_cmd(
                     f"awk '{{if($0~/^@/) print > (FILENAME\".unmapped.sam\"); "
                     f"if($10!=\"*\" && $3!=\"*\") print > (FILENAME\".sam\"); "
@@ -100,25 +117,29 @@ def run(opts):
                 # BAM input: detect condensed format
                 condensed = bam_is_condensed(f"{tag}.bam")
 
+                # stepRNA 从 BAM 恢复 reads 序列然后跑 overhang 分析
+                if steprna:
+                    steprna_fa = f"{tag}.stepRNA.fa"
+                    run_cmd(f"samtools fasta {tag}.bam > {steprna_fa}")
+                    _maybe_run_stepRNA(tag, steprna_fa,
+                        os.path.join(prefix, "reference", f"{genome}_rDNA_chr_all.fasta"),
+                        steprna_mode, thread, tee)
+                    if os.path.exists(steprna_fa):
+                        os.unlink(steprna_fa)
+
             tee.write("\nConverting BAM to BED...\n")
             run_cmd(f"bamToBed -bed12 -i {tag}.bam > {tag}.bed")
+            if condensed:
+                tee.write("  Expanding full BED by XW tag...\n")
+                expand_bed_by_xw(f"{tag}.bed", f"{tag}.bam")
+                tee.write("  BED expansion done.\n")
 
             tee.write("\nGenerating individual files...\n")
             run_cmd(
                 f"awk -F \"\\t\" '{{a=substr(FILENAME,1,length(FILENAME)-3);"
                 f"if($11>=18 && $11 <= 26) {{print $0 > (a$11\".bed\")}}}}' {tag}.bed")
 
-            # Expand per-length BEDs for condensed ShortStack BAMs
-            if condensed:
-                tee.write("  Expanding per-length BEDs by XW tag...\n")
-                for sbed in sorted(globmod.glob(f"{tag}*.bed")):
-                    if sbed == f"{tag}.bed":
-                        continue
-                    expand_bed_by_xw(sbed, f"{tag}.bam")
-                tee.write("  BED expansion done.\n")
-
             # Length distribution
-            # Length distribution: count reads per length from expanded BED
             run_cmd(
                 f"awk '{{print $11}}' {tag}.bed | sort -n | uniq -c | "
                 f"awk '{{OFS=\"\\t\"; print $2, $1}}' > {tag}.len_dist.txt")
@@ -157,13 +178,61 @@ def run(opts):
         for fname in globmod.glob("*.nf"):
             os.unlink(fname)
 
-    for fname in globmod.glob("*.gff"):
-        os.unlink(fname)
+
+def _maybe_run_stepRNA(tag, reads_fasta, ref_fasta, mode, thread, tee):
+    """Run stepRNA Dicer overhang signature analysis.
+
+    stepRNA (https://github.com/Vicky-Hunt-Lab/stepRNA) uses bowtie2 local
+    alignment to detect the 2-nt 3' overhang diagnostic of Dicer cleavage,
+    and reports passenger strand length distribution.
+
+    Args:
+        tag: sample name
+        reads_fasta: path to trimmed sRNA FASTA (or will be extracted from BAM)
+        ref_fasta: reference FASTA (rDNA for 'rdna' mode, or self as reads)
+        mode: 'rdna' (reads aligned to rDNA) or 'self' (reads self-aligned with -u)
+        thread: threads
+        tee: _tee() instance for logging
+    """
+    import shutil as _shutil
+    bowtie2_bin = _shutil.which("bowtie2")
+    steprna_bin = _shutil.which("stepRNA")
+    if not bowtie2_bin or not steprna_bin:
+        tee.write(f"  [stepRNA bowtie2/stepRNA not found → skip overhang analysis for {tag}]\n")
+        return
+
+    if not os.path.exists(reads_fasta):
+        tee.write(f"  [stepRNA reads FASTA not found ({reads_fasta}) → skip]\n")
+        return
+
+    os.makedirs("stepRNA_out", exist_ok=True)
+
+    if mode == 'self':
+        # Self-alignment: reads aligned to themselves, -u makes headers unique
+        # Use -e (--remove_exact) to remove perfect matches and reveal overhangs
+        cmd = (
+            f"stepRNA -r {reads_fasta} -q {reads_fasta} "
+            f"-n {tag} -d stepRNA_out/ -u -e")
+    else:
+        # rDNA alignment: reads aligned to rDNA reference
+        cmd = (
+            f"stepRNA -r {ref_fasta} -q {reads_fasta} "
+            f"-n {tag} -d stepRNA_out/")
+    try:
+        run_cmd(cmd)
+    except Exception as e:
+        tee.write(f"  WARNING: stepRNA failed for {tag} ({e}); skipping overhang analysis.\n")
+        return
+
+    tee.write(f"  stepRNA analysis for {tag} complete → stepRNA_out/\n")
 
 
 def _count_risi(mnorm, rc, prefix, genome, binsize, tag, tee):
     """Count reads in rDNA bins and features."""
-    count_data = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    count_data = {
+        'r10': defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(int)))),
+        'feature': defaultdict(lambda: defaultdict(lambda: defaultdict(int))),
+    }
     lengths = ref.read_chromosome_lengths(prefix, f"{genome}_rDNA", binsize)
 
     bed_files = [f for f in os.listdir('.') if f.startswith(tag) and any(c.isdigit() for c in f.replace(tag, '').replace('.bed', ''))]
@@ -196,7 +265,7 @@ def _count_risi(mnorm, rc, prefix, genome, binsize, tag, tee):
                 if len(cols) >= 21:
                     tmp_hash[cols[3]]['strand'] = cols[5]
                     tmp_hash[cols[3]]['feature'].add(cols[20])
-                    tmp_hash[cols[3]]['length'] = cols[10]
+                    tmp_hash[cols[3]]['length'] = cols[10].split(',')[0]
 
         for read_id, data in tmp_hash.items():
             feature_str = ','.join(sorted(data['feature']))
@@ -217,7 +286,8 @@ def _make_bedgraph(sbed, prefix, genome, nrc, mnorm, fai):
         bg_norm = bg.replace('.bedgraph', f'.{mnorm}.bedgraph')
         bw_norm = bg.replace('.bedgraph', f'.{mnorm}.bw')
         run_cmd(f"bedtools genomecov -split -strand {strand} -scale {sign}{nrc} -bg -i {sbed} -g {fai} > {bg_norm}")
-        run_cmd(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}")
+        if os.path.getsize(bg_norm) > 0:
+            run_cmd(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}")
         os.unlink(bg)
         os.unlink(bg_norm)
 
@@ -226,7 +296,8 @@ def _make_bedgraph(sbed, prefix, genome, nrc, mnorm, fai):
     bg_norm = bg.replace('.bedgraph', f'.{mnorm}.bedgraph')
     bw_norm = bg.replace('.bedgraph', f'.{mnorm}.bw')
     run_cmd(f"bedtools genomecov -split -scale {nrc} -bg -i {sbed} -g {fai} > {bg_norm}")
-    run_cmd(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}")
+    if os.path.getsize(bg_norm) > 0:
+        run_cmd(f"bedGraphToBigWig {bg_norm} {fai} {bw_norm}")
     os.unlink(bg)
     os.unlink(bg_norm)
 
@@ -240,7 +311,7 @@ def _write_risi_counts(count_data, tag, mnorm, rc, bed_files, lengths):
                 for strand in ('+', '-'):
                     fh1.write(f"{chr_name}_{bi}_{strand}")
                     fh2.write(f"{chr_name}_{bi}_{strand}")
-                    for leng in range(18, 27):
+                    for leng in range(18, 26):
                         r_val = count_data['r10'].get(chr_name, {}).get(bi, {}).get(strand, {}).get(leng, 0)
                         fh1.write(f"\t{r_val}")
                         fh2.write(f"\t{r_val * 1000000.0 / rc}")
@@ -252,7 +323,7 @@ def _write_risi_counts(count_data, tag, mnorm, rc, bed_files, lengths):
             for strand in ('+', '-'):
                 fh1.write(f"{feature}_{strand}")
                 fh2.write(f"{feature}_{strand}")
-                for leng in range(18, 27):
+                for leng in range(18, 26):
                     r_val = count_data['feature'].get(feature, {}).get(strand, {}).get(leng, 0)
                     fh1.write(f"\t{r_val}")
                     fh2.write(f"\t{r_val * 1000000.0 / rc}")
@@ -285,7 +356,8 @@ def _stat_analysis(mnorm, prefix, genome, foldchange, pvalue, binsize, par_str, 
                     end = start + binsize - 1
                     fh_out.write(f"{chr_name}\t{start}\t{end}\t{cols[2] if len(cols) > 2 else '0'}\n")
         bw_file = hcsv.replace('.csv', '.bw')
-        run_cmd(f"bedGraphToBigWig {bg_file} {fai} {bw_file}")
+        if os.path.getsize(bg_file) > 0:
+            run_cmd(f"bedGraphToBigWig {bg_file} {fai} {bw_file}")
         os.unlink(bg_file)
 
     tee.write(f"\nDS feature analysis...\nNormalization {mnorm}\tFold Change {foldchange}\tP Value {pvalue}\n")

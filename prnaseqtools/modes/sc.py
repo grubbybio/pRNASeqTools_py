@@ -1,10 +1,9 @@
 """
 Single-cell RNA-seq analysis mode.
-STARsolo alignment/quantification → Cell count matrix → Seurat analysis → Pseudotime.
+HISAT2 alignment + featureCounts per-cell quantification → Cell count matrix → Seurat analysis → Pseudotime.
 
 Input formats supported:
   - FASTQ (raw, SRA, single-end, paired-end)
-  - BAM (auto-detects cell-tagged vs. bulk, quantifies accordingly)
   - Count matrix (.rds, .tsv, .csv, .txt, .mtx/.mtx.gz)
 """
 
@@ -18,7 +17,11 @@ from pathlib import Path
 from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
                                         _resolve_path)
-from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, try_use_shared_star_index, save_star_index_to_reference
+from prnaseqtools.functions import (download_sra, unzip_file, _tee, run_cmd,
+                                     try_use_shared_hisat_index, save_hisat_index_to_reference,
+                                     cleanup_alignment_outputs,
+                                     hisat2_build_index, hisat2_align_single,
+                                     hisat2_align_paired)
 
 
 def run(opts):
@@ -29,9 +32,9 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
-    # prefix must point to the project root so that prefix/reference/{genome}_Genome
+    # prefix must point to the project root so that prefix/reference/{genome}_HisatIdx
     # resolves to ~/software/pRNASeqTools_py/reference/ (not prnaseqtools/reference/)
-    prefix = opts.get('prefix', '/Users/cjyou/software/pRNASeqTools_py')
+    prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
     run_mode = opts.get('run_mode', 'whole')
     control = opts.get('control', '')
     treatment = opts.get('treatment')
@@ -103,29 +106,25 @@ def run(opts):
     any_mapping = any(t in ('fastq', 'bam') for t in input_types.values())
 
     if mapping and any_mapping:
-        # ── Build STAR index (shared for FASTQ and cell-tagged BAM) ──
-        tee.write("\nBuilding STARsolo genome index ...\n")
+        # ── Build/use HISAT2 genome index (shared for FASTQ and cell-tagged BAM) ──
+        tee.write("\nBuilding/using HISAT2 genome index ...\n")
 
         # Define reference paths first — they are also needed by the gffread call
-        # below even when try_use_shared_star_index returns True.
         gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
 
-        if not try_use_shared_star_index(genome, prefix, "Genome", tee):
-            if os.path.exists("Genome"):
-                run_cmd("rm -rf Genome")
-            os.makedirs("Genome", exist_ok=True)
-
-            run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir Genome --runMode genomeGenerate "
-                f"--genomeSAindexNbases {genome_size} --genomeFastaFiles {fasta_path} "
-                f"--sjdbGTFfile {gff_path} --sjdbGTFtagExonParentTranscript Parent "
-                f"--sjdbGTFtagExonParentGene ID --sjdbOverhang 99 --limitGenomeGenerateRAM 64000000000")
-            save_star_index_to_reference(genome, prefix, "Genome", tee)
+        hisat_idx = "HisatIdx"
+        if not try_use_shared_hisat_index(genome, prefix, hisat_idx, tee):
+            hisat2_build_index(fasta_path, gff_path, hisat_idx, thread, tee=tee)
+            save_hisat_index_to_reference(genome, prefix, hisat_idx, tee)
 
         gtf_file = f"{genome}_genes.gtf"
         run_cmd(f"gffread -T -o {gtf_file} -g {fasta_path} {gff_path}")
-        os.makedirs("Solo_out", exist_ok=True)
+
+        # HISAT2 output directory for per-cell BAMs (FASTQ input only)
+        hisat_bam_dir = "Hisat_out"
+        os.makedirs(hisat_bam_dir, exist_ok=True)
+        cell_bams = {}  # tag → bam path
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -140,39 +139,36 @@ def run(opts):
                 continue
 
             if itype == 'bam':
-                bam_kind = _detect_bam_kind(fpath, tee)
-
-                if bam_kind == 'bulk':
-                    sys.exit(
-                        f"Error: '{fpath}' is a bulk BAM (no cell barcodes detected).\n"
-                        f"  The 'sc' module requires single-cell data with cell barcodes.\n"
-                        f"  For bulk RNA-seq BAM analysis, please use the 'mrna' module instead:\n"
-                        f"    pRNASeqTools mrna --mode_mrna bam -c {tag}={fpath} ...")
-
-                # cell-tagged BAM: symlink + quantify
-                bam_src = fpath
-                if not os.path.isabs(bam_src):
-                    bam_src = os.path.abspath(bam_src)
-                os.symlink(bam_src, f"{tag}.bam")
-                run_cmd(f"samtools index {tag}.bam")
-
-                tee.write("  Cell-tagged BAM detected → quantifying with STARsolo.\n")
-                _quantify_celltagged_bam(tag, thread, gtf_file, prefix, genome)
-                continue
+                sys.exit(
+                    f"Error: BAM input '{fpath}' is no longer supported by the 'sc' module.\n"
+                    f"  STARsolo (STAR CB_UMI_Simple) has been removed from this project.\n"
+                    f"  Please re-run alignment in the 'sc' module with FASTQ inputs,\n"
+                    f"  or provide a pre-computed count matrix (.rds / .mtx / .tsv).")
 
             # ── FASTQ input ──
-            sra_results, _from_sra = download_sra(fpath, thread)
-            if len(sra_results) == 1:
-                seq_strategy = 'single'
-                unzip_file(sra_results[0], tag)
-                input_r1 = f"{tag}.fastq"
-                input_r2 = None
-            else:
-                seq_strategy = 'paired'
-                unzip_file(sra_results[0], f"{tag}_R1")
-                unzip_file(sra_results[1], f"{tag}_R2")
+            if ',' in fpath:
+                f1, f2 = fpath.split(',')
+                if seq_strategy is None:
+                    seq_strategy = 'paired'
+                unzip_file(f1, f"{tag}_R1")
+                unzip_file(f2, f"{tag}_R2")
                 input_r1 = f"{tag}_R1.fastq"
                 input_r2 = f"{tag}_R2.fastq"
+            else:
+                sra_results, _from_sra = download_sra(fpath, thread)
+                if len(sra_results) == 1:
+                    if seq_strategy is None:
+                        seq_strategy = 'single'
+                    unzip_file(sra_results[0], tag)
+                    input_r1 = f"{tag}.fastq"
+                    input_r2 = None
+                else:
+                    if seq_strategy is None:
+                        seq_strategy = 'paired'
+                    unzip_file(sra_results[0], f"{tag}_R1")
+                    unzip_file(sra_results[1], f"{tag}_R2")
+                    input_r1 = f"{tag}_R1.fastq"
+                    input_r2 = f"{tag}_R2.fastq"
 
             # Adapter trimming
             if adaptor:
@@ -190,38 +186,26 @@ def run(opts):
                         f"-i {input_r1} -o {tag}_trimmed.fastq --adapter_sequence {adaptor}")
                     os.rename(f"{tag}_trimmed.fastq", input_r1)
 
-            # STARsolo alignment and quantification
-            tee.write(f"  Running STARsolo alignment ({tag})...\n")
-            solo_outdir = f"Solo_out/{tag}"
-
-            star_cmd = (
-                f"STAR --runMode alignReads --genomeDir Genome --seedSearchStartLmax 25 "
-                f"--soloType SmartSeq "
-                f"--outSAMtype BAM SortedByCoordinate "
-                f"--limitBAMsortRAM 10000000000 "
-                f"--outSAMmultNmax 1 "
-                f"--outFilterMultimapNmax 50 "
-                f"--outFilterMismatchNoverLmax 0.1 "
-                f"--runThreadN {thread} "
-                f"--outFileNamePrefix {tag}_ "
-                f"--soloOutDir {solo_outdir} "
-                f"--soloCBwhitelist None "
-                f"--soloCellFilter EmptyDroplets "
-                f"--quantMode GeneCounts "
-                f"--soloFeatures Gene GeneFull"
-            )
+            # HISAT2 alignment
+            tee.write(f"  Running HISAT2 alignment ({tag})...\n")
 
             if input_r2:
-                star_cmd += f" --readFilesIn {input_r1} {input_r2}"
+                hisat2_align_paired(tag, input_r1, input_r2,
+                                    hisat_idx, thread,
+                                    out_dir=hisat_bam_dir,
+                                    extra_args="--max-hits 20 --mp 3,3 --score-min L,0,-0.4")
             else:
-                star_cmd += f" --readFilesIn {input_r1}"
-
-            run_cmd(star_cmd)
+                hisat2_align_single(tag, input_r1, hisat_idx, thread,
+                                    out_dir=hisat_bam_dir,
+                                    extra_args="--max-hits 20 --mp 3,3 --score-min L,0,-0.4")
 
             # Show mapping stats
-            if os.path.exists(f"{tag}_Log.final.out"):
-                with open(f"{tag}_Log.final.out") as lf:
+            log_f = os.path.join(hisat_bam_dir, f"{tag}_Log.txt")
+            if os.path.exists(log_f):
+                with open(log_f) as lf:
                     tee.write(lf.read())
+
+            cell_bams[tag] = os.path.join(hisat_bam_dir, f"{tag}.bam")
 
             # Clean up raw FASTQ files
             for fname in (f"{tag}_R1.fastq", f"{tag}_R2.fastq",
@@ -229,21 +213,63 @@ def run(opts):
                 if os.path.exists(fname):
                     os.unlink(fname)
 
-        # Clean up STAR files
-        for fname in globmod.glob("*_Log.out") + globmod.glob("*_Log.progress.out") + \
-                     globmod.glob("*_Log.final.out") + globmod.glob("*_SJ.out.tab") + \
-                     globmod.glob("*_Aligned.sortedByCoord.out.bam") + \
-                     globmod.glob("*_Aligned.out.sam") + \
-                     globmod.glob("*_ReadsUnmapped*.fastq") + globmod.glob("*_ReadsUnmapped*.fq"):
-            if os.path.exists(fname):
+        # Clean up HISAT2 temp outputs
+        cleanup_alignment_outputs(extra_globs=(f"{genome}_chr_all*", f"{genome}*.bt2"))
+        # 不要删 HisatIdx（可能有共享 symlink）
+        for fname in globmod.glob("*.bam"):
+            if os.path.islink(fname):
                 os.unlink(fname)
-        if os.path.exists("Genome") and not os.path.islink("Genome"):
-            run_cmd("rm -rf Genome")
 
-        # ── Convert STARsolo output and BAM counts to .rds ───────────────
-        tee.write("\nPreparing count matrices for Seurat...\n")
+        # ── featureCounts 定量（FASTQ cell 统一跑）──────────────────
+        tee.write("\nQuantifying with featureCounts...\n")
         gtf_file = f"{genome}_genes.gtf"
-        _prepare_all_counts(tags, input_types, solo_dir="Solo_out",
+        bam_paths = [b for b in cell_bams.values() if os.path.exists(b)]
+        bam_labels = [t for t, b in cell_bams.items() if os.path.exists(b)]
+
+        if bam_paths:
+            tee.write(f"  featureCounts on {len(bam_paths)} cell BAMs...\n")
+            fc_out = "featureCounts.txt"
+            run_cmd(
+                f"featureCounts -a {gtf_file} -o {fc_out} "
+                f"-T {thread} -s 0 -p "
+                f"{' '.join(bam_paths)}"
+            )
+
+            # featureCounts 输出整理成 TSV (gene × cells, header = tag 名)
+            tsv_out = "hisat_counts.tsv"
+            with open(fc_out) as fh:
+                lines = fh.readlines()
+            # 跳过 # comment 行（第一行），从第二行开始读
+            data_lines = lines[1:]  # 第二行是 header，第三行起是数据
+            header = "Geneid\t" + "\t".join(bam_labels) + "\n"
+            out = [header]
+            for dl in data_lines[1:]:  # data_lines[0] 是原始 header，跳过
+                parts = dl.strip().split('\t')
+                if len(parts) < 8:
+                    continue
+                out.append(parts[0] + "\t" + "\t".join(parts[7:]))
+            with open(tsv_out, 'w') as of:
+                of.writelines(out)
+
+            tee.write(f"  Saved {tsv_out} ({len(out)-1} genes × {len(bam_labels)} cells)\n")
+
+            # 每个 cell 单独转 .rds —— 生成只含一列的 TSV，喂给 _import_count_matrix
+            for idx, tag in enumerate(bam_labels):
+                onecol_tsv = f"{tag}_onecol.tsv"
+                with open(onecol_tsv, 'w') as oc:
+                    oc.write("Geneid\t" + tag + "\n")
+                    for dl in data_lines[1:]:
+                        parts = dl.strip().split('\t')
+                        if len(parts) < 8 + idx:
+                            continue
+                        oc.write(parts[0] + "\t" + parts[7 + idx] + "\n")
+                _import_count_matrix(tag, onecol_tsv, tee)
+                os.unlink(onecol_tsv)
+
+        # ── 准备 count matrices ──────────────────────────────────────
+        # FASTQ + count matrix 输入 → .rds, Seurat 下游合并
+        _prepare_all_counts(tags, input_types,
+                            files=dict(zip(tags, resolved_files)),
                             gtf_file=gtf_file, prefix=prefix, genome=genome,
                             thread=thread)
 
@@ -309,22 +335,11 @@ def run(opts):
                 _import_count_matrix(tag, fpath, tee)
 
             elif itype == 'bam':
-                bam_kind = _detect_bam_kind(fpath, tee)
-
-                if bam_kind == 'bulk':
-                    sys.exit(
-                        f"Error: '{fpath}' is a bulk BAM (no cell barcodes detected).\n"
-                        f"  The 'sc' module requires single-cell data with cell barcodes.\n"
-                        f"  For bulk RNA-seq BAM analysis, please use the 'mrna' module instead:\n"
-                        f"    pRNASeqTools mrna --mode_mrna bam -c {tag}={fpath} ...")
-
-                bam_src = fpath if os.path.isabs(fpath) else f"../{fpath}"
-                os.symlink(bam_src, f"{tag}.bam")
-                run_cmd(f"samtools index {tag}.bam")
-                tee.write("  Cell-tagged BAM detected → quantifying with STARsolo.\n")
-                _quantify_celltagged_bam(tag, thread, gtf_file, prefix, genome)
-                # Convert the resulting count to .rds
-                _finalize_count_matrices([tag], gtf_file, tee)
+                sys.exit(
+                    f"Error: BAM input '{fpath}' is no longer supported by the 'sc' module.\n"
+                    f"  STARsolo (STAR CB_UMI_Simple) has been removed from this project.\n"
+                    f"  Please provide a pre-computed count matrix (.rds / .mtx / .tsv)\n"
+                    f"  when using --no-mapping mode.")
 
             elif itype == 'fastq':
                 sys.exit(
@@ -361,164 +376,6 @@ def run(opts):
 # ═══════════════════════════════════════════════════════════════════════════
 # Input type detection
 # ═══════════════════════════════════════════════════════════════════════════
-
-def _detect_input_type(tag, fpath, tee):
-    """Detect input type: 'fastq', 'bam', or 'count'."""
-    lower = fpath.lower()
-
-    # Count matrix formats
-    count_exts = ('.rds', '.tsv', '.csv', '.txt', '.mtx', '.mtx.gz',
-                  '.mtx.bgz')
-    for ext in count_exts:
-        if lower.endswith(ext):
-            if not os.path.exists(fpath):
-                tee.write(f"  Warning: Count file not found: {fpath}\n")
-            return 'count'
-
-    # BAM format
-    if lower.endswith('.bam'):
-        return 'bam'
-
-    # FASTQ / SRA
-    fastq_exts = ('.fastq', '.fq', '.fastq.gz', '.fq.gz',
-                  '.fastq.bz2', '.fq.bz2', '.gtz', '.sra')
-    for ext in fastq_exts:
-        if lower.endswith(ext):
-            return 'fastq'
-
-    # SRA accession
-    if re.match(r'^[SED]RR\d+$', os.path.basename(fpath)):
-        return 'fastq'
-
-    # Default: treat as FASTQ/SRA
-    tee.write(f"  Unknown input format for {tag} ({fpath}), treating as FASTQ.\n")
-    return 'fastq'
-
-
-def _detect_bam_kind(bam_path, tee):
-    """
-    Detect whether a BAM file already has cell barcodes (CB tag).
-
-    Returns:
-        'cell_tagged' - BAM has CB/BZ tags (already cell-level, e.g. STARsolo output)
-        'bulk'        - Regular BAM without cell barcodes
-    """
-    tee.write(f"  Analyzing BAM: {os.path.basename(bam_path)}\n")
-
-    # Check for CB tag (cell barcode) in first 1000 reads
-    cmd = (
-        f"samtools view {bam_path} | head -1000 | "
-        f"grep -o 'CB:Z:[^\\t]*' | head -1"
-    )
-    try:
-        result = subprocess.run(cmd, shell=True, capture_output=True,
-                                text=True, timeout=60)
-        if result.stdout.strip():
-            tee.write("  → Cell-tagged BAM detected (CB tag found)\n")
-            return 'cell_tagged'
-    except subprocess.TimeoutExpired:
-        tee.write("  → Timeout scanning BAM, assuming bulk BAM\n")
-        return 'bulk'
-
-    # Also check for BZ tag (STARsolo cell ID)
-    cmd2 = (
-        f"samtools view {bam_path} | head -1000 | "
-        f"grep -o 'BZ:Z:[^\\t]*' | head -1"
-    )
-    try:
-        result2 = subprocess.run(cmd2, shell=True, capture_output=True,
-                                 text=True, timeout=60)
-        if result2.stdout.strip():
-            tee.write("  → Cell-tagged BAM detected (BZ tag found)\n")
-            return 'cell_tagged'
-    except subprocess.TimeoutExpired:
-        pass
-
-    # Check if BAM has proper read groups with cell information
-    header_cmd = f"samtools view -H {bam_path}"
-    try:
-        hdr = subprocess.run(header_cmd, shell=True, capture_output=True,
-                              text=True, timeout=30)
-        # Look for cell barcode in RG field
-        if 'CB:' in hdr.stdout or 'cell' in hdr.stdout.lower():
-            tee.write("  → Cell-tagged BAM detected (cell info in header)\n")
-            return 'cell_tagged'
-    except subprocess.TimeoutExpired:
-        pass
-
-    # Check for @RG or @CB in header
-    try:
-        id_cmd = (
-            f"samtools view -H {bam_path} | grep -c 'CB:'"
-        )
-        result3 = subprocess.run(id_cmd, shell=True, capture_output=True,
-                                 text=True, timeout=30)
-        if result3.stdout.strip() and int(result3.stdout.strip()) > 0:
-            tee.write("  → Cell-tagged BAM detected (CB in @RG)\n")
-            return 'cell_tagged'
-    except (subprocess.TimeoutExpired, ValueError):
-        pass
-
-    # If we get here, it's a bulk BAM
-    tee.write("  → Bulk BAM (no cell barcodes detected)\n")
-    return 'bulk'
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# BAM quantification
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _quantify_celltagged_bam(tag, thread, gtf_file, prefix, genome):
-    """Quantify a cell-tagged BAM using STARsolo quant mode."""
-    tee = _tee()
-    bam_file = f"{tag}.bam"
-
-    # STARsolo quant mode: needs genome index. Reuse shared if available.
-    if not os.path.exists("Genome"):
-        if not try_use_shared_star_index(genome, prefix, "Genome", tee):
-            tee.write("  Building STAR genome index for quantification...\n")
-            os.makedirs("Genome", exist_ok=True)
-            gff_path = os.path.join(prefix, "reference", f"{genome}_genes.gff")
-            fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
-            run_cmd(
-                f"STAR --runThreadN {thread} --genomeDir Genome --seedSearchStartLmax 25 "
-                f"--runMode genomeGenerate "
-                f"--genomeSAindexNbases 10 --genomeFastaFiles {fasta_path} "
-                f"--sjdbGTFfile {gtf_file} --sjdbOverhang 99 --limitGenomeGenerateRAM 64000000000"
-            )
-            save_star_index_to_reference(genome, prefix, "Genome", tee)
-
-    tee.write(f"  Running STARsolo quant for {tag}...\n")
-    solo_outdir = f"Solo_out/{tag}"
-    os.makedirs(solo_outdir, exist_ok=True)
-
-    # Use STARsolo in soloQuant mode (quantify an existing BAM)
-    star_cmd = (
-        f"STAR --runMode soloQuant "
-        f"--soloInputSAMfile {bam_file} "
-        f"--soloOutDir {solo_outdir} "
-        f"--soloCBwhitelist None "
-        f"--soloCellFilter EmptyDroplets "
-        f"--quantMode GeneCounts "
-        f"--soloFeatures Gene GeneFull "
-        f"--runThreadN {thread} "
-        f"--outSAMtype BAM SortedByCoordinate "
-        f"--limitBAMsortRAM 10000000000"
-    )
-
-    run_cmd(star_cmd)
-
-    # Show stats
-    log_file = os.path.join(solo_outdir, "Log.final.out")
-    if os.path.exists(log_file):
-        with open(log_file) as lf:
-            tee.write(lf.read())
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Count matrix import (plain text → .rds)
-# ═══════════════════════════════════════════════════════════════════════════
-
 def _import_count_matrix(tag, fpath, tee):
     """
     Import a count matrix from various formats and convert to .rds.
@@ -601,7 +458,6 @@ def _import_count_matrix(tag, fpath, tee):
         f'data <- read.table("{fpath}", header={header}, sep="{sep}", '
         f'row.names={row_names_col}, stringsAsFactors=FALSE, check.names=FALSE); '
         f'counts <- as.matrix(data); '
-        f'# Ensure numeric '
         f'storage.mode(counts) <- "integer"; '
         f'saveRDS(counts, "{out_rds}"); '
         f'cat("Converted", basename("{fpath}"), "with", nrow(counts), '
@@ -615,51 +471,18 @@ def _import_count_matrix(tag, fpath, tee):
 # Count matrix preparation
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _prepare_all_counts(tags, input_types, solo_dir="Solo_out", gtf_file=None,
-                         prefix=None, genome=None, thread=None):
-    """Prepare all count matrices (from STARsolo, BAM counts, or plain text) to .rds."""
+def _prepare_all_counts(tags, input_types, files=None, solo_dir=None,
+                         gtf_file=None, prefix=None, genome=None, thread=None):
+    """Prepare all count matrices (from FASTQ alignment or pre-computed files) to .rds."""
     tee = _tee()
 
     for tag in tags:
         itype = input_types.get(tag, 'fastq')
 
         if itype == 'count':
-            # Already handled by _import_count_matrix in no-mapping path
+            _import_count_matrix(tag, files[tag], tee)
             continue
 
-        # Check for STARsolo output (from alignment or soloQuant)
-        matrix_file = os.path.join(solo_dir, tag, "Gene", "raw", "matrix.mtx.gz")
-
-        if os.path.exists(matrix_file):
-            # STARsolo output → convert
-            barcodes_file = os.path.join(solo_dir, tag, "Gene", "raw",
-                                          "barcodes.tsv.gz")
-            features_file = os.path.join(solo_dir, tag, "Gene", "raw",
-                                          "features.tsv.gz")
-
-            tee.write(f"  Converting STARsolo output for {tag}...\n")
-
-            r_cmd = (
-                f'Rscript --vanilla -e \''
-                f'mtx <- as.matrix(Matrix::readMM("{matrix_file}")); '
-            )
-            if os.path.exists(features_file):
-                r_cmd += f'features <- read.delim("{features_file}", header=FALSE); '
-                r_cmd += f'rownames(mtx) <- features$V2; '
-            else:
-                r_cmd += f'rownames(mtx) <- paste0("Gene", seq_len(nrow(mtx))); '
-
-            if os.path.exists(barcodes_file):
-                r_cmd += f'barcodes <- read.delim("{barcodes_file}", header=FALSE); '
-                r_cmd += f'colnames(mtx) <- paste0("{tag}_", barcodes$V1); '
-            else:
-                r_cmd += f'colnames(mtx) <- paste0("{tag}_Cell", seq_len(ncol(mtx))); '
-
-            r_cmd += f'saveRDS(mtx, "{tag}_counts.rds"); '
-            r_cmd += f'cat("Saved {tag}_counts.rds with", nrow(mtx), '
-            r_cmd += f'"genes and", ncol(mtx), "cells\\n")'
-            r_cmd += f'\''
-            run_cmd(r_cmd)
 
     # Generate combined matrix if multiple samples
     rds_files = [f"{t}_counts.rds" for t in tags if os.path.exists(f"{t}_counts.rds")]

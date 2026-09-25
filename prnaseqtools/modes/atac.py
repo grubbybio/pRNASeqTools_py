@@ -30,6 +30,7 @@ def run(opts):
     auc = opts.get('auc', 20)
     qvalue = opts.get('qvalue', 1.0)
     pvalue = opts.get('pvalue', 0.01)
+    cutoff = opts.get('cutoff', 3.0)
     nomapping = opts.get('no_mapping', False)
     mappingonly = opts.get('mapping_only', False)
     tss_distance = opts.get('tss_distance', 3000)
@@ -62,6 +63,9 @@ def run(opts):
     genrich_ip = "-t " + ','.join(f"{t}.sorted.name.bam" for t in ip_tags) if ip_tags else ""
     ip_tag = ip_tags[0] if ip_tags else 'ip'
 
+    if not ip_tags:
+        sys.exit("At least one --treatment (-p) is required.")
+
     # Parse group2 for MACS3 bdgdiff
     ip2_tags = []
     if peak_caller == 'macs3':
@@ -76,7 +80,10 @@ def run(opts):
     if not nomapping:
         tee.write("\nBuilding index...\n")
         fasta_path = os.path.join(prefix, "reference", f"{genome}_chr_all.fasta")
-        os.symlink(fasta_path, f"{genome}_chr_all.fasta")
+        if not os.path.exists(fasta_path):
+            sys.exit(f"Reference fasta not found: {fasta_path}")
+        if not os.path.lexists(f"{genome}_chr_all.fasta"):
+            os.symlink(fasta_path, f"{genome}_chr_all.fasta")
         run_cmd(
             f"bowtie2-build --threads {thread} -q {genome}_chr_all.fasta {genome}_chr_all")
 
@@ -96,7 +103,8 @@ def run(opts):
                     fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
                     run_cmd(
                         f"fastp -w {thread} --length_required 50 "
-                        f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
+                        f"-i {tag}.fastq -o {tag}_trimmed.fastq "
+                        f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
                     os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
                     for rep in (f"{tag}.html", f"{tag}.json"):
                         if os.path.exists(rep):
@@ -115,7 +123,8 @@ def run(opts):
                     run_cmd(
                         f"fastp -w {thread} --length_required 50 "
                         f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                    f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
                     os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                     os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                     for rep in (f"{tag}.html", f"{tag}.json"):
@@ -136,7 +145,8 @@ def run(opts):
                 run_cmd(
                     f"fastp -w {thread} --length_required 50 "
                     f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
+                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                    f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
                 os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
                 os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
                 for rep in (f"{tag}.html", f"{tag}.json"):
@@ -167,7 +177,7 @@ def run(opts):
         if not mappingonly:
             if peak_caller == 'macs3':
                 _run_macs3(ip_tags, ip2_tags, ip_tag, genome_size,
-                           qvalue, pvalue, tee,
+                           qvalue, pvalue, tee, cutoff=cutoff,
                            genome=genome, prefix=prefix,
                            tss_distance=tss_distance)
             else:
@@ -178,14 +188,28 @@ def run(opts):
 
     else:
         for pre in tags:
-            os.symlink(f"../{pre}.sorted.name.bam", f"{pre}.sorted.name.bam")
+            if not os.path.lexists(f"{pre}.sorted.name.bam"):
+                os.symlink(f"../{pre}.sorted.name.bam", f"{pre}.sorted.name.bam")
+            if not os.path.lexists(f"{pre}.sorted.bam"):
+                os.symlink(f"../{pre}.sorted.bam", f"{pre}.sorted.bam")
+            if (os.path.exists(f"../{pre}.sorted.bam.bai")
+                    and not os.path.lexists(f"{pre}.sorted.bam.bai")):
+                os.symlink(f"../{pre}.sorted.bam.bai", f"{pre}.sorted.bam.bai")
 
-        _run_genrich(genrich_ip, genrich_input, ip_tag, qvalue, pvalue, auc, tee,
-                     genome=genome, prefix=prefix, tss_distance=tss_distance)
+        if peak_caller == 'macs3':
+            _run_macs3(ip_tags, ip2_tags, ip_tag, genome_size,
+                       qvalue, pvalue, tee, cutoff=cutoff,
+                       genome=genome, prefix=prefix,
+                       tss_distance=tss_distance)
+        else:
+            _run_genrich(genrich_ip, genrich_input, ip_tag, qvalue, pvalue, auc, tee,
+                         genome=genome, prefix=prefix, tss_distance=tss_distance)
 
         for pre in tags:
-            if os.path.exists(f"{pre}.sorted.name.bam"):
-                os.unlink(f"{pre}.sorted.name.bam")
+            for bam in (f"{pre}.sorted.name.bam", f"{pre}.sorted.bam",
+                        f"{pre}.sorted.bam.bai"):
+                if os.path.lexists(bam):
+                    os.unlink(bam)
 
 
 def _peak_stats(peak_file, label, tee):
@@ -206,7 +230,7 @@ def _peak_stats(peak_file, label, tee):
 
 
 def _run_macs3(ip_tags, ip2_tags, ip_tag, genome_size, qvalue, pvalue, tee,
-               genome=None, prefix=None, tss_distance=3000):
+               cutoff=3.0, genome=None, prefix=None, tss_distance=3000):
     """Run MACS3 peak calling for ATAC-seq (+ optional bdgdiff)."""
     ip_bam = ' '.join(f"{t}.sorted.bam" for t in ip_tags)
 
@@ -258,8 +282,8 @@ def _run_macs3(ip_tags, ip2_tags, ip_tag, genome_size, qvalue, pvalue, tee,
             f"--t2 {t2_bdg} --c2 {c2_bdg} "
             f"--o-prefix {diff_prefix}"
         )
-        if qvalue < 1:
-            diff_cmd += f" -C {qvalue}"
+        tee.write(f"  Log-likelihood ratio cutoff: {cutoff}\n")
+        diff_cmd += f" -C {cutoff}"
         run_cmd(diff_cmd)
 
         tee.write(f"\nDifferential peaks output:\n")

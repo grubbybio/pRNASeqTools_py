@@ -17,7 +17,7 @@
 #   [2] out_dir
 #   [3] genome
 #   [4] analysis          affinity | dual_factor
-#   [5] norm              deseq2 | total | mito | chloro
+#   [5] norm              deseq2 | total | mito | chloro | rdna
 #   [6] pvalue
 #   [7] foldchange
 #   [8] norm_factors.tsv  (optional, for non-deseq2)
@@ -109,7 +109,7 @@ cat("\n  ── Normalization:", norm_mode, "──\n")
 custom_size_factors <- NULL  # 全样本的 size factor 向量 (IP + Input)
 if (norm_mode == "deseq2") {
   cat("  Using DESeq2 default size factors (median-of-ratios)\n")
-} else if (norm_mode %in% c("total", "mito", "chloro")) {
+} else if (norm_mode %in% c("total", "mito", "chloro", "rdna")) {
   if (is.null(nf_file) || !file.exists(nf_file)) {
     cat("  WARNING: norm_factors.tsv not found, falling back to DESeq2 default\n")
   } else {
@@ -141,6 +141,9 @@ if (norm_mode == "deseq2") {
       cat("  WT_1 example: mito=1732, scale=0.330 → DESeq2: raw/0.330=raw×3.03 ↑ (WT>ago1_27)\n")
     }
   }
+} else {
+  cat("  WARNING: unknown norm mode '", norm_mode,
+      "', falling back to DESeq2 default size factors\n", sep = "")
 }
 
 # ── 5. Run DESeq2 ─────────────────────────────────────────────────────────────

@@ -87,12 +87,16 @@ def run(opts):
         # Mask setup
         if mask:
             mask_path = _resolve_path(mask)
+            if os.path.lexists("mask.fa"):
+                os.unlink("mask.fa")
             os.symlink(mask_path, "mask.fa")
             run_cmd("bowtie-build -q mask.fa mask")
 
         # Spike-in setup
         if spikein:
             spikein_path = _resolve_path(spikein)
+            if os.path.lexists("spikein.fa"):
+                os.unlink("spikein.fa")
             os.symlink(spikein_path, "spikein.fa")
             run_cmd("bowtie-build -q spikein.fa spikein")
 
@@ -350,22 +354,24 @@ def _umi_dedup(tag):
             line = line.strip()
             n = i % 4
             if n == 3:  # quality
-                dedup[out_seq_names[2]][out_seq]['quality'] = line
+                dedup[umi][out_seq]['quality'] = line
             elif n == 1:  # sequence
                 out_seq = line
-                dedup[out_seq_names[2]][out_seq]['id'] = out_seq_names[0]
-                dedup[out_seq_names[2]][out_seq]['count'] = \
-                    dedup[out_seq_names[2]][out_seq].get('count', 0) + 1
+                dedup[umi][out_seq]['id'] = out_seq_name
+                dedup[umi][out_seq]['count'] = \
+                    dedup[umi][out_seq].get('count', 0) + 1
             elif n == 0:  # header
                 seq_names = line.split()
-                out_seq_names = seq_names[0].split('_')
+                out_seq_name = seq_names[0]
+                umi = seq_names[0].rsplit('_', 1)[-1]
 
     with open(f"{tag}.fastq", 'w') as fh_out:
         for umi in dedup:
             for output_seq in dedup[umi]:
                 data = dedup[umi][output_seq]
+                description = f" {seq_names[1]}" if len(seq_names) > 1 else ""
                 fh_out.write(
-                    f"{data['id']}_{umi}_{data['count']} {seq_names[1]}\n"
+                    f"{data['id']}_{umi}_{data['count']}{description}\n"
                     f"{output_seq}\n+\n{data['quality']}\n"
                 )
 
@@ -518,7 +524,8 @@ def _make_bedgraph(sbed, prefix, genome, nrc, mnorm):
 
 def _write_raw_count_files(count_data, tag, bed_files, prefix, genome, fas, mir_gff, has_mirna=True):
     """Write raw count files (no normalization)."""
-    sbed_sorted = sorted(bed_files)
+    # Fixed 8 length columns (18-25 nt) matching the R scripts' [,1:8] expectation
+    sbed_sorted = [f"{tag}.{leng}.bed" for leng in range(18, 26)]
 
     # Bin counts
     with open(f"{tag}.count", 'w') as fh:

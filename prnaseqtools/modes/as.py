@@ -5,10 +5,10 @@ Pipeline (基于 crescent 的 DAS + DTU, 但把 rMATS 换成了 MAJIQ):
 
   所有 majiq/voila 命令通过 `conda run -n majiq_academic` 跨 env 调用.
 
-  1. [可选] STAR mapping → sorted BAM (如果输入 FASTQ)
+  1. [可选] HISAT2 mapping → sorted BAM (如果输入 FASTQ)
   2. MAJIQ build
      - GFF3 annotation + sorted BAMs → splicegraph.sql + {sample}.majiq
-     - 如果用户只有 GTF → gffread -T GFF3 转换
+     - 如果用户只有 GTF → gffread 转 GFF3
      - 生成 MAJIQ config.ini ([info] + [experiments] INI 格式)
   3. MAJIQ quantifier:
      - deltapsi : ctrl vs treatment 两组间差异 dPSI
@@ -31,20 +31,15 @@ control = group 0, treatment = group 1, 2, ...
 
 import os
 import sys
-# MAJIQ 独立 conda env 名 (跨 env 调用)
-MAJIQ_ENV_NAME = 'majiq_academic'
-
-
-def _majiq_cmd(subcommand):
-    """返回 conda run -n <env> <subcommand>, 用于跨 env 调 majiq/voila."""
-    return f"conda run -n {MAJIQ_ENV_NAME} {subcommand}"
 import glob as globmod
 import subprocess
+import configparser
 from pathlib import Path
 
+from prnaseqtools.validate_options import validate_options
 from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
                                         _resolve_path)
-from prnaseqtools.functions import (_tee, run_cmd)
+from prnaseqtools.functions import (_tee, run_cmd, download_sra)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -53,6 +48,7 @@ from prnaseqtools.functions import (_tee, run_cmd)
 
 def run(opts):
     """主入口: 可变剪接 (MAJIQ + VOILA) 分析."""
+    opts = validate_options(opts)
     tee = _tee()
 
     thread      = opts.get('thread', 4)
@@ -86,7 +82,7 @@ def run(opts):
 
     # MAJIQ 需要 GFF3 格式 annotation
     majiq_gff3 = os.path.join(ref_dir, f"{genome}_genes_majiq.gff3")
-    _ensure_gff3(ref_gff, ref_gtf, majiq_gff3, tee)
+    majiq_gff3 = _ensure_gff3(ref_gff, ref_gtf, majiq_gff3, tee)
 
     # ── 输出目录 ──────────────────────────────────────────────────────
     work_dir     = os.path.join(prefix, f"results_as_{genome}")
@@ -129,7 +125,7 @@ def run(opts):
         tee.write("\n[mapping-only] BAM ready → 停止\n")
         return
 
-    if len(existing_bams) < len(tags):
+    if do_build and len(existing_bams) < len(tags):
         tee.write(f"\nERROR: 只有 {len(existing_bams)}/{len(tags)} 个样本有 sorted BAM\n")
         sys.exit(1)
 
@@ -181,10 +177,12 @@ def _ensure_gff3(ref_gff, ref_gtf, majiq_gff3, tee):
         tee.write(f"  MAJIQ annotation: {majiq_gff3} (cached)\n")
         return majiq_gff3
 
-    # 检查现成的 GFF3（不同扩展名）
-    for ext in ('gff3', 'GFF3', 'gff.GFF3'):
-        if os.path.exists(ref_gff + ext):
-            return ref_gff + ext
+    # 检查现成的 GFF3（同 basename, 不同扩展名）
+    gff_base = os.path.splitext(ref_gff)[0]
+    for cand in (f"{gff_base}.gff3", f"{gff_base}.GFF3"):
+        if os.path.exists(cand):
+            tee.write(f"  MAJIQ annotation: {cand} (existing GFF3)\n")
+            return cand
 
     tee.write("  转换 annotation 为 GFF3 格式 (MAJIQ 要求)...\n")
     src = ref_gff if os.path.exists(ref_gff) else ref_gtf
@@ -192,8 +190,8 @@ def _ensure_gff3(ref_gff, ref_gtf, majiq_gff3, tee):
         tee.write(f"  ERROR: 找不到 annotation ({ref_gff} / {ref_gtf})\n")
         sys.exit(1)
 
-    # 用 gffread 转 GFF3
-    cmd = f"gffread {src} -o {majiq_gff3} -T GFF3"
+    # 用 gffread 转 GFF3 (默认输出即 GFF3)
+    cmd = f"gffread {src} -o {majiq_gff3}"
     tee.write(f"    {cmd}\n")
     run_cmd(cmd, tee)
     tee.write(f"    ✓ {majiq_gff3}\n")
@@ -201,25 +199,45 @@ def _ensure_gff3(ref_gff, ref_gtf, majiq_gff3, tee):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Stage 1: STAR mapping
+# Stage 1: HISAT2 mapping
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _do_mapping(tags, files, pars, ref_fasta, genome_size,
                 bam_dir, thread, seq_strategy, tee, majiq_dir=None,
                 reuse_existing=None):
-    """STAR → sorted BAM."""
+    """HISAT2 → sorted BAM."""
+    from prnaseqtools.functions import hisat2_build_index, try_use_shared_hisat_index
     reuse_existing = reuse_existing or set()
-    # 生成 STAR index (如果不存在)
-    star_idx = os.path.join(os.path.dirname(ref_fasta), "STAR_idx_" +
-                            os.path.basename(ref_fasta).split('_chr')[0])
-    if not os.path.exists(os.path.join(star_idx, "SAindex")):
-        tee.write("  构建 STAR index...\n")
-        cmd = (f"STAR --runMode genomeGenerate "
-               f"--genomeDir {star_idx} "
-               f"--genomeFastaFiles {ref_fasta} "
-               f"--runThreadN {thread} "
-               f"--genomeSAindexNbases {genome_size} --sjdbOverhang 99 --limitGenomeGenerateRAM 64000000000")
-        run_cmd(cmd, tee)
+    # HISAT2 index 前缀 (文件组形式, 不是目录)
+    hisat_idx = os.path.join(os.path.dirname(ref_fasta), "HisatIdx_as_" +
+                             os.path.basename(ref_fasta).split('_chr')[0])
+
+    # 找 GTF 做 splice sites
+    ref_dir = os.path.dirname(ref_fasta)
+    gff_path = os.path.join(ref_dir, "..", "reference",
+                            os.path.basename(ref_fasta).split('_chr')[0] + "_genes.gff")
+    # 尝试多种可能位置
+    if not os.path.exists(gff_path):
+        for cand in (os.path.join(ref_dir, "..", "reference"),
+                     os.path.join(ref_dir, "reference")):
+            if os.path.isdir(cand):
+                for f in os.listdir(cand):
+                    if f.endswith("_genes.gff") or f.endswith("_genes.gtf"):
+                        gff_path = os.path.join(cand, f)
+                        break
+                break
+        if not os.path.exists(gff_path):
+            gff_path = None  # 无 annotation 时跳过 splice sites
+
+    if not try_use_shared_hisat_index(genome=os.path.basename(ref_fasta).split('_chr')[0],
+                                       prefix=os.path.dirname(ref_dir),
+                                       local_idx=hisat_idx, tee=tee):
+        tee.write("  构建 HISAT2 index...\n")
+        if gff_path and os.path.exists(gff_path):
+            hisat2_build_index(ref_fasta, gff_path, hisat_idx, thread, tee)
+        else:
+            # 无 annotation，跳过 splice sites
+            run_cmd(f"hisat2-build -p {thread} {ref_fasta} {hisat_idx}", tee)
 
     for i, tag in enumerate(tags):
         bam_out = os.path.join(bam_dir, f"{tag}.sorted.bam")
@@ -227,31 +245,100 @@ def _do_mapping(tags, files, pars, ref_fasta, genome_size,
             tee.write(f"    [{tag}] 已有 BAM → 跳过\n")
             continue
 
-        fq1, fq2 = files[i] if isinstance(files[i], (tuple, list)) \
-            else (files[i], None)
-        fq_arg = f"{fq1} {fq2}" if fq2 else fq1
+        if i >= len(files):
+            tee.write(f"  ERROR: [{tag}] 没有输入文件 "
+                      f"(纯重复数输入无法 mapping, 请提供 FASTQ 或 SRA 编号)\n")
+            sys.exit(1)
 
-        out_prefix = os.path.join(bam_dir, f"{tag}.")
-        tee.write(f"    [{tag}] STAR mapping...\n")
-        cmd = (f"STAR --genomeDir {star_idx} --seedSearchStartLmax 25 "
-               f"--readFilesIn {fq_arg} "
-               f"--readFilesCommand zcat "
-               f"--runThreadN {thread} "
-               f"--outSAMtype BAM SortedByCoordinate "
-               f"--outSAMstrandField intronMotif "
-               f"--outBAMsortingThreadN {thread} "
-               f"--outFileNamePrefix {out_prefix}")
-        if pars[i]:
-            cmd += f" {pars[i]}"
+        fpath = files[i]
+        if ',' in fpath:
+            # 双端
+            fq_parts = fpath.split(',')
+            gz_input = all(f.endswith('.gz') for f in fq_parts)
+            if gz_input:
+                fq1, fq2 = f"--gzfm {fq_parts[0]} --gzfm {fq_parts[1]}", None
+                # HISAT2 不直接支持 --gzfm，需要 zcat 管道
+                fq_arg = f"<(zcat {fq_parts[0]}) <(zcat {fq_parts[1]})"
+            else:
+                fq_arg = f"{fq_parts[0]} {fq_parts[1]}"
+        else:
+            sra_files, _ = download_sra(fpath, thread)
+            gz_input = sra_files[0].endswith('.gz')
+            if gz_input:
+                fq_arg = f"<(zcat {' '.join(sra_files)})"
+            else:
+                fq_arg = ' '.join(sra_files)
+
+        final_bam = os.path.join(bam_dir, f"{tag}.sorted.bam")
+        tee.write(f"    [{tag}] HISAT2 mapping...\n")
+
+        # 判断单端/双端
+        if (',' in fpath and len(fpath.split(',')) == 2) or (
+                not ',' in fpath and len(sra_files) == 2):
+            # 双端
+            if ',' in fpath:
+                fq1, fq2 = fpath.split(',')
+                if gz_input:
+                    cmd = (f"bash -c \"hisat2 -p {thread} -x {hisat_idx} "
+                           f"-1 <(zcat {fq1}) -2 <(zcat {fq2}) "
+                           f"--dta-cufflinks --rna-strandness RF "
+                           f"-S {bam_dir}/{tag}.sam "
+                           f"--novel-splicesite-outfile {bam_dir}/{tag}_SJ.out.tab "
+                           f"2>{bam_dir}/{tag}_Log.txt\"")
+                else:
+                    cmd = (f"hisat2 -p {thread} -x {hisat_idx} "
+                           f"-1 {fq1} -2 {fq2} "
+                           f"--dta-cufflinks --rna-strandness RF "
+                           f"-S {bam_dir}/{tag}.sam "
+                           f"--novel-splicesite-outfile {bam_dir}/{tag}_SJ.out.tab "
+                           f"2>{bam_dir}/{tag}_Log.txt")
+            else:
+                cmd = (f"hisat2 -p {thread} -x {hisat_idx} "
+                       f"-1 {sra_files[0]} -2 {sra_files[1]} "
+                       f"--dta-cufflinks --rna-strandness RF "
+                       f"-S {bam_dir}/{tag}.sam "
+                       f"--novel-splicesite-outfile {bam_dir}/{tag}_SJ.out.tab "
+                       f"2>{bam_dir}/{tag}_Log.txt")
+        else:
+            # 单端
+            if ',' not in fpath:
+                fq = sra_files[0] if len(sra_files) == 1 else sra_files[0]
+            else:
+                fq = fpath  # 单端不会有逗号
+
+            if isinstance(fq, str) and ',' not in fq and os.path.exists(fq):
+                if gz_input:
+                    cmd = (f"bash -c \"hisat2 -p {thread} -x {hisat_idx} "
+                           f"-U <(zcat {fq}) "
+                           f"--dta-cufflinks "
+                           f"-S {bam_dir}/{tag}.sam "
+                           f"--novel-splicesite-outfile {bam_dir}/{tag}_SJ.out.tab "
+                           f"2>{bam_dir}/{tag}_Log.txt\"")
+                else:
+                    cmd = (f"hisat2 -p {thread} -x {hisat_idx} "
+                           f"-U {fq} "
+                           f"--dta-cufflinks "
+                           f"-S {bam_dir}/{tag}.sam "
+                           f"--novel-splicesite-outfile {bam_dir}/{tag}_SJ.out.tab "
+                           f"2>{bam_dir}/{tag}_Log.txt")
+            else:
+                # download_sra 返回的多个文件 → 合并
+                sra_fqs = ' '.join(sra_files)
+                cmd = (f"hisat2 -p {thread} -x {hisat_idx} "
+                       f"-U {sra_fqs} "
+                       f"--dta-cufflinks "
+                       f"-S {bam_dir}/{tag}.sam "
+                       f"--novel-splicesite-outfile {bam_dir}/{tag}_SJ.out.tab "
+                       f"2>{bam_dir}/{tag}_Log.txt")
+
         run_cmd(cmd, tee)
-
-        # 重命名 STAR 默认输出的 sorted BAM
-        default_bam = os.path.join(bam_dir, f"{tag}.Aligned.sortedByCoord.out.bam")
-        final_bam   = os.path.join(bam_dir, f"{tag}.sorted.bam")
-        if os.path.exists(default_bam) and not os.path.exists(final_bam):
-            os.rename(default_bam, final_bam)
-        # index
+        # sort + index
+        run_cmd(f"samtools sort -@ {thread} -o {final_bam} {bam_dir}/{tag}.sam", tee)
         run_cmd(f"samtools index {final_bam}", tee)
+        # 清理中间 SAM
+        for _clean in (f"{bam_dir}/{tag}.sam",):
+            if os.path.exists(_clean):
+                os.unlink(_clean)
 
 
 def _find_sorted_bams(bam_dir, tags):
@@ -411,7 +498,8 @@ def _do_majiq_quantify(group_map, quant_dir, splicegraph,
     # 按 group_id 分组
     by_group = {}
     for tag, gid in group_map.items():
-        matches = [f for f in psi_files if tag in os.path.basename(f)]
+        matches = [f for f in psi_files
+                   if os.path.basename(f).startswith(f"{tag}.")]
         by_group.setdefault(gid, []).extend(matches)
 
     ctrl_psi = by_group.get(0, [])
@@ -469,53 +557,6 @@ def _run_heterogen(grp1_psi, grp2_psi, n1, n2, splicegraph, out_dir, tee):
     run_cmd(cmd, tee)
     tee.write(f"      ✓ heterogen done\n")
 
-"""
-Alternative Splicing (AS) analysis mode.
-
-Pipeline (基于 crescent 的 DAS + DTU, 但把 rMATS 换成了 MAJIQ):
-
-  所有 majiq/voila 命令通过 `conda run -n majiq_academic` 跨 env 调用.
-
-  1. [可选] STAR mapping → sorted BAM (如果输入 FASTQ)
-  2. MAJIQ build
-     - GFF3 annotation + sorted BAMs → splicegraph.sql + {sample}.majiq
-     - 如果用户只有 GTF → gffread -T GFF3 转换
-     - 生成 MAJIQ config.ini ([info] + [experiments] INI 格式)
-  3. MAJIQ quantifier:
-     - deltapsi : ctrl vs treatment 两组间差异 dPSI
-     - heterogen: 多样本各自 PSI 独立比较 (单样品含重复场景)
-  4. VOILA (MAJIQ 自带):
-     - voila tsv     → 差异剪接事件 TSV (带 PSI / dPSI / padj)
-     - voila modulize → splicing modules 分类
-     - voila view     → 交互式浏览器可视化
-
-Inputs: FASTQ 或 现有 sorted BAM
-control = group 0, treatment = group 1, 2, ...
-
-与 crescent 原流程的差异:
-  - rMATS  → MAJIQ (支持 de novo LSV 检测, 更好处理植物等非模式生物)
-  - 增加 heterogen 模式 (每个样本独立 PSI, 组间统计检验)
-  - VOILA tsv / modulize 替代手动 R 可视化
-
-命令行入口: prnaseqtools as [--classifier {deltapsi,heterogen,both}]
-"""
-
-import os
-import sys
-# MAJIQ 独立 conda env 名 (跨 env 调用)
-MAJIQ_ENV_NAME = 'majiq_academic'
-
-
-def _majiq_cmd(subcommand):
-    """返回 conda run -n <env> <subcommand>, 用于跨 env 调 majiq/voila."""
-    return f"conda run -n {MAJIQ_ENV_NAME} {subcommand}"
-import glob as globmod
-import subprocess
-from pathlib import Path
-
-from prnaseqtools.input_parser import (parse_input, _parse_to_dict,
-                                        _resolve_path)
-from prnaseqtools.functions import (_tee, run_cmd)
 
 def _do_voila(splicegraph, quant_dir, voila_dir, view, tee, majiq_dir=None):
     """

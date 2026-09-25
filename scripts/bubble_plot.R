@@ -23,6 +23,11 @@ for (n in 1:length(genotype)){
     paste(genotype[n],"_",k,".out",sep="") -> a[q]
   }
 }
+a <- a[sapply(a, function(f) file.exists(f) && file.size(f) > 0)]
+if (length(a) == 0) {
+  message("No non-empty input files; skipping bubble plots.")
+  quit(save = "no", status = 0)
+}
 for (i in 1:length(a)){
   assign(a[i],read.table(a[i],as.is = T))
 }

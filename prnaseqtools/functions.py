@@ -6,6 +6,7 @@ Mirrors the Perl Function.pm module.
 import os
 import re
 import math
+import shlex
 import subprocess
 import sys
 import shutil
@@ -95,7 +96,7 @@ def download_sra(srr, threads=4):
     # prefetch creates: .sra_cache/<SRRxxxx>/<SRRxxxx>.sra  (accession subdir)
     cache_dir = ".sra_cache"
     os.makedirs(cache_dir, exist_ok=True)
-    run_cmd(f"prefetch -O {cache_dir} {srr_id}")
+    run_cmd(f"prefetch -O {cache_dir} {shlex.quote(srr_id)}")
 
     # Step 2: locate .sra file — prefetch nests it under accession subdir
     sra_path = None
@@ -112,7 +113,7 @@ def download_sra(srr, threads=4):
     # Step 3: fasterq-dump — local conversion from .sra to FASTQ
     # Use absolute path to avoid VDB relative-path resolution issues
     sra_abs = os.path.abspath(sra_path)
-    run_cmd(f"fasterq-dump -p --threads {threads} --split-files {sra_abs}")
+    run_cmd(f"fasterq-dump -p --threads {threads} --split-files {shlex.quote(sra_abs)}")
 
     # Step 4: clean up intermediate .sra and cache dir
     shutil.rmtree(cache_dir, ignore_errors=True)
@@ -138,6 +139,47 @@ def download_sra(srr, threads=4):
             f"fasterq-dump produced no FASTQ output for {srr_id}. "
             f"Expected {srr_id}.fastq or {srr_id}_1.fastq"
         )
+
+
+def cleanup_alignment_outputs(extra_globs=()):
+    """Remove per-tag aligner outputs (HISAT2 or STAR), fastp intermediates,
+    and pipeline reports.
+
+    Standard cleanup covers:
+      - HISAT2: *.sam, *_Log.txt, *_SJ.out.tab
+      - STAR (legacy): *_Log.*, *_Aligned.*, *_Unmapped.*
+      - fastp trimmed outputs (*_trimmed.fastq / *.fq)
+      - fastp reports (*.html / *.json)
+      - Unzipped trimmed fastq ({tag}.fastq / {tag}_R1.fastq / {tag}_R2.fastq).
+        Raw SRA unzipped files (*.raw.fastq) are skipped (see preserve_raw_fastq).
+        Files matching *.raw.fastq / *.unmapped*.fastq are preserved.
+    Pass extra_globs to add mode-specific patterns.
+    Idempotent: missing files are silently skipped.
+    """
+    import glob as globmod
+    patterns = [
+        # HISAT2 / STAR common
+        "*.sam", "*_Log.txt", "*_SJ.out.tab",
+        # STAR legacy
+        "*_Log.out", "*_Log.progress.out", "*_Log.final.out",
+        "*_Aligned.sortedByCoord.out.bam", "*_Aligned.out.sam",
+        "*_Unmapped.out.mate1", "*_Unmapped.out.mate2",
+        "*_ReadsUnmapped*.fastq", "*_ReadsUnmapped*.fq",
+        # fastp intermediates & reports
+        "*_trimmed.fastq", "*_trimmed.fq",
+        "*.fastq", "*.fq",
+        "*.html", "*.json",
+    ]
+    patterns.extend(extra_globs)
+    for pattern in patterns:
+        for fname in globmod.glob(pattern):
+            if not os.path.exists(fname):
+                continue
+            # Defensive: never delete *.raw.fastq / *.raw.fq / *.unmapped*.fastq
+            # (preservation targets)
+            if fname.endswith((".raw.fastq", ".raw.fq")) or ".unmapped" in fname:
+                continue
+            os.unlink(fname)
 
 
 def preserve_raw_fastq(from_sra, tag, paired=False):
@@ -208,20 +250,20 @@ def unzip_file(filepath, tag):
 
     if filepath.endswith('.bz2'):
         tee.write("Decompressing...\n")
-        run_cmd(f"bzip2 -dc {filepath} > {target}")
+        run_cmd(f"bzip2 -dc {shlex.quote(filepath)} > {shlex.quote(target)}")
     elif filepath.endswith('.gz'):
         tee.write("Decompressing...\n")
-        run_cmd(f"gzip -dc {filepath} > {target}")
+        run_cmd(f"gzip -dc {shlex.quote(filepath)} > {shlex.quote(target)}")
     elif filepath.endswith('.gtz'):
         tee.write("Decompressing...\n")
-        run_cmd(f"gtz -dc {filepath} > {target}")
+        run_cmd(f"gtz -dc {shlex.quote(filepath)} > {shlex.quote(target)}")
     elif filepath.endswith(('.fastq', '.fq')):
         if filepath != target:
             tee.write("Renaming...\n")
             os.rename(filepath, target)
         else:
             tee.write("Backing up...\n")
-            run_cmd(f"cp {filepath} {target}.bak")
+            run_cmd(f"cp {shlex.quote(filepath)} {shlex.quote(target)}.bak")
     else:
         raise ValueError("Please provide the seq file in correct formats!")
 
@@ -241,7 +283,7 @@ def gzip_fastq(filepath):
         return
     tee = _tee()
     tee.write(f"Saving compressed: {filepath}.gz\n")
-    run_cmd(f"gzip -f {filepath}")
+    run_cmd(f"gzip -f {shlex.quote(filepath)}")
 
 
 def rmvc(tag_r1, tag_r2=None):
@@ -267,7 +309,7 @@ def rmvc(tag_r1, tag_r2=None):
             if n == 3:  # quality
                 if seqname and seqname in rmvc_dict:
                     clen = rmvc_dict[seqname].get('clen', 0)
-                    rmvc_dict[seqname]['outq'] = line[-clen:][::-1] if clen else line
+                    rmvc_dict[seqname]['outq'] = line[:-clen][::-1] if clen else line
             elif n == 1:  # sequence
                 m = re.match(r'^([A-Z]+[ATG])(C+)$', line)
                 if m:
@@ -364,77 +406,160 @@ def fastq2fasta(input_file, output_file):
                 fout.write(line)
 
 
-# ── STAR shared index helpers ──────────────────────────────────────────
-def try_use_shared_star_index(genome, prefix, local_dir='Genome', tee=None):
+# ── HISAT2 shared index helpers ──────────────────────────────────────────
+# HISAT2 索引是一组 HisatIdx.1.ht2 ~ HisatIdx.N.ht2 的文件组，
+# 用 '.1.ht2' 作为完整性检查标记。
+
+def _hisat_index_prefix(hisat_idx):
+    """Normalize HISAT2 index prefix — strip trailing markers if present."""
+    for suffix in ('.1.ht2', '.ht2', '.htl'):
+        if hisat_idx.endswith(suffix):
+            return hisat_idx[:-len(suffix)]
+    return hisat_idx
+
+
+def _is_hisat_index_complete(hisat_idx):
+    """Check if HISAT2 index prefix has all files (.1.ht2 or .htl)."""
+    p = _hisat_index_prefix(hisat_idx)
+    return os.path.exists(p + '.1.ht2') or os.path.exists(p + '.htl')
+
+
+def _symlink_hisat_index_files(ref_idx, local_idx):
+    """Symlink all HISAT2 index files from ref_idx prefix → local_idx prefix."""
+    import glob as _glob
+    ref_prefix = _hisat_index_prefix(ref_idx)
+    local_prefix = _hisat_index_prefix(local_idx)
+    for pattern in (ref_prefix + '.*.ht2', ref_prefix + '.htl'):
+        for rf in _glob.glob(pattern):
+            lf = rf.replace(ref_prefix, local_prefix)
+            if not os.path.exists(lf):
+                os.symlink(rf, lf)
+
+
+def try_use_shared_hisat_index(genome, prefix, local_idx='HisatIdx', tee=None):
     """
-    Check if a pre-built STAR index exists at reference/{genome}_Genome.
-    If yes → symlink local_dir → reference index, return True (skip genomeGenerate).
-    If no  → return False (caller should run genomeGenerate normally).
-    
-    Also handles stale local directories: if local_dir already exists but is
-    incomplete, it gets removed so genomeGenerate can rebuild.
+    Check if a pre-built HISAT2 index exists at reference/{genome}_HisatIdx.
+    If yes → symlink local_idx → reference files, return True.
+    If no  → return False (caller should run hisat2-build normally).
     """
     if tee is None:
         tee = sys.stderr
-    
-    ref_idx = os.path.join(prefix, 'reference', f'{genome}_Genome')
-    
-    # Case 1: local_dir already exists as symlink → just verify target
-    if os.path.islink(local_dir):
-        target = os.path.realpath(local_dir)
-        if os.path.isdir(target) and os.path.exists(os.path.join(target, 'SAindex')):
-            tee.write(f"  复用 STAR index symlink → {target}\n")
-            return True
-        # 坏链 → 删了重建
-        tee.write(f"  坏 symlink → 删除重建\n")
-        os.unlink(local_dir)
-    
-    # Case 2: local_dir is a real directory → check if complete
-    if os.path.isdir(local_dir):
-        if os.path.exists(os.path.join(local_dir, 'SAindex')):
-            tee.write(f"  复用本地已存在的 STAR index ({local_dir})\n")
-            return True
-        else:
-            tee.write(f"  本地 index 不完整 → 删除重建\n")
-            shutil.rmtree(local_dir, ignore_errors=True)
-    
-    # Case 3: reference/{genome}_Genome exists and is complete
-    if os.path.isdir(ref_idx) and os.path.exists(os.path.join(ref_idx, 'SAindex')):
-        tee.write(f"  发现共享 STAR index: {ref_idx}\n")
-        os.symlink(ref_idx, local_dir)
-        tee.write(f"  创建 symlink: {local_dir} → {ref_idx}\n")
+
+    # Case 1: local index files already present
+    if _is_hisat_index_complete(local_idx):
+        tee.write(f"  复用本地 HISAT2 index ({local_idx})\n")
         return True
-    
-    # Case 4: 都没有 → caller must run genomeGenerate
+
+    # Case 2: shared index exists in reference/ → symlink
+    ref_idx = os.path.join(prefix, 'reference', f'{genome}_HisatIdx')
+    if _is_hisat_index_complete(ref_idx):
+        tee.write(f"  发现共享 HISAT2 index: {ref_idx}\n")
+        _symlink_hisat_index_files(ref_idx, local_idx)
+        tee.write(f"  已创建 symlink 到共享 index\n")
+        return True
+
     return False
 
 
-def save_star_index_to_reference(genome, prefix, local_dir='Genome', tee=None):
-    """
-    After genomeGenerate completes, move local_dir to reference/{genome}_Genome
-    and create a symlink back.  Future runs will reuse the shared index.
-    
-    If reference/{genome}_Genome already exists (race condition / parallel run),
-    we just keep the local copy — don't overwrite.
+def save_hisat_index_to_reference(genome, prefix, local_idx='HisatIdx', tee=None):
+    """After hisat2-build, move local_idx files → reference/{genome}_HisatIdx
+    and create symlinks back. Future runs reuse the shared index."""
+    if tee is None:
+        tee = sys.stderr
+
+    if not _is_hisat_index_complete(local_idx):
+        tee.write(f"  save_hisat_index: {local_idx} 不完整，跳过\n")
+        return
+
+    ref_idx = os.path.join(prefix, 'reference', f'{genome}_HisatIdx')
+    import glob as _glob
+    local_prefix = _hisat_index_prefix(local_idx)
+    local_files = _glob.glob(local_prefix + '.*.ht2') + _glob.glob(local_prefix + '.htl')
+
+    if _is_hisat_index_complete(ref_idx):
+        tee.write(f"  reference/{genome}_HisatIdx 已存在 → 保留本地副本\n")
+        return
+
+    os.makedirs(os.path.dirname(ref_idx), exist_ok=True)
+    try:
+        for lf in local_files:
+            rf = lf.replace(local_prefix, ref_idx)
+            shutil.move(lf, rf)
+            os.symlink(rf, lf)
+        tee.write(f"  已保存共享 HISAT2 index: {ref_idx}\n")
+    except Exception as e:
+        tee.write(f"  保存到 reference 失败（{e}）→ 保留本地 index\n")
+
+
+# ── HISAT2 alignment helpers ──────────────────────────────────────────────
+def hisat2_build_index(fasta_path, gtf_path, hisat_idx, thread, tee=None):
+    """Build HISAT2 index with known splice sites from GTF.
+
+    Args:
+        fasta_path: genome FASTA path
+        gtf_path: annotation GTF (or GFF3, converted by extract_splice_sites.py)
+        hisat_idx: output index prefix
+        thread: thread count
     """
     if tee is None:
         tee = sys.stderr
-    
-    if not os.path.isdir(local_dir) or not os.path.exists(os.path.join(local_dir, 'SAindex')):
-        tee.write(f"  save_star_index: {local_dir} 不存在或不完整，跳过保存\n")
-        return
-    
-    ref_idx = os.path.join(prefix, 'reference', f'{genome}_Genome')
-    
-    if os.path.isdir(ref_idx) or os.path.islink(ref_idx):
-        # reference 下已有 → 保留本地，不覆盖
-        tee.write(f"  reference/{genome}_Genome 已存在 → 本地副本保留\n")
-        return
-    
-    # 把 local_dir 搬到 reference 下
+
+    splicesites = f"_{hisat_idx}_splicesites.txt"
+    # HISAT2 自带 extract_splice_sites.py，或 bioconda 的 HISAT2 包也带
+    # 也可从 GFF 手动提取 GT/AG 边界——但用自带脚本最稳
     try:
-        shutil.move(local_dir, ref_idx)
-        os.symlink(ref_idx, local_dir)
-        tee.write(f"  已保存共享 index: {ref_idx}\n")
-    except Exception as e:
-        tee.write(f"  保存到 reference 失败（{e}）→ 保留本地 index\n")
+        run_cmd(
+            f"extract_splice_sites.py {gtf_path} > {splicesites}",
+            tee=tee)
+    except Exception:
+        # fallback: 不带 splice sites 也能跑，只是比对率可能略低
+        tee.write("  Warning: extract_splice_sites.py 不可用，跳过已知 splice sites\n")
+        splicesites = None
+
+    hisat2_build_cmd = f"hisat2-build -p {thread}"
+    if splicesites:
+        hisat2_build_cmd += f" --ss {splicesites}"
+    hisat2_build_cmd += f" {fasta_path} {hisat_idx}"
+    run_cmd(hisat2_build_cmd, tee=tee)
+
+    # 清理临时 splice sites 文件
+    if splicesites and os.path.exists(splicesites):
+        os.unlink(splicesites)
+
+
+def hisat2_align_single(tag, fastq, hisat_idx, thread, extra_args='',
+                        nov_sj_file=None, known_sj_file=None, out_dir=None):
+    """HISAT2 single-end alignment → sorted BAM {tag}.bam.
+
+    Args:
+        out_dir:  if given, BAM/log files are written here (creates subdir).
+    """
+    out_prefix = tag if out_dir is None else os.path.join(out_dir, tag)
+    nov_sj_opt = f"--novel-splicesite-outfile {out_prefix}_SJ.out.tab" if nov_sj_file else ""
+    known_sj_opt = f"--known-splicesite-infile {known_sj_file}" if known_sj_file else ""
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    run_cmd(
+        f"hisat2 -p {thread} -x {hisat_idx} -U {fastq} "
+        f"-S {out_prefix}.sam {nov_sj_opt} {known_sj_opt} {extra_args} "
+        f"2>{out_prefix}_Log.txt")
+    run_cmd(f"samtools sort -@ {thread} -o {out_prefix}.bam {out_prefix}.sam")
+    run_cmd(f"samtools index {out_prefix}.bam")
+    os.unlink(f"{out_prefix}.sam")
+
+
+def hisat2_align_paired(tag, fq1, fq2, hisat_idx, thread, extra_args='',
+                        nov_sj_file=None, known_sj_file=None, out_dir=None):
+    """HISAT2 paired-end alignment → sorted BAM {tag}.bam."""
+    out_prefix = tag if out_dir is None else os.path.join(out_dir, tag)
+    nov_sj_opt = f"--novel-splicesite-outfile {out_prefix}_SJ.out.tab" if nov_sj_file else ""
+    known_sj_opt = f"--known-splicesite-infile {known_sj_file}" if known_sj_file else ""
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    run_cmd(
+        f"hisat2 -p {thread} -x {hisat_idx} -1 {fq1} -2 {fq2} "
+        f"-S {out_prefix}.sam {nov_sj_opt} {known_sj_opt} {extra_args} "
+        f"2>{out_prefix}_Log.txt")
+    run_cmd(f"samtools sort -@ {thread} -o {out_prefix}.bam {out_prefix}.sam")
+    run_cmd(f"samtools index {out_prefix}.bam")
+    os.unlink(f"{out_prefix}.sam")
