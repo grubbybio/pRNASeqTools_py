@@ -36,6 +36,7 @@ def run(opts):
     read_length = opts.get('readlength', 50)
     coverage = opts.get('coverage', 1000)
     adaptor2 = opts.get('adaptor2', '1')
+    skip_fastp = opts.get('skip_fastp', False)
 
     control_dict = _parse_to_dict(opts.get('control', ''))
     tags, files, pars = parse_input(control_dict)
@@ -101,7 +102,7 @@ def run(opts):
         hisat_idx = "HisatIdx"
         hisat2_build_index("reference.fa", "reference.gff", hisat_idx, thread, tee=tee)
 
-        hisat_extra = "--max-hits 50 --mp 3,3 --score-min L,0,-0.3"
+        hisat_extra = "-k 50 --mp 3,3 --score-min L,0,-0.3"
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -114,7 +115,7 @@ def run(opts):
                 if len(sra_results) == 1:
                     unzip_file(sra_results[0], tag)
                     preserve_raw_fastq(from_sra, tag, paired=False)
-                    if adaptor:
+                    if adaptor and not skip_fastp:
                         tee.write("Trimming...\n")
                         run_cmd(
                             f"fastp -w {thread} --length_required 15 "
@@ -128,7 +129,7 @@ def run(opts):
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
                     preserve_raw_fastq(from_sra, tag, paired=True)
-                    if adaptor:
+                    if adaptor and not skip_fastp:
                         tee.write("Trimming...\n")
                         run_cmd(
                             f"fastp -w {thread} --length_required 15 "
@@ -146,7 +147,7 @@ def run(opts):
                 f1, f2 = fpath.split(',')
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
-                if adaptor:
+                if adaptor and not skip_fastp:
                     run_cmd(
                         f"fastp -w {thread} --length_required 15 "
                         f"-i {tag}_R1.fastq -I {tag}_R2.fastq "

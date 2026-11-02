@@ -78,8 +78,8 @@ message(paste("  Transcripts (raw):", nrow(mat)))
 class_map <- character()     # names = transcript_id, values = class
 if (file.exists(merged_gtf)) {
   con <- file(merged_gtf, open = "r")
-  while ((line <- readLines(con, n = 1, warn = FALSE)) != "") {
-    if (grepl("^#", line)) next
+  while (length(line <- readLines(con, n = 1, warn = FALSE)) > 0) {
+    if (line == "" || grepl("^#", line)) next
     parts <- strsplit(line, "\t", fixed = TRUE)[[1]]
     if (length(parts) < 9 || parts[3] != "transcript") next
 
@@ -122,7 +122,7 @@ coldata <- data.frame(row.names = all_tags,
 dds <- DESeqDataSetFromMatrix(countData = round(mat),
                                colData   = coldata,
                                design    = ~ genotype)
-keep <- rowMeans(counts(dds, normalized = TRUE)) >= 1
+keep <- rowMeans(counts(dds)) >= 1
 dds <- dds[keep, ]
 dds <- DESeq(dds)
 
@@ -130,7 +130,8 @@ dds <- DESeq(dds)
 summary_list <- list()
 
 DEG <- function(dds_obj, from_class, class_label, summary_list) {
-  tids <- rownames(dds_obj)[class_bucket[rownames(dds_obj)] == class_label]
+  cb <- class_bucket[rownames(dds_obj)]
+  tids <- rownames(dds_obj)[!is.na(cb) & cb == class_label]
 
   if (length(tids) == 0) {
     message(paste0("  [", class_label, "] 0 transcripts — skip"))
@@ -141,7 +142,6 @@ DEG <- function(dds_obj, from_class, class_label, summary_list) {
   }
 
   dds_sub <- dds_obj[tids, , drop = FALSE]
-  rld_sub <- rlog(dds_sub, blind = TRUE)
 
   for (j in 2:length(genotype)) {
     g1 <- genotype[1]; g2 <- genotype[j]
@@ -224,29 +224,34 @@ for (j in 2:length(genotype)) {
 # ── 6. Summary table ────────────────────────────────────────────────────
 summary_table <- do.call(rbind, lapply(names(summary_list), function(cls) {
   df <- summary_list[[cls]]
+  if (nrow(df) == 0) return(NULL)
   df$class <- cls
   df[, c("class", "comparison", "total", "up", "down")]
 }))
-write.csv(summary_table, "summary_table.csv", row.names = FALSE, quote = FALSE)
-message("\n  Summary table written → summary_table.csv")
+if (!is.null(summary_table) && nrow(summary_table) > 0) {
+  write.csv(summary_table, "summary_table.csv", row.names = FALSE, quote = FALSE)
+  message("\n  Summary table written → summary_table.csv")
+}
 
 # ── 7. Class barplot ───────────────────────────────────────────────────
-if (nrow(summary_table) > 0) {
-  pdf("class_barplot.pdf", width = 8, height = 5)
-  dat <- summary_table %>%
-    filter(!is.na(up)) %>%
-    mutate(up_down = up + down)
+if (!is.null(summary_table) && nrow(summary_table) > 0) {
+  tryCatch({
+    pdf("class_barplot.pdf", width = 8, height = 5)
 
-  # Reshape for grouped barplot
-  ptab <- xtabs(cbind(up, down) ~ class + comparison, data = summary_table)
-  barplot(t(ptab), beside = TRUE,
-          col = c("red3", "blue3"),
-          legend.text = TRUE,
-          xlab = "Transcript class",
-          ylab = "Count",
-          main = "DE transcripts by class")
-  dev.off()
-  message("  Barplot written → class_barplot.pdf")
+    # Reshape for grouped barplot
+    ptab <- xtabs(cbind(up, down) ~ class + comparison, data = summary_table)
+    barplot(t(ptab), beside = TRUE,
+            col = c("red3", "blue3"),
+            legend.text = TRUE,
+            xlab = "Transcript class",
+            ylab = "Count",
+            main = "DE transcripts by class")
+    dev.off()
+    message("  Barplot written → class_barplot.pdf")
+  }, error = function(e) {
+    if (dev.cur() > 1) dev.off()
+    message(paste("  ⚠ Class barplot skipped:", conditionMessage(e)))
+  })
 }
 
 # ── 8. PCA + heatmap (protein_coding subset) ───────────────────────────

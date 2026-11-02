@@ -28,6 +28,8 @@
 suppressPackageStartupMessages({
     library(ChIPseeker)
     library(GenomicFeatures)
+    # 新包：Bioc 3.20+ 的 makeTxDb*() 函数已整体迁移到 txdbmaker
+    if (requireNamespace("txdbmaker", quietly = TRUE)) library(txdbmaker)
     library(clusterProfiler)
     library(enrichplot)
     library(ggplot2)
@@ -67,8 +69,87 @@ cat("  Peak name:", peak_name, "\n")
 cat("  TSS region: [-", tss_distance, ", 0]\n\n", sep = "")
 
 cat("Building TxDb from GFF...\n")
-txdb <- makeTxDbFromGFF(gff_path)
-cat("  TxDb created successfully.\n\n")
+# ── TxDb 构建（Bioc 版本兼容 + 缓存 RDS 避免重复构建） ──
+# tf.py 对 5 个 peak set 逐个调用 chipseeker.R，每次独立起 R 进程 ——
+# 用缓存（基于 gff mtime）让后续调用直接 readRDS，秒级返回。
+#
+# Bioc 3.20+ (GenomicFeatures ≥1.57): makeTxDb*() 已迁移到 txdbmaker 新包
+# Bioc 3.18–3.19: makeTxDbFromGRanges 在 GenomicFeatures 导出
+# Bioc ≤3.17:     makeTxDbFromGFF 在 GenomicFeatures 导出
+buildTxDb <- function(gff_path) {
+  # 1. 首选：官方新包 txdbmaker (Bioc 3.20+)
+  if (requireNamespace("txdbmaker", quietly = TRUE)) {
+    return(txdbmaker::makeTxDbFromGFF(gff_path))
+  }
+  # 2. 次选：GenomicFeatures 直接导出 makeTxDbFromGFF (旧版)
+  if (exists("makeTxDbFromGFF", where = "package:GenomicFeatures", mode = "function")) {
+    return(GenomicFeatures::makeTxDbFromGFF(gff_path))
+  }
+  # 3. 最后：中间版本可能只有 makeTxDbFromGRanges
+  if (exists("makeTxDbFromGRanges", where = "package:GenomicFeatures", mode = "function")) {
+    return(GenomicFeatures::makeTxDbFromGRanges(rtracklayer::import(gff_path)))
+  }
+  if ("makeTxDbFromGRanges" %in% ls(getNamespace("GenomicFeatures"), all.names = TRUE)) {
+    return(GenomicFeatures:::makeTxDbFromGRanges(rtracklayer::import(gff_path)))
+  }
+  stop("无法构建 TxDb：请安装 txdbmaker (Bioc 3.20+) 或更新 GenomicFeatures")
+}
+
+# ── 缓存策略：缓存 GRanges 中间产物，每次重建 TxDb ──
+# 为什么不缓存 TxDb 对象？
+#   saveRDS(txdb) → readRDS() 后 TxDb 底层 Rcpp 指针失效，报 bad_weak_ptr。
+# 缓存 GRanges 是稳定的 base 对象，从 GRanges → TxDb 只需 1-2 秒
+# （远快于重新解析 GFF 的 10-20 秒）。
+cache_file <- paste0(gff_path, ".gff_gr_cache.rds")
+gff_mtime  <- file.info(gff_path)$mtime
+
+makeTxDbFromGffPath <- function(gff_path) {
+  # 统一入口：优先 txdbmaker::makeTxDbFromGRanges，次选旧版 API
+  gr <- rtracklayer::import(gff_path)
+  # rtracklayer::import 结果必须持有到 TxDb 构建完成（避免 GC 回收底层指针）
+  on.exit(rm(gr), add = TRUE)
+  gr_hold <- gr  # 显式保持引用
+  if (requireNamespace("txdbmaker", quietly = TRUE)) {
+    txdb <- txdbmaker::makeTxDbFromGRanges(gr)
+  } else if (exists("makeTxDbFromGRanges", where = "package:GenomicFeatures", mode = "function")) {
+    txdb <- GenomicFeatures::makeTxDbFromGRanges(gr)
+  } else if (exists("makeTxDbFromGFF", where = "package:GenomicFeatures", mode = "function")) {
+    txdb <- GenomicFeatures::makeTxDbFromGFF(gff_path)
+  } else {
+    txdb <- GenomicFeatures:::makeTxDbFromGRanges(gr)
+  }
+  txdb
+}
+
+if (file.exists(cache_file) && !is.na(gff_mtime)) {
+  cache_info <- tryCatch(readRDS(cache_file), error = function(e) NULL)
+  if (!is.null(cache_info) && identical(cache_info$mtime, gff_mtime)) {
+    cat("  GRanges loaded from cache, building TxDb...\n")
+    gr_cached <- cache_info$gr
+    txdb <- if (requireNamespace("txdbmaker", quietly = TRUE)) {
+              txdbmaker::makeTxDbFromGRanges(gr_cached)
+            } else {
+              GenomicFeatures::makeTxDbFromGRanges(gr_cached)
+            }
+    cat("  TxDb ready (from cached GRanges):", basename(cache_file), "\n\n")
+  } else {
+    cat("  GRanges cache stale/broken, rebuilding TxDb from GFF...\n")
+    txdb <- makeTxDbFromGffPath(gff_path)
+    gr_new <- rtracklayer::import(gff_path)
+    saveRDS(list(mtime = gff_mtime, gr = gr_new), cache_file)
+    cat("  GRanges cached to:", basename(cache_file), "\n\n")
+  }
+} else {
+  cat("  GRanges cache miss, building TxDb from GFF...\n")
+  txdb <- makeTxDbFromGffPath(gff_path)
+  if (!is.na(gff_mtime)) {
+    gr_new <- rtracklayer::import(gff_path)
+    saveRDS(list(mtime = gff_mtime, gr = gr_new), cache_file)
+    cat("  GRanges cached to:", basename(cache_file), "\n\n")
+  } else {
+    cat("  TxDb created (no cache, gff mtime unknown)\n\n")
+  }
+}
 
 # ── Annotate peaks ────────────────────────────────────────────────────────
 cat("Annotating peaks...\n")
@@ -79,12 +160,33 @@ if (!file.exists(peak_file) || file.info(peak_file)$size == 0) {
     quit(status = 0, save = "no")
 }
 
-# 读 peak 文件 (ChIPseeker::readPeakFile 可能返回 data.frame 或 GRanges)
+# 读 peak 文件 —— 双重策略：ChIPseeker::readPeakFile → 失败则手动构造 GRanges
+# readPeakFile 有时会因列数/NA 问题报 "start/end cannot contain NAs"
 peaks <- tryCatch(
     readPeakFile(peak_file, header = FALSE),
     error = function(e) {
-        cat("  SKIP: readPeakFile failed:", e$message, "\n")
-        quit(status = 0, save = "no")
+        cat("  [WARN] readPeakFile failed:", e$message, "\n")
+        cat("         Falling back to manual GRanges construction...\n")
+        # 手动读，过滤 NA chr/start/end 行
+        dt <- data.table::fread(peak_file, header = FALSE,
+                                colClasses = list(character = 1L))
+        # narrowPeak/BED 都是前三列 chr/start/end
+        ok <- !is.na(dt$V1) & !is.na(dt$V2) & !is.na(dt$V3) &
+              nzchar(as.character(dt$V1))
+        if (sum(ok) == 0) {
+            cat("  SKIP: no valid peaks after NA filtering.\n")
+            quit(status = 0, save = "no")
+        }
+        if (!all(ok)) {
+            cat("  Filtered out", sum(!ok), "rows with NA chr/start/end\n")
+        }
+        gr <- GenomicRanges::GRanges(
+            seqnames = dt$V1[ok],
+            ranges   = IRanges::IRanges(start = as.integer(dt$V2[ok]) + 1L,
+                                         end   = as.integer(dt$V3[ok]))
+        )
+        cat("  Manually loaded", length(gr), "peaks as GRanges\n")
+        gr
     }
 )
 

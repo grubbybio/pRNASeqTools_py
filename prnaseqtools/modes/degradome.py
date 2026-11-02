@@ -36,6 +36,7 @@ def run(opts):
     mappingonly = opts.get('mapping_only', False)
     targets = opts.get('targets', 'all')
     sirna = opts.get('si_rnas', 'none')
+    skip_fastp = opts.get('skip_fastp', False)
 
     # Parse control
     control_dict = _parse_to_dict(opts.get('control', ''))
@@ -74,7 +75,7 @@ def run(opts):
             hisat2_build_index(fasta_path, gff_path, gn_idx, thread, tee=tee)
             save_hisat_index_to_reference(genome, prefix, gn_idx, tee)
 
-        hisat_extra = "--max-hits 50 --mp 3,3 --score-min L,0,-0.3"
+        hisat_extra = "-k 50 --mp 3,3 --score-min L,0,-0.3"
 
         for i in range(len(tags)):
             tag = tags[i]
@@ -86,16 +87,19 @@ def run(opts):
             unzip_file(sra_results[0], tag)
             preserve_raw_fastq(from_sra, tag, paired=False)
 
-            # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
-            tee.write("\nTrimming (fastp)...\n")
-            fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
-            run_cmd(
-                f"fastp -w {thread} --length_required 18 "
-                f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
-            os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
-            for rep in (f"{tag}.html", f"{tag}.json"):
-                if os.path.exists(rep):
-                    os.unlink(rep)
+            # fastp trimming (skippable via --skip-fastp)
+            if skip_fastp:
+                tee.write("  [SKIP] fastp (--skip-fastp)\n")
+            else:
+                tee.write("\nTrimming (fastp)...\n")
+                fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+                run_cmd(
+                    f"fastp -w {thread} --length_required 18 "
+                    f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
+                os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+                for rep in (f"{tag}.html", f"{tag}.json"):
+                    if os.path.exists(rep):
+                        os.unlink(rep)
 
             tee.write("\nStart mapping...\n")
 
@@ -109,7 +113,7 @@ def run(opts):
             run_cmd(f"samtools index {tag}.bam")
             run_cmd(
                 f"bamCoverage -b {tag}.bam --skipNAs -bs 5 -p {thread} "
-                f"--minMappingQuality 10 --ignoreDuplicates --normalizeUsing CPM -o {tag}.bw")
+                f"--minMappingQuality 10 --normalizeUsing CPM -o {tag}.bw")
 
             # Map to genome — 用 tag={tag}.genomic 让输出自动变成 {tag}.genomic.bam
             hisat2_align_single(f"{tag}.genomic", f"{tag}.fastq", gn_idx, thread,
@@ -121,7 +125,7 @@ def run(opts):
             run_cmd(f"samtools index {tag}.genomic.bam")
             run_cmd(
                 f"bamCoverage -b {tag}.genomic.bam --skipNAs -bs 5 -p {thread} "
-                f"--minMappingQuality 10 --ignoreDuplicates --normalizeUsing CPM -o {tag}.genomic.bw")
+                f"--minMappingQuality 10 --normalizeUsing CPM -o {tag}.genomic.bw")
 
             tee.write("\nAlignment Completed!\n")
 

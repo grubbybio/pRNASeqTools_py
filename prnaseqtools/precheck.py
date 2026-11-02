@@ -221,6 +221,15 @@ _CHECK_DEFS = {
         'msg': 'Peak annotation & GO (ChIPseeker)',
         'mode_only': ['chip', 'tf'],
     },
+    'txdbmaker': {
+        # Bioc 3.20+: GenomicFeatures 1.57 把 makeTxDb*() 迁到 txdbmaker 新包
+        # 脚本会自动探测并优先使用 txdbmaker，缺失时 fallback 到旧版 GenomicFeatures API
+        'cmd': 'Rscript -e "if (requireNamespace(\'txdbmaker\', quietly=TRUE)) cat(as.character(packageVersion(\'txdbmaker\')))"',
+        'pattern': r'([\d]+\.[\d]+\.[\d]+)',
+        'required': False,
+        'msg': 'makeTxDb*() 新宿主 (GenomicFeatures ≥1.57 迁出, Bioc 3.20+)',
+        'mode_only': ['chip', 'atac', 'tf', 'cips'],
+    },
     'umi_tools': {
         'cmd': 'umi_tools -v',
         'pattern': r'(\d+\.\d+\.\d+)',

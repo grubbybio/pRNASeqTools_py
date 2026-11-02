@@ -35,6 +35,16 @@ suppressPackageStartupMessages({
 args <- commandArgs(trailingOnly = TRUE)
 stopifnot(length(args) >= 7)
 
+# 辅助：把空串/占位符解析为 NULL
+# 注：tf.py 侧用 shell 友好的 '__NONE__' 作占位符，并加单引号传给 shell
+#     shell 展开后 R 实际收到 "__NONE__"（引号被 shell 剥离）
+parse_opt <- function(x, idx) {
+  if (length(args) >= idx && !is.null(args[idx])) {
+    v <- args[idx]
+    if (is.na(v) || v == "" || v == "__NONE__") NULL else v
+  } else NULL
+}
+
 ss_file     <- args[1]
 out_dir     <- args[2]
 genome      <- args[3]
@@ -42,9 +52,9 @@ analysis    <- args[4]
 norm_mode   <- args[5]
 pval        <- as.numeric(args[6])
 fc          <- as.numeric(args[7])
-nf_file     <- if (length(args) >= 8 && nzchar(args[8])) args[8] else NULL
-counts_file <- if (length(args) >= 9 && nzchar(args[9])) args[9] else NULL
-meta_file   <- if (length(args) >= 10 && nzchar(args[10])) args[10] else NULL
+nf_file     <- parse_opt(args, 8)
+counts_file <- parse_opt(args, 9)
+meta_file   <- parse_opt(args, 10)
 
 if (is.null(counts_file) || !file.exists(counts_file)) {
   counts_file <- file.path(out_dir, "peak_counts.tsv")
@@ -79,6 +89,26 @@ cat("  Conditions:", paste(unique(samples$Condition), collapse = ", "), "\n")
 # ── 2. Read peak_counts.tsv ───────────────────────────────────────────────────
 # 结构: chr, start, end, name, score, strand, {IP1, Input1, IP2, Input2, ...}
 counts_df <- read.delim(counts_file, check.names = FALSE, stringsAsFactors = FALSE)
+
+# 防御性检查：peak_counts.tsv 必须至少 7 列（6 个 peak 坐标 + ≥1 个 sample）
+# 且第 1 列应该是 chr（包含 "chr"），否则说明读到了错误文件（如 sample_metadata.tsv）
+if (ncol(counts_df) < 7) {
+  stop(sprintf(
+    "[FATAL] peak_counts.tsv 格式错误：期望 ≥7 列 (6 列坐标 + samples)，实际只有 %d 列。\n",
+    ncol(counts_df)),
+    "  请检查参数传递是否错位。\n",
+    "  当前 counts_file = ", counts_file, "\n",
+    "  文件前 3 列 = ", paste(colnames(counts_df)[seq_len(min(3, ncol(counts_df)))], collapse = ", "), "\n",
+    "  ⚠️  很可能是空的 norm_factors.tsv 被当成了 peak_counts.tsv！"
+  )
+}
+# 额外：首列应是 chr 类
+first_col <- colnames(counts_df)[1]
+if (!grepl("chr", first_col, ignore.case = TRUE) && !grepl("Chrom", first_col, ignore.case = TRUE)) {
+  warning("[WARN] peak_counts.tsv 首列名 '", first_col,
+          "' 看起来不像 chr —— 请确认文件没错位。")
+}
+
 cat("  Peak counts:", nrow(counts_df), "peaks x", ncol(counts_df) - 6,
     "samples (cols 7+)\n")
 

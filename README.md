@@ -9,7 +9,7 @@ Version: 1.0.0
 
 ## Overview
 
-pRNASeqTools is a comprehensive NGS data analysis pipeline for plant genomics. It provides **18 analysis modes** covering small RNA, mRNA, lncRNA, single-cell, epigenomics, ribosome profiling, and more — all accessible through a single command-line interface.
+pRNASeqTools is a comprehensive NGS data analysis pipeline for plant genomics. It provides **18 analysis modes** covering small RNA, mRNA, lncRNA, alternative splicing, single-cell, epigenomics, ribosome profiling, and more — all accessible through a single command-line interface.
 
 ### Analysis Modes
 
@@ -18,6 +18,7 @@ pRNASeqTools is a comprehensive NGS data analysis pipeline for plant genomics. I
 | `srna` | Small RNA-seq — bulk & single-cell | ShortStack, bowtie, fastp, umi_tools |
 | `mrna` | mRNA-seq — DE analysis | HISAT2, featureCounts, DESeq2 |
 | `lncrna` | lncRNA-seq — transcriptome assembly & lncRNA classification | HISAT2, StringTie, FEELnc / PLEK2 / ORF-fallback |
+| `as` | Alternative splicing — differential splicing (dPSI) & DTU | HISAT2, MAJIQ, VOILA |
 | `sc` | Single-cell RNA-seq — Seurat clustering + marker genes | HISAT2 + featureCounts, Seurat, Harmony |
 | `degradome` | Degradome-seq (PARE/GMUCT) — miRNA target cleavage | HISAT2 (dual-alignment), sPARTA, riboWaltz |
 | `phasi` | phasiRNA analysis — phased secondary siRNA detection | ShortStack, bowtie |
@@ -80,6 +81,10 @@ python pRNASeqTools_run.py mrna -c "WT=SRR111111" -t "mut=SRR222222"
 # mRNA-seq — start from BAM files
 python pRNASeqTools_run.py mrna -c "WT=data/WT.bam" -t "mut=data/mut.bam" \
   --mode_mrna bam --seqstrategy paired
+
+# Alternative splicing — MAJIQ + VOILA
+python pRNASeqTools_run.py as -c "WT=data/wt.bam" -p "mut=data/mut.bam" \
+  --classifier both --strandness reverse
 
 # Degradome-seq — miRNA target cleavage analysis
 python pRNASeqTools_run.py degradome -c "WT=data/degradome.fq" \
@@ -266,6 +271,44 @@ De novo transcriptome assembly and lncRNA classification pipeline. Supports thre
 - FEELnc via conda: `conda install -c bioconda feelnc`
 - PLEK2 via manual clone: `git clone https://github.com/emanlee/plek2 ~/PLEK2` (requires `keras==2.4.3`, `tensorflow==2.4.1`, `numpy==1.19.2`)
 - gffcompare, StringTie, HISAT2, featureCounts
+
+---
+
+### `as` — Alternative Splicing (MAJIQ + VOILA)
+
+Differential splicing and differential transcript usage analysis. Replaces the rMATS-based workflow with **MAJIQ + VOILA**, which supports *de novo* local splice variation detection (helpful for non-model plants).
+
+**Pipeline steps (mode-dependent):**
+1. Optional HISAT2 alignment (FASTQ input) → sorted BAM
+2. MAJIQ `build` — GFF3 annotation + BAMs → `splicegraph.sql` + per-sample `.majiq` (GTF is auto-converted via `gffread`)
+3. MAJIQ quantification:
+   - `deltapsi` — dPSI between control and treatment (requires replicates)
+   - `heterogen` — per-sample PSI followed by a between-group test (suits single samples / few replicates)
+   - `both` — run both quantifiers
+4. VOILA `tsv` → `modulize` → (`view`) for splicing-event tables, module classes, and interactive browsing
+
+**Modes (`--mode_as`):**
+| Mode | Description |
+|------|-------------|
+| `whole` | mapping → build → quantify → VOILA (default) |
+| `mapping-only` | HISAT2 alignment only |
+| `build-only` | mapping → `majiq build` |
+| `quantify-only` | skip mapping/build |
+| `voila-only` | only `voila tsv/modulize/view` |
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--mode_as` | `whole` | Pipeline mode (see above) |
+| `--classifier` | `deltapsi` | `deltapsi`, `heterogen`, or `both` |
+| `--strandness` | `none` | `none`, `forward`, or `reverse` for MAJIQ build |
+| `--min-experiments` | `1` | Min independent samples supporting a junction/LSV |
+| `--psi-threshold` | `0.05` | dPSI significance cutoff |
+| `--view` | — | Launch the interactive VOILA browser after quantification |
+| `--majiq-dir` | PATH | Custom MAJIQ installation directory |
+| `--seqstrategy` | — | `single` or `paired` |
+| `--genomesize` | `10` | HISAT2 index build hint |
+
+**Dependencies:** MAJIQ + VOILA are invoked through `conda run -n majiq_academic`; HISAT2 and gffread for upstream steps.
 
 ---
 
@@ -493,7 +536,22 @@ Both modes support **Genrich** (default) and **MACS3** peak calling. ChIP-seq di
 
 ```
 BAM → Genrich/MACS3 → narrowPeak → BED → ChIPseeker annotation → GO enrichment
+                                    └→ insert size plot + peak heatmap (deepTools)
 ```
+
+#### Library & peak QC visualizations (`chip` / `atac` / `tf chip`)
+
+All three modes run the same deepTools-based QC plots by default:
+
+| Analysis | Tool | Output |
+|----------|------|--------|
+| Insert / fragment size distribution | `bamPEFragmentSize` | `{tag}_insert_size.png` + `{tag}_insert_size.tsv` (PE libraries show nucleosome phasing in ATAC) |
+| Peak-centred signal profile + heatmap | `computeMatrix reference-point` → `plotHeatmap` | `{peaks}_peak_heatmap.png` + `{peaks}_peak_matrix.gz` |
+
+- `computeMatrix` is run in `reference-point` mode on **peak centres**, with `-b/-a` = 2000 bp by default (configurable).
+- `plotHeatmap` is called with deepTools defaults, producing the clustered heatmap and the average profile panel in one figure.
+- Multiple IP samples contribute one track each, so groups can be compared on the same peak set.
+- If `bamPEFragmentSize` fails (single-end data) or no bigWig exists, a warning is logged and the pipeline continues.
 
 #### Differential peak calling (`tf --mode_tf chip`, DiffBind — default)
 
@@ -543,28 +601,39 @@ Coefficients: β₀ (baseline Input) + β₁ (Input condition diff) + β₂ (IP 
 - `DiffBind_dual_factor_volcano.pdf` — volcano plot
 - `DiffBind_consensus_peaks.bed` / `DiffBind_UP_peaks.bed` / `DiffBind_DOWN_peaks.bed` — BED files for annotation
 - `DiffBind_*_annotation.txt` / `*_annotation_pie.pdf` / `*_go_enrichment.txt` / `*_go_dotplot.pdf` — ChIPseeker outputs
+- `DiffBind_{consensus,UP,DOWN}_peak_heatmap.png` / `*_peak_matrix.gz` — peak-centred signal heatmaps (all IP tracks)
 - `bw/` — normalized bigWig files (IP scaled, Input unscaled)
+
+**Options for `chip` / `atac` and `tf --mode_tf chip`:**
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--peak-caller` | `genrich` | `genrich` or `macs3` (single-sample mode) |
-| `--chip-method` | `diffbind` | `diffbind` (DESeq2 with replicates) or `bdgdiff` (MACS3, no replicates) |
-| `--chip-analysis` | `dual_factor` | `dual_factor` (IP+Input joint DESeq2, interaction term) or `affinity` (IP-only) |
-| `--chip-norm` | `deseq2` | `deseq2`, `total`, `mito`, `chloro`, `rdna` |
+| `--peak-caller` | `genrich` | `genrich` or `macs3` (`chip` / `atac` only) |
+| `--chip-method` | `diffbind` | `diffbind` (DESeq2 with replicates) or `bdgdiff` (MACS3, no replicates) — `tf` only |
+| `--chip-analysis` | `dual_factor` | `dual_factor` (IP+Input joint DESeq2, interaction term) or `affinity` (IP-only) — `tf` only |
+| `--chip-norm` | `deseq2` | `deseq2`, `total`, `mito`, `chloro`, `rdna` — `tf` only |
 | `--genome-size` | — | Effective genome size for MACS3 (`bdgdiff` mode) |
 | `--auc` | `20` | AUC threshold (Genrich) |
 | `--qvalue` | `1.0` | Q-value cutoff |
-| `--pvalue` | `0.05` | P-value cutoff for significance |
-| `--foldchange` | `1.5` | log₂FC cutoff for significance |
+| `--pvalue` | `0.05` (`0.01` in chip/atac) | P-value cutoff for significance |
+| `--foldchange` | `1.5` | log₂FC cutoff for significance — `tf` only |
 | `--tss-distance` | `3000` | TSS distance for ChIPseeker annotation |
-| `--no-mapping` | — | Skip alignment |
-| `--mapping-only` | — | Alignment only |
+| `--skip-insert-size` | — | Skip `bamPEFragmentSize` insert size plot |
+| `--skip-peak-metaplot` | — | Skip `computeMatrix`/`plotHeatmap` |
+| `--metaplot-upstream` | `2000` | bp upstream of peak centre for the heatmap matrix |
+| `--metaplot-downstream` | `2000` | bp downstream of peak centre for the heatmap matrix |
+| `--no-mapping` | — | Skip alignment (`chip` / `atac` only) |
+| `--mapping-only` | — | Alignment only (`chip` / `atac` only) |
+
+**`atac`-only options:** `--treatment2 "name=file1+file2"` (second group for MACS3 `bdgdiff`) and `--cutoff 3.0` (log-likelihood-ratio cutoff for `bdgdiff`).
 
 #### MACS3 bdgdiff output (legacy mode, `--chip-method bdgdiff`):
 - `{tag}_peaks.narrowPeak` — per-group peaks
 - `diff_{g1}_vs_{g2}_cond1.bed` — group 1-specific
 - `diff_{g1}_vs_{g2}_cond2.bed` — group 2-specific
 - `diff_{g1}_vs_{g2}_common.bed` — shared peaks
+- `{group}_peaks_peak_heatmap.png` / `diff_*_peak_heatmap.png` — per-group and differential peak heatmaps
+- `{prefix}_insert_size.png` — insert size distribution for all IP BAMs
 
 ---
 
@@ -629,6 +698,8 @@ ShortStack-based small RNA analysis optimized for risiRNA detection.
 | `--binsize` | `10` | Window size |
 | `--foldchange` | `1.5` | Fold-change cutoff |
 | `--pvalue` | `0.01` | P-value cutoff |
+| `--no-steprna` | — | Disable stepRNA Dicer-overhang analysis |
+| `--steprna-mode` | `rdna` | `rdna` (reads vs rDNA) or `self` (reads vs reads) |
 | `--no-mapping` | — | Skip alignment |
 | `--mapping-only` | — | Alignment only |
 
@@ -660,6 +731,14 @@ Example: `WT=input,2,IP,2` (2 input replicates, 2 IP replicates)
 | `--cutoff` | `3` | log₂FC cutoff for bdgdiff |
 | `--seq_strategy` | `paired` | Sequencing strategy |
 | `--tss-distance` | `3000` | TSS distance for ChIPseeker annotation |
+| `--skip-insert-size` | — | Skip `bamPEFragmentSize` insert size plot (chip mode) |
+| `--skip-peak-metaplot` | — | Skip peak heatmaps (chip mode) |
+| `--metaplot-upstream` | `2000` | bp upstream of peak centre for heatmaps |
+| `--metaplot-downstream` | `2000` | bp downstream of peak centre for heatmaps |
+
+**`tf --mode_tf chip` visualizations:** an insert size plot for all IP BAMs, plus peak-centred heatmaps for each group's own peaks and for the differential peak sets —
+- bdgdiff: `diff_{g1}_vs_{g2}_{cond1|cond2|common}.bed` → heatmaps using all IP tracks
+- DiffBind: `DiffBind_consensus/UP/DOWN_peaks.bed` → heatmaps (written to `diffbind_results/`)
 
 ---
 
@@ -673,6 +752,10 @@ Example: `WT=input,2,IP,2` (2 input replicates, 2 IP replicates)
 | `--adaptor`, `-a` | 3' adaptor sequence (supports aliases: `truseq`, `illumina`, `srna`, `neb`, `nextera`) |
 | `--control`, `-c` | Control samples: `name=file1+file2...` |
 | `--treatment`, `-p` | Treatment samples (repeatable) |
+| `--mask` | Mask FASTA for read filtering |
+| `--skip-fastp` | Skip fastp trimming (reads already clean) |
+| `--no-mapping` | Statistics only (skip alignment) |
+| `--mapping-only` | Alignment only (skip statistics) |
 | `--auto-install` | Auto-install missing dependencies (default) |
 | `--no-auto-install` | Disable automatic dependency installation |
 
@@ -710,8 +793,9 @@ pRNASeqTools_py/
 │   └── modes/                   # Analysis mode implementations
 │       ├── srna.py              # Small RNA-seq
 │       ├── mrna.py              # mRNA-seq
-│       ├── lncrna.py            # lncRNA-seq (new)
-│       ├── sc.py                # Single-cell RNA-seq (new)
+│       ├── lncrna.py            # lncRNA-seq
+│       ├── as.py                # Alternative splicing (MAJIQ + VOILA)
+│       ├── sc.py                # Single-cell RNA-seq
 │       ├── degradome.py         # Degradome-seq
 │       ├── phasi.py             # phasiRNA analysis
 │       ├── tt.py                # Truncation/tailing
@@ -725,9 +809,10 @@ pRNASeqTools_py/
 │       ├── ribometh.py          # RiboMeth-seq
 │       ├── risi.py              # risiRNA analysis
 │       └── tf.py                # Two-factor DE (mRNA/sRNA/ChIP)
-├── scripts/                     # R analysis scripts (30 R + 1 Python)
+├── scripts/                     # Analysis scripts (31 R + 1 Python)
 │   ├── checkPackages.R          # R package installer (BiocManager/GitHub/CRAN)
 │   ├── DEG.R                    # mRNA differential expression
+│   ├── GO_enrichment.R          # GO enrichment (clusterProfiler)
 │   ├── DSR.R / DEM.R / DSG.R    # sRNA DE: repeat/miRNA/gene-level
 │   ├── DST.R / DSP.R / DSF.R    # sRNA DE: TE/promoter/fold-change
 │   ├── CRI.R                    # Degradome cleavage ratio index
@@ -764,14 +849,14 @@ pRNASeqTools_py/
 
 | Category | Tools |
 |----------|-------|
-| **Runtimes** | Python ≥3.9, R ≥4.0, Perl |
+| **Runtimes** | Python ≥3.9,<3.13; R 4.5; Perl |
 | **Aligners** | HISAT2 ≥2.2.0, bowtie, bowtie2, Bismark, ShortStack ≥3.0 |
 | **Processing** | fastp, samtools ≥1.0, htslib, bedtools, gffread, deepTools, picard-slim (openjdk ≥17) |
 | **Counting** | featureCounts (subread), RSEM, StringTie |
 | **Peak calling** | Genrich, MACS3 |
 | **ChIP-seq** | DiffBind ≥3.0, ChIPseeker, clusterProfiler, enrichplot |
 | **lncRNA** | FEELnc (bioconda), gffcompare |
-| **Utilities** | sra-tools, umi_tools, ucsc-bedgraphtobigwig |
+| **Utilities** | sra-tools, umi_tools, ucsc-bedgraphtobigwig, gffcompare, stepRNA (risi) |
 | **Python** | numpy, scipy (stdlib-only pipeline; numpy/scipy for sPARTA) |
 | **R (conda)** | DESeq2, DMRcaller, RNAmodR.RiboMethSeq, pheatmap, dplyr, devtools, emmeans, car, agricolae, multcomp, ggpubr, ComplexHeatmap |
 
@@ -795,6 +880,7 @@ pRNASeqTools_py/
 - **CLIPper** — `clip` / `ts` modes: `git clone https://github.com/YeoLab/clipper.git && python setup.py install`
 - **RiboTaper** — `ribo` mode: `git clone https://github.com/hsinyenwu/RiboTaper.git ~/RiboTaper_v1.3`
 - **PLEK2** — `lncrna` mode (optional): `git clone https://github.com/emanlee/plek2 ~/PLEK2`
+- **MAJIQ + VOILA** — `as` mode: installed in a dedicated conda env `majiq_academic` (called via `conda run -n majiq_academic`)
 - **Reference files** — contact the author
 
 ---

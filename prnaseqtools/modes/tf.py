@@ -16,6 +16,97 @@ from prnaseqtools.functions import _tee, run_cmd
 from prnaseqtools import reference as ref
 
 
+def _run_insert_size_plot_tf(bam_files, labels, tee, thread, out_prefix):
+    """Insert/fragment size distribution using deepTools bamPEFragmentSize.
+
+    Works on real BAM paths (e.g. dedup BAMs resolved by tf chip mode).
+    For paired-end ChIP/ATAC this reports true fragment (insert) sizes;
+    single-end data will produce a read-length distribution and may be
+    skipped by the tool — a warning is logged and execution continues.
+    """
+    bam_list = [b for b in bam_files if b and os.path.exists(b)]
+    if not bam_list:
+        tee.write("  [SKIP] No BAM files found; skipping insert size plot.\n")
+        return
+    labels_str = ' '.join(labels[:len(bam_list)])
+    out_png = f"{out_prefix}_insert_size.png"
+    out_tsv = f"{out_prefix}_insert_size.tsv"
+
+    cmd = (
+        f"bamPEFragmentSize -b {' '.join(bam_list)} "
+        f"--samplesLabel {labels_str} "
+        f"--histogram {out_png} "
+        f"--outRawFragmentLengths {out_tsv} "
+        f"--numberOfProcessors {thread} "
+        f"--binSize 5 "
+        f"--plotTitle 'ChIP-seq insert size distribution'"
+    )
+    tee.write("\nGenerating insert size distribution plot (bamPEFragmentSize)...\n")
+    try:
+        run_cmd(cmd, check=True)
+        tee.write(f"  Insert size plot : {out_png}\n")
+        tee.write(f"  Raw lengths      : {out_tsv}\n")
+    except subprocess.CalledProcessError:
+        tee.write("  [WARN] bamPEFragmentSize failed (single-end data or tool error); "
+                  "skipping insert size plot.\n")
+
+
+def _run_peak_metaplot_tf(bw_files, bw_labels, peak_file, peak_label, tee,
+                          thread, out_dir='.', upstream=2000, downstream=2000):
+    """Heatmap (and default profile) of bigWig signal over peak centres.
+
+    Unlike the atac helper this takes explicit bigWig paths (not tag-based),
+    so it works whether the BWs live in CWD or a subdirectory (e.g. bw/ or
+    diffbind_results/bw/).
+    """
+    if not os.path.exists(peak_file):
+        tee.write(f"  [SKIP] Peak file {peak_file} not found; skipping meta-plot.\n")
+        return
+
+    bw_existing = [(bw, lb) for bw, lb in zip(bw_files, bw_labels)
+                   if bw and os.path.exists(bw)]
+    if not bw_existing:
+        tee.write("  [SKIP] No bigWig files found; skipping meta-plot & heatmap.\n")
+        return
+
+    bw_list = [bw for bw, _ in bw_existing]
+    labels = ' '.join(lb for _, lb in bw_existing)
+    matrix_file = os.path.join(out_dir, f"{peak_label}_peak_matrix.gz")
+    heatmap_png = os.path.join(out_dir, f"{peak_label}_peak_heatmap.png")
+
+    tee.write(f"\nComputing signal matrix over {peak_label} peaks "
+              f"({upstream} bp upstream / {downstream} bp downstream)...\n")
+    cmd_matrix = (
+        f"computeMatrix reference-point "
+        f"--referencePoint center "
+        f"-b {upstream} -a {downstream} "
+        f"-R {peak_file} "
+        f"-S {' '.join(bw_list)} "
+        f"--samplesLabel {labels} "
+        f"-o {matrix_file} "
+        f"-p {thread} "
+        f"--skipZeros"
+    )
+    try:
+        run_cmd(cmd_matrix, check=True)
+    except subprocess.CalledProcessError:
+        tee.write("  [WARN] computeMatrix failed; skipping meta-plot & heatmap.\n")
+        return
+
+    tee.write("  Plotting heatmap (plotHeatmap)...\n")
+    run_cmd(
+        f"plotHeatmap -m {matrix_file} "
+        f"-out {heatmap_png} "
+        f"--plotTitle 'Signal over {peak_label} peaks' "
+        f"--yAxisLabel 'Normalized signal' "
+        f"--colorMap Blues",
+        check=False,
+    )
+
+    tee.write(f"  Heatmap : {heatmap_png}\n")
+    tee.write(f"  Matrix  : {matrix_file}\n")
+
+
 def run(opts):
     """Main entry point for two-factor DE analysis."""
     opts = validate_options(opts)
@@ -39,6 +130,10 @@ def run(opts):
     chip_analysis = opts.get('chip_analysis', 'dual_factor')
     chip_norm = opts.get('chip_norm', 'deseq2')
     qvalue_label = f"Q value = {qvalue}" if qvalue < 1 else f"P value = {pvalue}"
+    skip_insert_size = opts.get('skip_insert_size', False)
+    skip_peak_metaplot = opts.get('skip_peak_metaplot', False)
+    metaplot_upstream = opts.get('metaplot_upstream', 2000)
+    metaplot_downstream = opts.get('metaplot_downstream', 2000)
 
     tee.write(f"Two-factor comparison between {control} and {treatment}\n"
               f"Fold change = {foldchange} {qvalue_label}\n")
@@ -340,7 +435,7 @@ def run(opts):
             因此生成 dedup 前先调 AddOrReplaceReadGroups。
 
             注意:
-              1. Picard 3.5.0 在 macOS 挂载卷 (/Volumes) 上
+              1. Picard 3.5.0 在某些挂载点上 (macOS /Volumes 等)
                  会因 writability 检查失败而崩溃。绕开方法:
                  Picard 输出全部写到 /tmp, 然后 shutil.copy
                  到 sorted.bam 源文件所在目录 (即 ../)。
@@ -521,6 +616,16 @@ def run(opts):
         for tag, desc in all_tags:
             tag_to_bam[tag] = _resolve_bam(tag, desc)
 
+        # ── Insert size distribution (IP BAMs) ──────────────────────────
+        if not skip_insert_size:
+            ip_all = g1_ip_tags + g2_ip_tags
+            ip_bams = [tag_to_bam.get(t) for t in ip_all]
+            ip_labels = [t for t in ip_all]
+            _run_insert_size_plot_tf(
+                ip_bams, ip_labels, tee,
+                thread=opts.get('thread', 4),
+                out_prefix=f"{group1_name}_vs_{group2_name}")
+
         # ── Helper: 构建 MACS3 -t / -c 参数 ────────────────────────────────
         def _bam_args(tags):
             return ' '.join(tag_to_bam[t] for t in tags)
@@ -529,8 +634,10 @@ def run(opts):
 
 
             # ── Helper: 运行命令并同时捕获输出行 ─────────────────────────────
-            def _run_and_capture(cmd):
-                """运行 shell 命令，输出到 tee，返回所有输出行。"""
+            def _run_and_capture(cmd, allow_retry=False):
+                """运行 shell 命令，输出到 tee，返回所有输出行。
+                allow_retry: 失败时带 --nomodel --extsize 147 重试一次
+                （MACS3 模型构建在稀疏/低复杂度数据上容易失败）。"""
                 proc = subprocess.Popen(
                     cmd, shell=True, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True)
@@ -539,6 +646,18 @@ def run(opts):
                     tee.write(line)
                     lines.append(line.rstrip('\n'))
                 ret = proc.wait()
+                if ret != 0 and allow_retry:
+                    tee.write("  MACS3 model building failed; "
+                              "retrying with --nomodel --extsize 147\n")
+                    proc = subprocess.Popen(
+                        cmd + " --nomodel --extsize 147",
+                        shell=True, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, text=True)
+                    lines = []
+                    for line in proc.stdout:
+                        tee.write(line)
+                        lines.append(line.rstrip('\n'))
+                    ret = proc.wait()
                 if ret != 0:
                     sys.exit(f"Command failed (exit={ret}): {cmd}")
                 return lines
@@ -551,6 +670,9 @@ def run(opts):
                 f"-c {_bam_args(g1_input_tags)} "
                 f"-f {fmt} -g {genome_size} -n {group1_name}"
             )
+            if seq_strategy != 'paired':
+                cmd1 += " --nomodel --shift 100 --extsize 200"
+                tee.write("  Single-end mode: adding --nomodel --shift 100 --extsize 200\n")
             if qvalue < 1:
                 tee.write(f"  Q-value threshold: {qvalue}\n")
                 cmd1 += f" -q {qvalue}"
@@ -558,7 +680,7 @@ def run(opts):
                 tee.write(f"  P-value threshold: {pvalue}\n")
                 cmd1 += f" -p {pvalue}"
             cmd1 += " --bdg"
-            out1 = _run_and_capture(cmd1)
+            out1 = _run_and_capture(cmd1, allow_retry=True)
 
             # ── Step 2: MACS3 callpeak on Group 2 ────────────────────────────
             tee.write(f"\nMACS3 callpeak — Group 2: {group2_name}\n")
@@ -568,23 +690,35 @@ def run(opts):
                 f"-c {_bam_args(g2_input_tags)} "
                 f"-f {fmt} -g {genome_size} -n {group2_name}"
             )
+            if seq_strategy != 'paired':
+                cmd2 += " --nomodel --shift 100 --extsize 200"
             if qvalue < 1:
                 cmd2 += f" -q {qvalue}"
             else:
                 cmd2 += f" -p {pvalue}"
             cmd2 += " --bdg"
-            out2 = _run_and_capture(cmd2)
+            out2 = _run_and_capture(cmd2, allow_retry=True)
 
             # ── Step 3: 从 MACS3 输出读取 d1/d2 ─────────────────────────────
             def _parse_control_fragments(lines):
-                """从 MACS3 日志中提取 'fragments after filtering in control' 后的数字。"""
+                """从 MACS3 日志中提取对照组过滤后 tag/fragment 数。
+
+                MACS3 不同版本/模式的措辞不同:
+                  BAMPE:   "fragments after filtering in control"
+                  BAM(SE): "tags after filtering in control"
+                  旧版本:  "reads after filtering in control"
+                """
+                patterns = ('fragments after filtering in control',
+                            'tags after filtering in control',
+                            'reads after filtering in control')
                 for line in lines:
-                    if 'fragments after filtering in control' in line:
-                        parts = line.strip().split()
-                        try:
-                            return int(parts[-1].replace(',', ''))
-                        except ValueError:
-                            continue
+                    for pat in patterns:
+                        if pat in line:
+                            parts = line.strip().split()
+                            try:
+                                return int(parts[-1].replace(',', ''))
+                            except ValueError:
+                                continue
                 return None
 
             fragments1 = _parse_control_fragments(out1)
@@ -625,6 +759,88 @@ def run(opts):
                 f"--o-prefix {diff_prefix}"
             )
             run_cmd(diff_cmd)
+
+            # ── Step 4b: 生成所有 BAM 的 bigWig tracks ───────────────────
+            # 和 DiffBind 分支对齐：
+            #   IP BW    → mito scale (bw_scale = 1/ip_scale)
+            #   Input BW → 不缩放 (bw_scale = 1.0)
+            # 仅当 chip_norm 在 mito/chloro/rdna/total 时才启用缩放
+            all_tags = g1_ip_tags + g1_input_tags + g2_ip_tags + g2_input_tags
+            bw_dir = "bw"
+            os.makedirs(bw_dir, exist_ok=True)
+            n_threads = max(1, (os.cpu_count() or 4) // 2)
+
+            # (a) 先算 mito scale（如果 chip_norm 启用了 organelle 归一化）
+            scale_map = {}  # tag → bw_scale (1/ip_scale)
+            organelle_map = {'mito': 'mito', 'chloro': 'chloro',
+                              'rdna': 'rdna', 'total': False}
+            organelle_mode = organelle_map.get(chip_norm, False)
+            if organelle_mode is not False:
+                tee.write(f"\n  Norm factors ({chip_norm}): computing mito "
+                          f"scaling for {len(g1_ip_tags)+len(g2_ip_tags)} IPs...\n")
+                # 收集所有 IP 的 organelle reads
+                all_ip_tags = g1_ip_tags + g2_ip_tags
+                ip_org_counts = []
+                for t in all_ip_tags:
+                    bam = tag_to_bam.get(t)
+                    if bam and os.path.exists(bam):
+                        org = _count_bam_reads(bam, organelle_mode=organelle_mode)
+                        scale_map[t] = org  # 先存 org count，后面再转 bw_scale
+                        ip_org_counts.append(org)
+                        tee.write(f"    IP {t}: {chip_norm} reads = {org}\n")
+                    else:
+                        scale_map[t] = 1
+                        tee.write(f"    IP {t}: BAM missing, scale=1 (skip)\n")
+                # 转成 bw_scale：bw_scale = 1 / (ip_org / max_ip_org)
+                if ip_org_counts:
+                    max_org = max(ip_org_counts) if max(ip_org_counts) > 0 else 1
+                else:
+                    max_org = 1
+                for t in all_ip_tags:
+                    org = scale_map.get(t, 1)
+                    ip_scale = org / max_org if max_org > 0 else 1.0
+                    scale_map[t] = 1.0 / ip_scale if ip_scale > 0 else 1.0
+                    tee.write(f"    → bw_scale[{t}] = {scale_map[t]:.4f} "
+                              f"(ip_scale = {ip_scale:.4f})\n")
+                tee.write(f"    Max {chip_norm} reads across IPs = {max_org}\n")
+            # Input tags 一律 bw_scale = 1.0
+            for t in g1_input_tags + g2_input_tags:
+                scale_map[t] = 1.0
+
+            tee.write(f"\n  Generating bigWig tracks for {len(all_tags)} BAMs "
+                      f"(mito-scale + bs=5 + {n_threads} threads)...\n")
+            bw_done = 0
+            bw_failed = []
+            for tag in all_tags:
+                bam_path = tag_to_bam.get(tag)
+                if not bam_path or not os.path.exists(bam_path):
+                    tee.write(f"    [SKIP] {tag}: BAM not found\n")
+                    continue
+                bw_out = os.path.join(bw_dir, f"{tag}.bw")
+                # 保证 .bai 存在
+                bai = bam_path + ".bai"
+                if (not os.path.exists(bai)
+                        or os.path.getmtime(bai) < os.path.getmtime(bam_path)):
+                    run_cmd(f"samtools index {bam_path}")
+                # 已存在且比 BAM 新则跳过
+                if (os.path.exists(bw_out)
+                        and os.path.getmtime(bw_out) >= os.path.getmtime(bam_path)):
+                    bw_done += 1
+                    continue
+                bw_scale = scale_map.get(tag, 1.0)
+                ret = run_cmd(
+                    f"bamCoverage -b {bam_path} --skipNAs -bs 5 -p {n_threads} "
+                    f"--minMappingQuality 10 --normalizeUsing None "
+                    f"--scaleFactor {bw_scale:.6f} -o {bw_out}",
+                    check=False
+                )
+                if ret == 0 and os.path.exists(bw_out) and os.path.getsize(bw_out) > 0:
+                    bw_done += 1
+                else:
+                    bw_failed.append(tag)
+            if bw_failed:
+                tee.write(f"    [WARN] bamCoverage failed for {bw_failed}\n")
+            tee.write(f"    bigWig ready: {bw_dir}/  ({bw_done}/{len(all_tags)})\n")
 
             # ── Peak QC ──────────────────────────────────────────────────────
             def _qc_peak_set(label, bed_file, ip_bam_tags, caller):
@@ -745,11 +961,47 @@ def run(opts):
                             f"{genome} {prefix} {peak_file} {peak_name} {tss_distance}"
                         )
 
+            # ── Peak meta-plot & heatmap (deepTools) ────────────────────────
+            if not skip_peak_metaplot:
+                n_threads = max(1, (os.cpu_count() or 4) // 2)
+                g1_bws = [os.path.join(bw_dir, f"{t}.bw") for t in g1_ip_tags]
+                g2_bws = [os.path.join(bw_dir, f"{t}.bw") for t in g2_ip_tags]
+                all_bws = g1_bws + g2_bws
+                all_labels = g1_ip_tags + g2_ip_tags
+                # Each group's own peaks → that group's bigWigs
+                _run_peak_metaplot_tf(
+                    g1_bws, g1_ip_tags,
+                    f"{group1_name}_peaks.narrowPeak", f"{group1_name}_peaks",
+                    tee, n_threads, out_dir='.',
+                    upstream=metaplot_upstream, downstream=metaplot_downstream)
+                _run_peak_metaplot_tf(
+                    g2_bws, g2_ip_tags,
+                    f"{group2_name}_peaks.narrowPeak", f"{group2_name}_peaks",
+                    tee, n_threads, out_dir='.',
+                    upstream=metaplot_upstream, downstream=metaplot_downstream)
+                # Differential / common peaks → all IP tracks for cross-group comparison
+                _run_peak_metaplot_tf(
+                    all_bws, all_labels,
+                    f"{diff_prefix}_{diff_suffix}_cond1.bed",
+                    f"diff_{group1_name}_enriched", tee, n_threads, out_dir='.',
+                    upstream=metaplot_upstream, downstream=metaplot_downstream)
+                _run_peak_metaplot_tf(
+                    all_bws, all_labels,
+                    f"{diff_prefix}_{diff_suffix}_cond2.bed",
+                    f"diff_{group2_name}_enriched", tee, n_threads, out_dir='.',
+                    upstream=metaplot_upstream, downstream=metaplot_downstream)
+                _run_peak_metaplot_tf(
+                    all_bws, all_labels,
+                    f"{diff_prefix}_{diff_suffix}_common.bed",
+                    "diff_common", tee, n_threads, out_dir='.',
+                    upstream=metaplot_upstream, downstream=metaplot_downstream)
+
             # ── Cleanup bedGraph 文件和替身 BAM ─────────────────────────────
             for pat in ["*_treat_pileup.bdg", "*_control_lambda.bdg"]:
                 for fname in globmod.glob(pat):
                     os.unlink(fname)
-            for tag, _ in all_tags:
+            # all_tags 是纯字符串列表（tag 名），不是 (tag, path) tuple
+            for tag in all_tags:
                 bam = f"{tag}.sorted.bam"
                 if os.path.islink(bam):
                     os.unlink(bam)
@@ -789,6 +1041,8 @@ def run(opts):
                     f"macs3 callpeak -t {ip_bam} -c {input_bam} "
                     f"-f {fmt} -g {genome_size} -n {tag}"
                 )
+                if seq_strategy != 'paired':
+                    cmd += " --nomodel --shift 100 --extsize 200"
                 if qvalue < 1:
                     cmd += f" -q {qvalue}"
                 else:
@@ -812,14 +1066,19 @@ def run(opts):
             # ── 构建 sample sheet ──
             tee.write("\n  Step 2: Building DiffBind sample sheet\n")
             ss_file = os.path.join(diffbind_dir, "samplesheet.csv")
-            rows = ["SampleID,Condition,Factor,Replicate,bamReads,bamControl,Peaks"]
+            read_fmt = "BAMPE" if seq_strategy == 'paired' else "BAM"
+            rows = ["SampleID,Condition,Factor,Replicate,bamReads,bamControl,Peaks,ReadFormat"]
             for _in_t, ipt, ip_b, inp_b in all_pairs:
                 # tag = WT_IP_1 → group=WT (来自 _parse_spec), rep=1
                 parts = ipt.rsplit('_', 1)
                 rep = parts[1]
                 group = ip_group[ipt]
                 peak_path = os.path.abspath(f"{ipt}_peaks.narrowPeak")
-                rows.append(f"{ipt},{group},IP,{rep},{os.path.abspath(ip_b)},{os.path.abspath(inp_b)},{peak_path}")
+                rows.append(
+                    f"{ipt},{group},IP,{rep},"
+                    f"{os.path.abspath(ip_b)},{os.path.abspath(inp_b)},"
+                    f"{peak_path},{read_fmt}"
+                )
             with open(ss_file, 'w') as f:
                 f.write('\n'.join(rows) + '\n')
             tee.write(f"    Sample sheet: {ss_file}\n")
@@ -1034,6 +1293,35 @@ cat("Consensus peaks:", nrow(bed), "\\n")
                             os.path.getmtime(bai) < os.path.getmtime(br):
                         run_cmd(f"samtools index {br}")
 
+            # 3.8b+) 生成 bigWig coverage tracks (供下游可视化使用)
+            # 所有 BAM (IP + Input) 各产一个 .bw，统一放在 diffbind_dir/bw/
+            bw_dir = os.path.join(diffbind_dir, "bw")
+            os.makedirs(bw_dir, exist_ok=True)
+            n_threads = max(1, (os.cpu_count() or 4) // 2)
+            tee.write(f"    Generating bigWig tracks for {len(all_bams)} BAMs (CPM norm, bs=5, {n_threads} threads)...\n")
+            bw_done = 0
+            bw_failed = []
+            for slabel, bam_path in all_bams:
+                bw_out = os.path.join(bw_dir, f"{slabel}.bw")
+                # 已存在且比 BAM 新则跳过
+                if (os.path.exists(bw_out)
+                        and os.path.getmtime(bw_out) >= os.path.getmtime(bam_path)):
+                    bw_done += 1
+                    continue
+                ret = run_cmd(
+                    f"bamCoverage -b {bam_path} --skipNAs -bs 5 -p {n_threads} "
+                    f"--minMappingQuality 10 --normalizeUsing CPM -o {bw_out}",
+                    check=False
+                )
+                if ret == 0 and os.path.exists(bw_out) and os.path.getsize(bw_out) > 0:
+                    bw_done += 1
+                else:
+                    bw_failed.append(slabel)
+            if bw_failed:
+                tee.write(f"    [WARN] bamCoverage failed for {bw_failed} — "
+                          f"请手动检查这些样本的 BAM\n")
+            tee.write(f"    bigWig ready: {bw_dir}/  ({bw_done}/{len(all_bams)})\n")
+
             # 3.8c) bedtools multicov
             # 输入: BED + 所有 indexed BAM
             # 输出 TSV: chrom,start,end,name,score,strand,count1,count2,...
@@ -1100,14 +1388,19 @@ cat("Consensus peaks:", nrow(bed), "\\n")
             if not os.path.exists(dbr):
                 sys.exit(f"DiffBind R script not found: {dbr}")
 
+            # 注意：chip_diffbind.R 的参数顺序是固定的 7 个必需 + 3 个可选
+            # 可选参数（nf_file, peak_counts, sample_metadata）必须用占位符
+            # 保持槽位对齐，否则后续参数全部左移一位
+            # ⚠️ 占位符不能含 < > $ ` 等 shell 元字符，且要用单引号包裹
+            #    否则 shell 会把它当成重定向/替换
             cmd_parts = [
                 "Rscript", "--vanilla", dbr,
                 ss_file, diffbind_dir, genome,
                 chip_analysis, chip_norm,
                 str(pvalue), str(foldchange),
-                nf_file or "",
-                os.path.join(diffbind_dir, "peak_counts.tsv"),
-                os.path.join(diffbind_dir, "sample_metadata.tsv"),
+                nf_file if nf_file else "'__NONE__'",               # arg[8] norm_factors.tsv (空=不用)
+                os.path.join(diffbind_dir, "peak_counts.tsv"),      # arg[9]  必需
+                os.path.join(diffbind_dir, "sample_metadata.tsv"), # arg[10] 必需
             ]
             run_cmd(' '.join(cmd_parts))
 
@@ -1156,6 +1449,28 @@ cat("Consensus peaks:", nrow(bed), "\\n")
 
             tee.write(f"\n  Annotated peak sets: {anno_ok}/{len(peak_sets)}\n")
             tee.write(f"  (Results in {diffbind_dir}/)\n")
+
+            # ── Peak meta-plot & heatmap (deepTools) ────────────────────────
+            if not skip_peak_metaplot:
+                n_threads = max(1, (os.cpu_count() or 4) // 2)
+                bw_dir_db = os.path.join(diffbind_dir, "bw")
+                all_ip_tags = g1_ip_tags + g2_ip_tags
+                all_ip_bws = [os.path.join(bw_dir_db, f"{t}.bw")
+                              for t in all_ip_tags]
+                # All three DiffBind peak sets → all IP tracks for cross-group comparison
+                diffbind_peaks = [
+                    ("DiffBind_consensus_peaks.bed", "DiffBind_consensus"),
+                    ("DiffBind_UP_peaks.bed",        "DiffBind_UP"),
+                    ("DiffBind_DOWN_peaks.bed",      "DiffBind_DOWN"),
+                ]
+                for bed_name, peak_label in diffbind_peaks:
+                    bed_path = os.path.join(diffbind_dir, bed_name)
+                    _run_peak_metaplot_tf(
+                        all_ip_bws, all_ip_tags,
+                        bed_path, peak_label, tee, n_threads,
+                        out_dir=diffbind_dir,
+                        upstream=metaplot_upstream,
+                        downstream=metaplot_downstream)
 
             tee.write(f"\n{'='*60}\n")
             tee.write(f"DiffBind results: {diffbind_dir}/\n")

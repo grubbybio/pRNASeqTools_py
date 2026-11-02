@@ -4,11 +4,6 @@ norm = args[1]
 pvalueoo <- as.numeric(args[2])
 fdroo <- as.numeric(args[3])
 foldchangeoo <- as.numeric(args[4])
-try(
-  {read.table(paste(args[5],"/reference/",args[6],".BIN",sep=""), as.is = T, sep="\t") -> binref
-  as.matrix(table(binref[,2])) -> refbin},
-  silent=TRUE
-)
 args[-c(1:6)] -> args
 args[c(TRUE, FALSE)] -> genotype
 args[c(FALSE, TRUE)] -> replicates
@@ -88,40 +83,36 @@ for(j in 2:length(genotype)){
   write.csv(out,paste(genotype[j],"vs",genotype[1],"total","csv",sep="."),quote=F)
   write.csv(resup,paste(genotype[j],"vs",genotype[1],"total","upregulated","csv",sep="."),quote=F)
   write.csv(resdown,paste(genotype[j],"vs",genotype[1],"total","downregulated","csv",sep="."),quote=F)
-  try(
-    {binref[binref[,1] %in% rownames(res),2] -> tmp1
-      as.matrix(table(tmp1)) -> tmp1
-      binref[binref[,1] %in% rownames(resup),2] -> tmp2
-      as.matrix(table(tmp2)) -> tmp2
-      binref[binref[,1] %in% rownames(resdown),2] -> tmp3
-      as.matrix(table(tmp3)) -> tmp3
-      merge(x=refbin, y=tmp1, all = T, by = 0) -> tmp
-      rownames(tmp) <- tmp[,1]
-      tmp[,-1] -> tmp
-      merge(x=tmp, y=tmp2, all = T, by = 0) -> tmp
-      rownames(tmp) <- tmp[,1]
-      tmp[,-1] -> tmp
-      merge(x=tmp, y=tmp3, all = T, by = 0) -> tmp
-      rownames(tmp) <- tmp[,1]
-      tmp[,-1] -> tmp
-      sum(tmp[!is.na(tmp[,2]),2]) -> sumref
-      sum(tmp[!is.na(tmp[,3]),3]) -> sumup
-      sum(tmp[!is.na(tmp[,4]),4]) -> sumdown
-      tmp[,3:4] -> tmp[,5:6]
-      for(k in 1:nrow(tmp)){
-        if(!is.na(tmp[k,3])){
-          matrix(c(tmp[k,2],sumref-tmp[k,2],tmp[k,3],sumup-tmp[k,3]),nrow=2) -> fis
-          fisher.test(fis)$p.value -> tmp[k,5]
-        }
-        if(!is.na(tmp[k,4])){
-          matrix(c(tmp[k,2],sumref-tmp[k,2],tmp[k,4],sumdown-tmp[k,4]),nrow=2) -> fis
-          fisher.test(fis)$p.value -> tmp[k,6]
-        }
-      }
-      p.adjust(tmp[,5],"fdr") -> tmp[,7]
-      p.adjust(tmp[,6],"fdr") -> tmp[,8]
-      colnames(tmp) <- c("GENOME","DETECTED","UP","DOWN","UP P","DOWN P","UP FDR","DOWN FDR")
-      write.table(tmp,paste(genotype[j],"vs",genotype[1],"total","bin","txt",sep="."),quote=F,sep="\t")},
-    silent = TRUE
-  )
+
+  # ── Volcano plot ──────────────────────────────────────────────────────────
+  volcano_pdf <- paste(genotype[j],"vs",genotype[1],"volcano","pdf",sep=".")
+  message(paste("Generating volcano plot:", volcano_pdf))
+  pval_col <- if(fdroo < 1) "padj" else "pvalue"
+  # Replace NA padj with 1 for plotting
+  plot_df <- out[!is.na(out$log2FoldChange), ]
+  plot_pval <- plot_df[[pval_col]]
+  plot_pval[is.na(plot_pval)] <- 1
+  plot_fc   <- plot_df$log2FoldChange
+  sig_up   <- plot_fc >=  log2(foldchangeoo) & plot_pval < (if(fdroo < 1) fdroo else pvalueoo)
+  sig_down <- plot_fc <= -log2(foldchangeoo) & plot_pval < (if(fdroo < 1) fdroo else pvalueoo)
+  pdf(file=volcano_pdf, width=7, height=6)
+  plot(plot_fc, -log10(plot_pval + 1e-300),
+       pch=16, cex=0.5, col="grey60",
+       xlab=expression(log[2]~Fold~Change),
+       ylab=expression(-log[10]~Pvalue),
+       main=paste(genotype[j], "vs", genotype[1]))
+  points(plot_fc[sig_up],   -log10(plot_pval[sig_up]   + 1e-300),
+         pch=16, cex=0.6, col="#E41A1C")
+  points(plot_fc[sig_down], -log10(plot_pval[sig_down] + 1e-300),
+         pch=16, cex=0.6, col="#377EB8")
+  abline(v=c(-log2(foldchangeoo), log2(foldchangeoo)),
+         h=-log10(if(fdroo < 1) fdroo else pvalueoo),
+         lty=2, col="grey30")
+  legend("topright",
+         legend=c(paste0("Up (", sum(sig_up), ")"),
+                  paste0("Down (", sum(sig_down), ")"),
+                  paste0("NS (", sum(!sig_up & !sig_down), ")")),
+         col=c("#E41A1C", "#377EB8", "grey60"), pch=16, cex=0.8)
+  dev.off()
+  message(paste("Volcano plot saved:", volcano_pdf))
 }

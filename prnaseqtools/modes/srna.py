@@ -29,6 +29,7 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
+    skip_fastp = opts.get('skip_fastp', False)
     if adaptor and adaptor.lower() in ADAPTOR_ALIASES:
         adaptor = ADAPTOR_ALIASES[adaptor.lower()]
     prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
@@ -129,15 +130,19 @@ def run(opts):
 
                 # UMI extraction for single-cell mode
                 if run_mode == 'sc':
-                    tee.write(f"\nTrimming {tag}...\n")
+                    tee.write(f"  Trimming {tag}...\n")
                     run_cmd(
                         f"umi_tools extract -p {pattern} -I {tag}.fastq -S {tag}.fq"
                     )
-                    fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
-                    run_cmd(
-                        f"fastp -w {thread} --length_required 18 --length_limit 42 "
-                        f"-i {tag}.fq -o {tag}_trimmed.fastq {fastp_adaptor}"
-                    )
+                    if skip_fastp:
+                        tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                        os.rename(f"{tag}.fq", f"{tag}_trimmed.fastq")
+                    else:
+                        fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+                        run_cmd(
+                            f"fastp -w {thread} --length_required 18 --length_limit 42 "
+                            f"-i {tag}.fq -o {tag}_trimmed.fastq {fastp_adaptor}"
+                        )
 
                     # Deduplication
                     _umi_dedup(tag)
@@ -145,13 +150,16 @@ def run(opts):
                     if os.path.exists(f"{tag}.fq"):
                         os.unlink(f"{tag}.fq")
                 elif run_mode == 'bulk':
-                    tee.write(f"\nTrimming (fastp) {tag}...\n")
-                    fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
-                    run_cmd(
-                        f"fastp -w {thread} --length_required 18 --length_limit 42 "
-                        f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}"
-                    )
-                    os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+                    if skip_fastp:
+                        tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                    else:
+                        tee.write(f"  Trimming (fastp) {tag}...\n")
+                        fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+                        run_cmd(
+                            f"fastp -w {thread} --length_required 18 --length_limit 42 "
+                            f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}"
+                        )
+                        os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
 
                 # Mask filtering
                 if mask:

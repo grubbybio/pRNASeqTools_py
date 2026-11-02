@@ -28,6 +28,8 @@ def add_common_args(parser, control_required=True):
                         help='Genome: ath, osa, b73, gma, smo, bra, w22')
     parser.add_argument('--thread', '-t', default=4, type=int, help='Threads.')
     parser.add_argument('--adaptor', '-a', default=None, help="3' adaptor sequence.")
+    parser.add_argument('--skip-fastp', action='store_true', dest='skip_fastp',
+                        help='Skip fastp trimming (use when reads are already clean).')
     if control_required:
         parser.add_argument('--control', '-c', required=True,
                             help='Control: name=file1+file2...')
@@ -313,7 +315,14 @@ def build_parser():
                    help='single or paired')
     p.add_argument('--tss-distance', default=3000, type=int,
                    help='TSS distance for ChIPseeker annotation (default: 3000)')
-
+    p.add_argument('--skip-insert-size', action='store_true',
+                   help='Skip insert/fragment size distribution plot (bamPEFragmentSize)')
+    p.add_argument('--skip-peak-metaplot', action='store_true',
+                   help='Skip peak meta-profile & heatmap (computeMatrix/plotHeatmap)')
+    p.add_argument('--metaplot-upstream', default=2000, type=int,
+                   help='Bp upstream of peak centre for meta-plot (default: 2000)')
+    p.add_argument('--metaplot-downstream', default=2000, type=int,
+                   help='Bp downstream of peak centre for meta-plot (default: 2000)')
 
     # atac
     p = sub.add_parser('atac', help='ATAC-seq analysis')
@@ -332,6 +341,14 @@ def build_parser():
                    help='Second ATAC group for MACS3 bdgdiff: name=file1+file2...')
     p.add_argument('--tss-distance', default=3000, type=int,
                    help='TSS distance for ChIPseeker annotation (default: 3000)')
+    p.add_argument('--skip-insert-size', action='store_true',
+                   help='Skip insert/fragment size distribution plot (bamPEFragmentSize)')
+    p.add_argument('--skip-peak-metaplot', action='store_true',
+                   help='Skip peak meta-profile & heatmap (computeMatrix/plotHeatmap)')
+    p.add_argument('--metaplot-upstream', default=2000, type=int,
+                   help='Bp upstream of peak centre for meta-plot (default: 2000)')
+    p.add_argument('--metaplot-downstream', default=2000, type=int,
+                   help='Bp downstream of peak centre for meta-plot (default: 2000)')
 
     # wgbs
     p = sub.add_parser('wgbs', help='WGBS-seq analysis')
@@ -433,6 +450,14 @@ def build_parser():
                         'chloro (chloroplast reads chrC/chrCP), '
                         'or rdna (chr2+chr3 reads, rDNA regions). '
                         'Default: deseq2')
+    p.add_argument('--skip-insert-size', action='store_true',
+                   help='Skip insert/fragment size distribution plot (bamPEFragmentSize)')
+    p.add_argument('--skip-peak-metaplot', action='store_true',
+                   help='Skip peak meta-profile & heatmap (computeMatrix/plotHeatmap)')
+    p.add_argument('--metaplot-upstream', default=2000, type=int,
+                   help='Bp upstream of peak centre for meta-plot (default: 2000)')
+    p.add_argument('--metaplot-downstream', default=2000, type=int,
+                   help='Bp downstream of peak centre for meta-plot (default: 2000)')
 
     return parser
 

@@ -34,9 +34,10 @@ def run(opts):
     mappingonly = opts.get('mapping_only', False)
     foldchange = opts.get('foldchange', 2.0)
     pvalue = opts.get('pvalue', 0.05)
+    skip_fastp = opts.get('skip_fastp', False)
 
     # CLIP-seq HISAT2 参数：严格唯一比对，小内含子 (CLIP 是 RBP 结合位点)
-    _HISAT_EXTRA = "--max-hits 1 --mp 3,3 --np 1 --score-min L,0,-0.3 --max-intronlen 5000"
+    _HISAT_EXTRA = "-k 1 --mp 3,3 --np 1 --score-min L,0,-0.3 --max-intronlen 5000"
 
     control_dict = _parse_to_dict(opts.get('control', ''))
     tags, files, pars = parse_input(control_dict)
@@ -50,8 +51,8 @@ def run(opts):
             pars.extend(t_pars)
 
     if not nomapping:
-        if not adaptor:
-            sys.exit("Please specify the 3' adaptor!")
+        if not adaptor and not skip_fastp:
+            sys.exit("Please specify the 3' adaptor (or use --skip-fastp).")
 
         tee.write("\nBuilding HISAT2 genome index ...\n")
         hisat_idx = "HisatIdx"
@@ -73,12 +74,17 @@ def run(opts):
                 if len(sra_results) == 1:
                     unzip_file(sra_results[0], tag)
                     preserve_raw_fastq(from_sra, tag, paired=False)
-                    run_cmd(
-                        f"fastp -w {thread} --length_required 18 "
-                        f"-i {tag}.fastq -o {tag}_trimmed.fastq "
-                        f"--adapter_sequence {adaptor}")
+                    if skip_fastp:
+                        tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                        fq_in = f"{tag}.fastq"
+                    else:
+                        run_cmd(
+                            f"fastp -w {thread} --length_required 18 "
+                            f"-i {tag}.fastq -o {tag}_trimmed.fastq "
+                            f"--adapter_sequence {adaptor}")
+                        fq_in = f"{tag}_trimmed.fastq"
                     hisat2_align_single(
-                        tag, f"{tag}_trimmed.fastq", hisat_idx, thread,
+                        tag, fq_in, hisat_idx, thread,
                         extra_args=_HISAT_EXTRA,
                         nov_sj_file=f"{tag}_SJ.out.tab")
                     # 提取 unmapped reads 到 fastq（兼容旧版 cleanup）
@@ -86,23 +92,27 @@ def run(opts):
                         run_cmd(
                             f"samtools view -b -f 4 {tag}.bam | "
                             f"samtools fastq - > {tag}.unmapped.fastq 2>/dev/null || true")
-                    for fname in (f"{tag}_trimmed.fastq",):
-                        if os.path.exists(fname):
-                            os.unlink(fname)
+                    if not skip_fastp and os.path.exists(f"{tag}_trimmed.fastq"):
+                        os.unlink(f"{tag}_trimmed.fastq")
                     if from_sra:
                         gzip_fastq(f"{tag}.raw.fastq")
                 else:
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
                     preserve_raw_fastq(from_sra, tag, paired=True)
-                    run_cmd(
-                        f"fastp -w {thread} --length_required 18 "
-                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
-                        f"--adapter_sequence {adaptor} "
-                        f"--adapter_sequence_r2 AAAAAAGAAAAAA")
+                    if skip_fastp:
+                        tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                        r1_in, r2_in = f"{tag}_R1.fastq", f"{tag}_R2.fastq"
+                    else:
+                        run_cmd(
+                            f"fastp -w {thread} --length_required 18 "
+                            f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                            f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                            f"--adapter_sequence {adaptor} "
+                            f"--adapter_sequence_r2 AAAAAAGAAAAAA")
+                        r1_in, r2_in = f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"
                     hisat2_align_paired(
-                        tag, f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq",
+                        tag, r1_in, r2_in,
                         hisat_idx, thread,
                         extra_args=_HISAT_EXTRA,
                         nov_sj_file=f"{tag}_SJ.out.tab")
@@ -110,9 +120,10 @@ def run(opts):
                         run_cmd(
                             f"samtools view -b -f 4 {tag}.bam | "
                             f"samtools fastq - > {tag}.unmapped.fastq 2>/dev/null || true")
-                    for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
-                        if os.path.exists(_f):
-                            os.unlink(_f)
+                    if not skip_fastp:
+                        for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
+                            if os.path.exists(_f):
+                                os.unlink(_f)
                     if from_sra:
                         for _f in (f"{tag}_R1.raw.fastq", f"{tag}_R2.raw.fastq"):
                             gzip_fastq(_f)
@@ -120,14 +131,19 @@ def run(opts):
                 f1, f2 = fpath.split(',')
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
-                run_cmd(
-                    f"fastp -w {thread} --length_required 18 "
-                    f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
-                    f"--adapter_sequence {adaptor} "
-                    f"--adapter_sequence_r2 AAAAAAGAAAAAA")
+                if skip_fastp:
+                    tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                    r1_in, r2_in = f"{tag}_R1.fastq", f"{tag}_R2.fastq"
+                else:
+                    run_cmd(
+                        f"fastp -w {thread} --length_required 18 "
+                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                        f"--adapter_sequence {adaptor} "
+                        f"--adapter_sequence_r2 AAAAAAGAAAAAA")
+                    r1_in, r2_in = f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"
                 hisat2_align_paired(
-                    tag, f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq",
+                    tag, r1_in, r2_in,
                     hisat_idx, thread,
                     extra_args=_HISAT_EXTRA,
                     nov_sj_file=f"{tag}_SJ.out.tab")
@@ -135,9 +151,10 @@ def run(opts):
                     run_cmd(
                         f"samtools view -b -f 4 {tag}.bam | "
                         f"samtools fastq - > {tag}.unmapped.fastq 2>/dev/null || true")
-                for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
-                    if os.path.exists(_f):
-                        os.unlink(_f)
+                if not skip_fastp:
+                    for _f in (f"{tag}_R1_trimmed.fastq", f"{tag}_R2_trimmed.fastq"):
+                        if os.path.exists(_f):
+                            os.unlink(_f)
 
             # HISAT2 直接输出 {tag}.bam，不需要 rename
             # HISAT2 日志
@@ -147,7 +164,7 @@ def run(opts):
 
             run_cmd(
                 f"bamCoverage -b {tag}.bam --skipNAs -bs 5 -p {thread} "
-                f"--minMappingQuality 10 --ignoreDuplicates "
+                f"--minMappingQuality 10 "
                 f"--normalizeUsing CPM -o {tag}.bw")
 
             tee.write("\nAlignment completed!\nFinding peaks...\n")

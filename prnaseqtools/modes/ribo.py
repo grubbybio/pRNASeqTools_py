@@ -132,6 +132,7 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
+    skip_fastp = opts.get('skip_fastp', False)
     # prefix must point to the project root so that prefix/reference/{genome}_Genome
     # resolves to ~/software/pRNASeqTools_py/reference/ (not prnaseqtools/reference/)
     prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
@@ -350,7 +351,7 @@ def run(opts):
                 r2_fq = f"{tag}_r2.fastq"
 
             # Adaptor trimming
-            if adaptor:
+            if adaptor and not skip_fastp:
                 if is_paired:
                     tee.write(f"  Trimming {tag} (paired-end)...\n")
                     run_cmd(
@@ -465,7 +466,7 @@ def run(opts):
         hisat_sj_dir = "Hisat_SJ"
         os.makedirs(hisat_sj_dir, exist_ok=True)
 
-        hisat_extra = "--max-hits 20 --mp 3,3 --score-min L,0,-0.4"
+        hisat_extra = "-k 20 --mp 3,3 --score-min L,0,-0.4"
 
         # ── 1st pass ───────────────────────────────────────────────────
         tee.write("\n  --- RNA-seq HISAT2 1st pass (collect novel SJ) ---\n")
@@ -731,7 +732,7 @@ def run(opts):
             fq = fq_gz[:-3]  # strip .gz
             run_cmd(f"gunzip -c {fq_gz} > {fq}")
             hisat2_align_single(tag, os.path.abspath(fq), hisat_ribo_idx, thread,
-                                extra_args="--max-hits 20 --mp 3,3 --score-min L,0,-0.4")
+                                extra_args="-k 20 --mp 3,3 --score-min L,0,-0.4")
             os.unlink(fq)
             # 把输出 BAM 移到 ribo_map_dir（扁平目录，后续步骤引用）
             for fn in (f"{tag}.bam", f"{tag}.bam.bai", f"{tag}_Log.txt"):
@@ -763,10 +764,10 @@ def run(opts):
             if paired:
                 hisat2_align_paired(tag, f"{tag}_r1.fastq", f"{tag}_r2.fastq",
                                     hisat_rna_new_idx, thread,
-                                    extra_args="--max-hits 20 --mp 3,3 --score-min L,0,-0.4")
+                                    extra_args="-k 20 --mp 3,3 --score-min L,0,-0.4")
             else:
                 hisat2_align_single(tag, f"{tag}_r1.fastq", hisat_rna_new_idx, thread,
-                                    extra_args="--max-hits 20 --mp 3,3 --score-min L,0,-0.4")
+                                    extra_args="-k 20 --mp 3,3 --score-min L,0,-0.4")
 
             # 把输出 BAM 移到 hisat_rna_new_map
             for fn in (f"{tag}.bam", f"{tag}.bam.bai", f"{tag}_Log.txt"):

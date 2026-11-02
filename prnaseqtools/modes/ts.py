@@ -27,6 +27,7 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
+    skip_fastp = opts.get('skip_fastp', False)
     prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
     nomapping = opts.get('no_mapping', False)
     mappingonly = opts.get('mapping_only', False)
@@ -34,7 +35,7 @@ def run(opts):
     pvalue = opts.get('pvalue', 0.05)
 
     # TS-CLIP-seq HISAT2 参数
-    _HISAT_EXTRA = "--max-hits 1 --mp 3,3 --np 1 --score-min L,0,-0.3 --max-intronlen 5000"
+    _HISAT_EXTRA = "-k 1 --mp 3,3 --np 1 --score-min L,0,-0.3 --max-intronlen 5000"
 
     control_dict = _parse_to_dict(opts.get('control', ''))
     tags, files, pars = parse_input(control_dict)
@@ -69,10 +70,13 @@ def run(opts):
                 sra_results, _from_sra = download_sra(fpath, thread)
                 if len(sra_results) == 1:
                     unzip_file(sra_results[0], tag)
-                    run_cmd(
-                        f"fastp -w {thread} --length_required 20 "
-                        f"-i {tag}.fastq -o {tag}_trimmed.fastq "
-                        f"--adapter_sequence {adaptor}")
+                    if skip_fastp:
+                        tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                    else:
+                        run_cmd(
+                            f"fastp -w {thread} --length_required 20 "
+                            f"-i {tag}.fastq -o {tag}_trimmed.fastq "
+                            f"--adapter_sequence {adaptor}")
                     rmvc(tag)  # rmvc 输出到 {tag}.fastq
                     hisat2_align_single(
                         tag, f"{tag}.fastq", hisat_idx, thread,
@@ -84,12 +88,15 @@ def run(opts):
                 else:
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
-                    run_cmd(
-                        f"fastp -w {thread} --length_required 20 "
-                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
-                        f"--adapter_sequence {adaptor} "
-                        f"--adapter_sequence_r2 AAAAAAGAAAAAA")
+                    if skip_fastp:
+                        tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                    else:
+                        run_cmd(
+                            f"fastp -w {thread} --length_required 20 "
+                            f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                            f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                            f"--adapter_sequence {adaptor} "
+                            f"--adapter_sequence_r2 AAAAAAGAAAAAA")
                     rmvc(f"{tag}_R1", f"{tag}_R2")  # 输出到 {tag}_R1.fastq / {tag}_R2.fastq
                     hisat2_align_paired(
                         tag, f"{tag}_R1.fastq", f"{tag}_R2.fastq",
@@ -104,12 +111,15 @@ def run(opts):
                 f1, f2 = fpath.split(',')
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
-                run_cmd(
-                    f"fastp -w {thread} --length_required 20 "
-                    f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
-                    f"--adapter_sequence {adaptor} "
-                    f"--adapter_sequence_r2 AAAAAAGAAAAAA")
+                if skip_fastp:
+                    tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                else:
+                    run_cmd(
+                        f"fastp -w {thread} --length_required 20 "
+                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                        f"--adapter_sequence {adaptor} "
+                        f"--adapter_sequence_r2 AAAAAAGAAAAAA")
                 rmvc(f"{tag}_R1", f"{tag}_R2")
                 hisat2_align_paired(
                     tag, f"{tag}_R1.fastq", f"{tag}_R2.fastq",
@@ -128,7 +138,7 @@ def run(opts):
 
             run_cmd(
                 f"bamCoverage -b {tag}.bam --skipNAs -bs 5 -p {thread} "
-                f"--minMappingQuality 10 --ignoreDuplicates "
+                f"--minMappingQuality 10 "
                 f"--normalizeUsing CPM -o {tag}.bw")
 
             tee.write("\nFinding peaks...\n")

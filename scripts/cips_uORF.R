@@ -64,8 +64,26 @@ cat("Gene desc xlsx:", ifelse(is.na(gene_desc_xlsx), "(none)", gene_desc_xlsx), 
 # ── Load reference data ──────────────────────────────────────────────────
 cat("\n--- Loading reference data ---\n")
 FA <- FaFile(fasta_path)
-txdb <- makeTxDbFromGFF(file = gtf_path, format = "gtf",
-                         dataSource = "reference", organism = "unknown")
+# Bioc 3.20+: makeTxDb*() 已从 GenomicFeatures 迁移到 txdbmaker 新包
+# 优先用 txdbmaker，兼容旧版 fallback
+buildTxDb <- function(gff_path) {
+  if (requireNamespace("txdbmaker", quietly = TRUE)) {
+    return(txdbmaker::makeTxDbFromGFF(gff_path, format = "gtf",
+                                      dataSource = "reference", organism = "unknown"))
+  }
+  if (exists("makeTxDbFromGFF", where = "package:GenomicFeatures", mode = "function")) {
+    return(GenomicFeatures::makeTxDbFromGFF(file = gff_path, format = "gtf",
+                                            dataSource = "reference", organism = "unknown"))
+  }
+  if (exists("makeTxDbFromGRanges", where = "package:GenomicFeatures", mode = "function")) {
+    return(GenomicFeatures::makeTxDbFromGRanges(rtracklayer::import(gff_path, format = "gtf")))
+  }
+  if ("makeTxDbFromGRanges" %in% ls(getNamespace("GenomicFeatures"), all.names = TRUE)) {
+    return(GenomicFeatures:::makeTxDbFromGRanges(rtracklayer::import(gff_path, format = "gtf")))
+  }
+  stop("无法构建 TxDb：请安装 txdbmaker (Bioc 3.20+)")
+}
+txdb <- buildTxDb(gtf_path)
 exonByTx <- exonsBy(txdb, by = "tx", use.names = TRUE)
 cat(sprintf("  Transcripts: %d\n", length(exonByTx)))
 

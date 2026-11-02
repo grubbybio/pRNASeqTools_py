@@ -26,6 +26,7 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
+    skip_fastp = opts.get('skip_fastp', False)
     prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
     mmap = opts.get('mmap', 'u')
 
@@ -51,15 +52,19 @@ def run(opts):
         sra_results, _from_sra = download_sra(fpath, thread)
         unzip_file(sra_results[0], tag)
 
-        tee.write("\nTrimming (fastp)...\n")
-        fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
-        run_cmd(
-            f"fastp -w {thread} --length_required 14 --length_limit 42 "
-            f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
-        if os.path.exists(f"{tag}_trimmed.fastq"):
-            os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+        # fastp trimming (skippable via --skip-fastp)
+        if skip_fastp:
+            tee.write("  [SKIP] fastp (--skip-fastp)\n")
         else:
-            tee.write(f"Warning: fastp did not produce trimmed file for {tag}\n")
+            tee.write("  Trimming (fastp)...\n")
+            fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+            run_cmd(
+                f"fastp -w {thread} --length_required 14 --length_limit 42 "
+                f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
+            if os.path.exists(f"{tag}_trimmed.fastq"):
+                os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+            else:
+                tee.write(f"Warning: fastp did not produce trimmed file for {tag}\n")
 
         # Iterative bowtie mapping with increasing mismatches
         ref_idx = os.path.join(prefix, "reference", f"{genome}_chr_all")

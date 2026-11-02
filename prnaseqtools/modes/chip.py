@@ -15,6 +15,85 @@ from prnaseqtools.input_parser import parse_input, _parse_to_dict
 from prnaseqtools.functions import download_sra, unzip_file, _tee, run_cmd, gzip_fastq, preserve_raw_fastq
 
 
+def _run_insert_size_plot(tags, tee, thread, out_prefix="chip"):
+    """Insert/fragment size distribution using deepTools bamPEFragmentSize."""
+    bam_list = [f"{t}.sorted.bam" for t in tags if os.path.exists(f"{t}.sorted.bam")]
+    if not bam_list:
+        tee.write("  [SKIP] No sorted BAM files found; skipping insert size plot.\n")
+        return
+
+    labels = ' '.join(t for t in tags if os.path.exists(f"{t}.sorted.bam"))
+    out_png = f"{out_prefix}_insert_size.png"
+    out_tsv = f"{out_prefix}_insert_size.tsv"
+
+    cmd = (
+        f"bamPEFragmentSize -b {' '.join(bam_list)} "
+        f"--samplesLabel {labels} "
+        f"--histogram {out_png} "
+        f"--outRawFragmentLengths {out_tsv} "
+        f"--numberOfProcessors {thread} "
+        f"--binSize 5 "
+        f"--plotTitle 'ChIP-seq insert size distribution'"
+    )
+    tee.write("\nGenerating insert size distribution plot (bamPEFragmentSize)...\n")
+    try:
+        run_cmd(cmd, check=True)
+        tee.write(f"  Insert size plot : {out_png}\n")
+        tee.write(f"  Raw lengths      : {out_tsv}\n")
+    except subprocess.CalledProcessError:
+        tee.write("  [WARN] bamPEFragmentSize failed (single-end data or tool error); "
+                  "skipping insert size plot.\n")
+
+
+def _run_peak_metaplot(tags, peak_file, peak_label, tee, thread,
+                       upstream=2000, downstream=2000):
+    """Heatmap (and default profile) of bigWig signal over peak centres."""
+    if not os.path.exists(peak_file):
+        tee.write(f"  [SKIP] Peak file {peak_file} not found; skipping meta-plot.\n")
+        return
+
+    bw_list = [f"{t}.bw" for t in tags if os.path.exists(f"{t}.bw")]
+    if not bw_list:
+        tee.write("  [SKIP] No bigWig files found; skipping meta-plot & heatmap.\n")
+        return
+
+    labels = ' '.join(t for t in tags if os.path.exists(f"{t}.bw"))
+    matrix_file = f"{peak_label}_peak_matrix.gz"
+    heatmap_png = f"{peak_label}_peak_heatmap.png"
+
+    tee.write(f"\nComputing signal matrix over {peak_label} peaks "
+              f"({upstream} bp upstream / {downstream} bp downstream)...\n")
+    cmd_matrix = (
+        f"computeMatrix reference-point "
+        f"--referencePoint center "
+        f"-b {upstream} -a {downstream} "
+        f"-R {peak_file} "
+        f"-S {' '.join(bw_list)} "
+        f"--samplesLabel {labels} "
+        f"-o {matrix_file} "
+        f"-p {thread} "
+        f"--skipZeros"
+    )
+    try:
+        run_cmd(cmd_matrix, check=True)
+    except subprocess.CalledProcessError:
+        tee.write("  [WARN] computeMatrix failed; skipping meta-plot & heatmap.\n")
+        return
+
+    tee.write("  Plotting heatmap (plotHeatmap)...\n")
+    run_cmd(
+        f"plotHeatmap -m {matrix_file} "
+        f"-out {heatmap_png} "
+        f"--plotTitle 'Signal over {peak_label} peaks' "
+        f"--yAxisLabel 'Normalized signal (CPM)' "
+        f"--colorMap Blues",
+        check=False,
+    )
+
+    tee.write(f"  Heatmap : {heatmap_png}\n")
+    tee.write(f"  Matrix  : {matrix_file}\n")
+
+
 def run(opts):
     """Main entry point for ChIP-seq analysis."""
     opts = validate_options(opts)
@@ -35,6 +114,14 @@ def run(opts):
     mappingonly = opts.get('mapping_only', False)
     seq_strategy = opts.get('seq_strategy', 'paired')
     tss_distance = opts.get('tss_distance', 3000)
+    skip_fastp   = opts.get('skip_fastp', False)
+    skip_insert_size = opts.get('skip_insert_size', False)
+    skip_peak_metaplot = opts.get('skip_peak_metaplot', False)
+    metaplot_upstream = opts.get('metaplot_upstream', 2000)
+    metaplot_downstream = opts.get('metaplot_downstream', 2000)
+
+    if skip_fastp:
+        tee.write("[INFO] --skip-fastp enabled, will use input reads directly for mapping.\n")
 
     tags = []
     files = []
@@ -96,17 +183,20 @@ def run(opts):
                     seq_strategy_map[tag] = 'single'
                     unzip_file(sra_results[0], tag)
                     preserve_raw_fastq(from_sra, tag, paired=False)
-                    # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
-                    tee.write("\nTrimming (fastp)...\n")
-                    fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
-                    run_cmd(
-                        f"fastp -w {thread} --length_required 50 "
-                        f"-i {tag}.fastq -o {tag}_trimmed.fastq "
-                        f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
-                    os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
-                    for rep in (f"{tag}.html", f"{tag}.json"):
-                        if os.path.exists(rep):
-                            os.unlink(rep)
+                    # fastp trimming (skippable via --skip-fastp)
+                    if skip_fastp:
+                        tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                    else:
+                        tee.write("  Trimming (fastp)...\n")
+                        fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+                        run_cmd(
+                            f"fastp -w {thread} --length_required 50 "
+                            f"-i {tag}.fastq -o {tag}_trimmed.fastq "
+                            f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
+                        os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+                        for rep in (f"{tag}.html", f"{tag}.json"):
+                            if os.path.exists(rep):
+                                os.unlink(rep)
                     run_cmd(
                         f"bowtie2 -p {thread} -x {genome}_chr_all -U {tag}.fastq "
                         f"-S {tag}.sam")
@@ -116,18 +206,21 @@ def run(opts):
                     unzip_file(sra_results[0], f"{tag}_R1")
                     unzip_file(sra_results[1], f"{tag}_R2")
                     preserve_raw_fastq(from_sra, tag, paired=True)
-                    # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
-                    fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
-                    run_cmd(
-                        f"fastp -w {thread} --length_required 50 "
-                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
-                    f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
-                    os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
-                    os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
-                    for rep in (f"{tag}.html", f"{tag}.json"):
-                        if os.path.exists(rep):
-                            os.unlink(rep)
+                    # fastp trimming (skippable via --skip-fastp)
+                    if skip_fastp:
+                        tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                    else:
+                        fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
+                        run_cmd(
+                            f"fastp -w {thread} --length_required 50 "
+                            f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                            f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                        f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
+                        os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
+                        os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+                        for rep in (f"{tag}.html", f"{tag}.json"):
+                            if os.path.exists(rep):
+                                os.unlink(rep)
                     run_cmd(
                         f"bowtie2 -p {thread} -x {genome}_chr_all "
                         f"-1 {tag}_R1.fastq -2 {tag}_R2.fastq -S {tag}.sam")
@@ -138,18 +231,21 @@ def run(opts):
                 f1, f2 = fpath.split(',')
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
-                # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
-                fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
-                run_cmd(
-                    f"fastp -w {thread} --length_required 50 "
-                    f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
-                    f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
-                os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
-                os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
-                for rep in (f"{tag}.html", f"{tag}.json"):
-                    if os.path.exists(rep):
-                        os.unlink(rep)
+                # fastp trimming (skippable via --skip-fastp)
+                if skip_fastp:
+                    tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                else:
+                    fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
+                    run_cmd(
+                        f"fastp -w {thread} --length_required 50 "
+                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                        f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
+                    os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
+                    os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+                    for rep in (f"{tag}.html", f"{tag}.json"):
+                        if os.path.exists(rep):
+                            os.unlink(rep)
                 run_cmd(
                     f"bowtie2 -p {thread} -x {genome}_chr_all "
                     f"-1 {tag}_R1.fastq -2 {tag}_R2.fastq -S {tag}.sam")
@@ -164,7 +260,7 @@ def run(opts):
             os.unlink(f"{tag}.bam")
             run_cmd(
                 f"bamCoverage -b {tag}.sorted.bam --skipNAs -bs 5 -p {thread} "
-                f"--ignoreDuplicates --minMappingQuality 10 --normalizeUsing CPM -o {tag}.bw")
+                f"--minMappingQuality 10 --normalizeUsing CPM -o {tag}.bw")
             tee.write("\nMapping completed!\n")
 
         # Cleanup
@@ -174,6 +270,13 @@ def run(opts):
             os.unlink("igv.log")
 
         if not mappingonly:
+            # ── Insert size distribution (all IP tags) ─────────────────────
+            all_ip_tags = [t for g in treatment_groups for t in g['ip_tags']]
+            if not skip_insert_size:
+                ins_prefix = (treatment_groups[0]['ip_tag']
+                              if len(treatment_groups) == 1 else 'chip_all')
+                _run_insert_size_plot(all_ip_tags, tee, thread, out_prefix=ins_prefix)
+
             for g in treatment_groups:
                 g_strategy = seq_strategy_map.get(g['ip_tags'][0], seq_strategy)
                 if peak_caller == 'macs3':
@@ -181,14 +284,20 @@ def run(opts):
                                g['ip_tag'], g_strategy, genome_size,
                                qvalue, pvalue, tee,
                                genome=genome, prefix=prefix,
-                               tss_distance=tss_distance)
+                               tss_distance=tss_distance, thread=thread,
+                               skip_peak_metaplot=skip_peak_metaplot,
+                               metaplot_upstream=metaplot_upstream,
+                               metaplot_downstream=metaplot_downstream)
                 else:
                     genrich_ip = "-t " + ','.join(
                         f"{t}.sorted.name.bam" for t in g['ip_tags'])
                     _run_genrich(genrich_ip, genrich_input, g['ip_tag'],
                                  g_strategy, qvalue, pvalue, auc, tee,
                                  genome=genome, prefix=prefix,
-                                 tss_distance=tss_distance)
+                                 tss_distance=tss_distance, thread=thread,
+                                 skip_peak_metaplot=skip_peak_metaplot,
+                                 metaplot_upstream=metaplot_upstream,
+                                 metaplot_downstream=metaplot_downstream)
 
     else:
         for pre in tags:
@@ -199,6 +308,17 @@ def run(opts):
             if (os.path.exists(f"../{pre}.sorted.bam.bai")
                     and not os.path.lexists(f"{pre}.sorted.bam.bai")):
                 os.symlink(f"../{pre}.sorted.bam.bai", f"{pre}.sorted.bam.bai")
+            # bigWig tracks are required for peak meta-plot/heatmap
+            if (os.path.exists(f"../{pre}.bw")
+                    and not os.path.lexists(f"{pre}.bw")):
+                os.symlink(f"../{pre}.bw", f"{pre}.bw")
+
+        # ── Insert size distribution (all IP tags) ─────────────────────────
+        if not skip_insert_size:
+            all_ip_tags = [t for g in treatment_groups for t in g['ip_tags']]
+            ins_prefix = (treatment_groups[0]['ip_tag']
+                          if len(treatment_groups) == 1 else 'chip_all')
+            _run_insert_size_plot(all_ip_tags, tee, thread, out_prefix=ins_prefix)
 
         for g in treatment_groups:
             g_strategy = seq_strategy_map.get(g['ip_tags'][0], seq_strategy)
@@ -207,18 +327,24 @@ def run(opts):
                            g['ip_tag'], g_strategy, genome_size,
                            qvalue, pvalue, tee,
                            genome=genome, prefix=prefix,
-                           tss_distance=tss_distance)
+                           tss_distance=tss_distance, thread=thread,
+                           skip_peak_metaplot=skip_peak_metaplot,
+                           metaplot_upstream=metaplot_upstream,
+                           metaplot_downstream=metaplot_downstream)
             else:
                 genrich_ip = "-t " + ','.join(
                     f"{t}.sorted.name.bam" for t in g['ip_tags'])
                 _run_genrich(genrich_ip, genrich_input, g['ip_tag'],
                              g_strategy, qvalue, pvalue, auc, tee,
                              genome=genome, prefix=prefix,
-                             tss_distance=tss_distance)
+                             tss_distance=tss_distance, thread=thread,
+                             skip_peak_metaplot=skip_peak_metaplot,
+                             metaplot_upstream=metaplot_upstream,
+                             metaplot_downstream=metaplot_downstream)
 
         for pre in tags:
             for bam in (f"{pre}.sorted.name.bam", f"{pre}.sorted.bam",
-                        f"{pre}.sorted.bam.bai"):
+                        f"{pre}.sorted.bam.bai", f"{pre}.bw"):
                 if os.path.lexists(bam):
                     os.unlink(bam)
 
@@ -319,7 +445,9 @@ def _peak_qc(ip_tag, narrow_file, ip_bam_list, tee, caller='MACS3'):
 
 def _run_macs3(ip_tags, control_tags,
                ip_tag, seq_strategy, genome_size, qvalue, pvalue, tee,
-               genome=None, prefix=None, tss_distance=3000):
+               genome=None, prefix=None, tss_distance=3000, thread=4,
+               skip_peak_metaplot=False, metaplot_upstream=2000,
+               metaplot_downstream=2000):
     """Run MACS3 peak calling and generate peak QC report."""
     fmt = "BAMPE" if seq_strategy == 'paired' else "BAM"
 
@@ -357,11 +485,20 @@ def _run_macs3(ip_tags, control_tags,
     _run_chipseeker(genome, prefix, f"{ip_tag}_peaks.narrowPeak",
                     f"{ip_tag}_peaks", tee, tss_distance)
 
+    # ── Peak meta-plot & heatmap ──────────────────────────────────────────
+    if not skip_peak_metaplot:
+        _run_peak_metaplot(ip_tags, f"{ip_tag}_peaks.narrowPeak",
+                           f"{ip_tag}_peaks", tee, thread,
+                           upstream=metaplot_upstream,
+                           downstream=metaplot_downstream)
+
     tee.write(f"\nMACS3 peak calling and QC completed.\n")
 
 
 def _run_genrich(genrich_ip, genrich_input, ip_tag, seq_strategy, qvalue, pvalue, auc, tee,
-                 genome=None, prefix=None, tss_distance=3000):
+                 genome=None, prefix=None, tss_distance=3000, thread=4,
+                 skip_peak_metaplot=False, metaplot_upstream=2000,
+                 metaplot_downstream=2000):
     """Run Genrich peak calling + QC."""
     command = f"Genrich -r -v -a {auc} {genrich_ip} {genrich_input} -o {ip_tag}.narrowPeak.txt"
 
@@ -380,16 +517,25 @@ def _run_genrich(genrich_ip, genrich_input, ip_tag, seq_strategy, qvalue, pvalue
 
     # ── Peak QC ──────────────────────────────────────────────────────────
     # Reconstruct sorted.bam names from the genrich -t argument
+    ip_tags = []
     ip_bam_list = []
     for part in genrich_ip.replace('-t ', '').split(','):
         base = part.strip().replace('.sorted.name.bam', '')
         if base:
+            ip_tags.append(base)
             ip_bam_list.append(f"{base}.sorted.bam")
     _peak_qc(ip_tag, f"{ip_tag}.narrowPeak.txt", ip_bam_list, tee, caller='Genrich')
 
     # ── ChIPseeker annotation ─────────────────────────────────────────────
     _run_chipseeker(genome, prefix, f"{ip_tag}.narrowPeak.txt",
                     f"{ip_tag}_peaks", tee, tss_distance)
+
+    # ── Peak meta-plot & heatmap ──────────────────────────────────────────
+    if not skip_peak_metaplot:
+        _run_peak_metaplot(ip_tags, f"{ip_tag}.narrowPeak.txt",
+                           f"{ip_tag}_peaks", tee, thread,
+                           upstream=metaplot_upstream,
+                           downstream=metaplot_downstream)
 
 
 def _run_chipseeker(genome, prefix, peak_file, peak_name, tee, tss_distance=3000):

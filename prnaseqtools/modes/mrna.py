@@ -43,6 +43,7 @@ def run(opts):
     total = opts.get('total', False)
     seq_strategy = opts.get('seq_strategy')
     genome_size = opts.get('genome_size', 10)
+    skip_fastp = opts.get('skip_fastp', False)
 
     mapping = run_mode in ('whole', 'mapping-only')
     do_count = run_mode != 'count-table'
@@ -108,18 +109,21 @@ def run(opts):
                     unzip_file(sra_results[0], tag)
                     preserve_raw_fastq(from_sra, tag, paired=False)
 
-                    # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
-                    tee.write("\nTrimming (fastp)...\n")
-                    fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
-                    run_cmd(
-                        f"fastp -w {thread} --length_required 20 "
-                        f"-i {tag}.fastq -o {tag}_trimmed.fastq "
-                        f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
-                    os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
-                    # clean up fastp reports
-                    for rep in (f"{tag}.html", f"{tag}.json"):
-                        if os.path.exists(rep):
-                            os.unlink(rep)
+                    # fastp trimming (skippable via --skip-fastp)
+                    if skip_fastp:
+                        tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                    else:
+                        tee.write("  Trimming (fastp)...\n")
+                        fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+                        run_cmd(
+                            f"fastp -w {thread} --length_required 20 "
+                            f"-i {tag}.fastq -o {tag}_trimmed.fastq "
+                            f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
+                        os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+                        # clean up fastp reports
+                        for rep in (f"{tag}.html", f"{tag}.json"):
+                            if os.path.exists(rep):
+                                os.unlink(rep)
 
                     if mask:
                         run_cmd(
@@ -130,7 +134,7 @@ def run(opts):
                             os.unlink(f"{tag}.mask.out")
 
                     hisat2_align_single(tag, f"{tag}.fastq", hisat_idx, thread,
-                        extra_args="--max-hits 50 --mp 3,3 --score-min L,0,-0.3",
+                        extra_args="-k 50 --mp 3,3 --score-min L,0,-0.3",
                         nov_sj_file=f"{tag}_SJ.out.tab")
                     if from_sra:
                         gzip_fastq(f"{tag}.raw.fastq")
@@ -142,19 +146,22 @@ def run(opts):
                     unzip_file(sra_results[1], f"{tag}_R2")
                     preserve_raw_fastq(from_sra, tag, paired=True)
 
-                    # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
-                    tee.write("\nTrimming (fastp)...\n")
-                    fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
-                    run_cmd(
-                        f"fastp -w {thread} --length_required 20 "
-                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
-                        f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
-                    os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
-                    os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
-                    for rep in (f"{tag}.html", f"{tag}.json"):
-                        if os.path.exists(rep):
-                            os.unlink(rep)
+                    # fastp trimming (skippable via --skip-fastp)
+                    if skip_fastp:
+                        tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                    else:
+                        tee.write("  Trimming (fastp)...\n")
+                        fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
+                        run_cmd(
+                            f"fastp -w {thread} --length_required 20 "
+                            f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                            f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                            f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
+                        os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
+                        os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+                        for rep in (f"{tag}.html", f"{tag}.json"):
+                            if os.path.exists(rep):
+                                os.unlink(rep)
 
                     if mask:
                         run_cmd(
@@ -169,7 +176,7 @@ def run(opts):
 
                     hisat2_align_paired(tag, f"{tag}_R1.fastq", f"{tag}_R2.fastq",
                         hisat_idx, thread,
-                        extra_args="--max-hits 50 --mp 3,3 --score-min L,0,-0.3",
+                        extra_args="-k 50 --mp 3,3 --score-min L,0,-0.3",
                         nov_sj_file=f"{tag}_SJ.out.tab")
                     if from_sra:
                         for _f in (f"{tag}_R1.raw.fastq", f"{tag}_R2.raw.fastq"):
@@ -182,19 +189,22 @@ def run(opts):
                 unzip_file(f1, f"{tag}_R1")
                 unzip_file(f2, f"{tag}_R2")
 
-                # fastp trimming — always run (auto-detects adapter if --adaptor not provided)
-                tee.write("\nTrimming (fastp)...\n")
-                fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
-                run_cmd(
-                    f"fastp -w {thread} --length_required 20 "
-                    f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
-                    f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
-                os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
-                os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
-                for rep in (f"{tag}.html", f"{tag}.json"):
-                    if os.path.exists(rep):
-                        os.unlink(rep)
+                # fastp trimming (skippable via --skip-fastp)
+                if skip_fastp:
+                    tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                else:
+                    tee.write("  Trimming (fastp)...\n")
+                    fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
+                    run_cmd(
+                        f"fastp -w {thread} --length_required 20 "
+                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq "
+                        f"-h {tag}.html -j {tag}.json {fastp_adaptor}")
+                    os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
+                    os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+                    for rep in (f"{tag}.html", f"{tag}.json"):
+                        if os.path.exists(rep):
+                            os.unlink(rep)
 
                 if mask:
                     run_cmd(
@@ -210,7 +220,7 @@ def run(opts):
                 tee.write("\nMapping...\n")
                 hisat2_align_paired(tag, f"{tag}_R1.fastq", f"{tag}_R2.fastq",
                     hisat_idx, thread,
-                    extra_args="--max-hits 50 --mp 3,3 --score-min L,0,-0.3",
+                    extra_args="-k 50 --mp 3,3 --score-min L,0,-0.3",
                     nov_sj_file=f"{tag}_SJ.out.tab")
 
             # HISAT2 直接输出 {tag}.bam，不再需要重命名 STAR 的 _Aligned.sortedByCoord.out.bam
@@ -243,6 +253,8 @@ def run(opts):
             run_cmd(
                 f"Rscript --vanilla {prefix}/scripts/DEG.R {norm} {pvalue} {fdr} "
                 f"{foldchange} {prefix} {genome} {par_str}")
+            # ── GO enrichment for each comparison ────────────────────────────
+            _run_go_enrichment(prefix, genome, tee)
 
     else:
         # No mapping: symlink existing files or process BAMs
@@ -272,6 +284,8 @@ def run(opts):
         run_cmd(
             f"Rscript --vanilla {prefix}/scripts/DEG.R {norm} {pvalue} {fdr} "
             f"{foldchange} {prefix} {genome} {par_str}")
+        # ── GO enrichment for each comparison ────────────────────────────
+        _run_go_enrichment(prefix, genome, tee)
 
         # Clean up symlinks
         ext = "bam" if do_count else "txt"
@@ -328,3 +342,27 @@ def _count_bam(tag, thread, seq_strategy, prefix, genome):
         fh.write("Gene\tCount\tLength\n")
         for name in sorted(count_data.keys()):
             fh.write(f"{name}\t{count_data[name]['exon']}\t{count_data[name]['length']}\n")
+
+
+def _run_go_enrichment(prefix, genome, tee):
+    """Run GO enrichment for every comparison found in the working dir.
+
+    Finds all ``*.total.upregulated.csv`` files produced by DEG.R,
+    derives the comparison name, and invokes scripts/GO_enrichment.R.
+    """
+    import glob as _glob
+    up_files = _glob.glob("*.total.upregulated.csv")
+    if not up_files:
+        tee.write("\nNo DEG comparison files found — skipping GO enrichment.\n")
+        return
+    tee.write("\n" + "=" * 60 + "\n")
+    tee.write("GO Enrichment Analysis\n")
+    tee.write("=" * 60 + "\n")
+    for uf in sorted(up_files):
+        # "{comparison}.total.upregulated.csv" → "{comparison}"
+        comparison = uf.replace(".total.upregulated.csv", "")
+        tee.write(f"\n  Processing: {comparison}\n")
+        run_cmd(
+            f"Rscript --vanilla {prefix}/scripts/GO_enrichment.R "
+            f"{genome} {prefix} {comparison}")
+    tee.write("\nGO enrichment done.\n")

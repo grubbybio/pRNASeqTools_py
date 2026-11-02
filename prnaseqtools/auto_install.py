@@ -174,8 +174,8 @@ DEPENDENCY_REGISTRY = {
 
     # ── Transcript assembly & classification (Ribo / lncRNA) ────────
     'stringtie': {
-        'pkg': 'stringtie', 'channel': 'bioconda',
-        'install_msg': 'Transcriptome assembly (Ribo-seq / lncRNA-seq)',
+        'pkg': 'stringtie', 'channel': 'bioconda', 'no_deps': True,
+        'install_msg': 'Transcriptome assembly (--no-deps, 避开 r-base 4.5 + htslib/libdeflate 冲突)',
         'mode_only': ['ribo', 'lncrna'],
     },
     'gffcompare': {
@@ -201,10 +201,9 @@ DEPENDENCY_REGISTRY = {
     },
     'rsem-prepare-reference': {
         'pkg': 'rsem', 'channel': 'bioconda', 'no_deps': True,
-        # EBSeq 最高只编到 r-base 4.3, 当前环境 R >=4.5 硬冲突
-        # rsem-prepare-reference / rsem-calculate-expression 是纯 C++ binary,
-        # 只有 rsem-run-ebseq (不用) 才依赖 EBSeq
-        'install_msg': 'RNA-seq expression quantification (RSEM, --no-deps)',
+        # rsem 1.3.3 硬锁 htslib <1.23, 与 r-base 4.5 (libdeflate >=1.24) 冲突,
+        # --no-deps 绕过; rsem-prepare-reference / rsem-calculate-expression 是纯 C++ binary
+        'install_msg': 'RNA-seq expression quantification (RSEM, --no-deps, 避 htslib/libdeflate 冲突)',
         'mode_only': ['ribo'],
     },
 
@@ -264,7 +263,8 @@ def _find_htslib_env():
             candidates.append(base)
     except Exception:
         pass
-    candidates.extend(['/usr/local', '/usr', '/opt/homebrew'])
+    # macOS 和 Linux 都常用 /usr/local, Apple Silicon macOS 还加 /opt/homebrew
+    candidates.extend(['/usr/local', '/usr', '/opt/homebrew', '/opt/miniconda3', '/opt/mamba'])
 
     for pref in candidates:
         lib_dir = os.path.join(pref, 'lib')
@@ -391,6 +391,7 @@ R_PACKAGE_REGISTRY = {
         'conda_channel': 'conda-forge',
         'source': 'cran',
         'install_msg': 'Data manipulation (R/CRAN)',
+        'mode_only': ['ribo', 'cips', 'lncrna', 'sc', 'tf'],
     },
     'DESeq2': {
         'pkg': 'DESeq2',
@@ -404,15 +405,13 @@ R_PACKAGE_REGISTRY = {
         'conda_pkg': 'bioconductor-diffbind',
         'conda_channel': 'bioconda',
         'source': 'bioconductor',
-        'install_msg': 'ChIP-seq differential binding (R/Bioconductor)',
+        'install_msg': 'ChIP-seq differential binding (bioconda, R 4.5 构建无 post-link)',
         'mode_only': ['chip', 'tf'],
     },
     'ChIPseeker': {
         'pkg': 'ChIPseeker',
-        'conda_pkg': 'bioconductor-chipseeker',
-        'conda_channel': 'bioconda',
         'source': 'bioconductor',
-        'install_msg': 'Peak annotation & GO enrichment (R/Bioconductor)',
+        'install_msg': 'Peak annotation & GO enrichment (BiocManager, 国内镜像)',
         'mode_only': ['chip', 'tf'],
     },
     'DMRcaller': {
@@ -458,6 +457,76 @@ R_PACKAGE_REGISTRY = {
         'github_ref': 'devel',
         'install_msg': 'Non-negative matrix factorization (R/GitHub devel)',
     },
+    'sf': {
+        'pkg': 'sf',
+        'conda_pkg': 'r-sf',
+        'conda_channel': 'conda-forge',
+        'source': 'bioconductor',
+        'install_msg': '空间矢量数据 (monocle3 依赖, conda-forge R 4.5 预编译, 自带 gdal)',
+        'mode_only': ['sc'],
+    },
+    'batchelor': {
+        'pkg': 'batchelor',
+        'source': 'bioconductor',
+        'install_msg': 'Single-cell batch correction (monocle3 依赖, BiocManager + TUNA 镜像)',
+        'mode_only': ['sc'],
+    },
+    'ggrastr': {
+        'pkg': 'ggrastr',
+        'conda_pkg': 'r-ggrastr',
+        'conda_channel': 'conda-forge',
+        'source': 'cran',
+        'install_msg': 'raster grob (monocle3 Remotes, conda-forge r45 预编译)',
+        'mode_only': ['sc'],
+    },
+    'spdep': {
+        'pkg': 'spdep',
+        'conda_pkg': 'r-spdep',
+        'conda_channel': 'conda-forge',
+        'source': 'cran',
+        'install_msg': 'spatial dependency (monocle3 Imports, conda-forge r45 预编译)',
+        'mode_only': ['sc'],
+    },
+    'beachmat': {
+        'pkg': 'beachmat',
+        'conda_pkg': 'bioconductor-beachmat',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': '稀疏矩阵 API (monocle3 依赖, bioconda 2.26.0 r45)',
+        'mode_only': ['sc'],
+    },
+    'assorthead': {
+        'pkg': 'assorthead',
+        'conda_pkg': 'bioconductor-assorthead',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'beachmat 底层 tatami (bioconda 1.4.0 r45, 无 exception_ptr 编译错误)',
+        'mode_only': ['sc'],
+    },
+    'SingleCellExperiment': {
+        'pkg': 'SingleCellExperiment',
+        'conda_pkg': 'bioconductor-singlecellexperiment',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'Single-cell assay (monocle3 核心, bioconda 预编译)',
+        'mode_only': ['sc'],
+    },
+    'SummarizedExperiment': {
+        'pkg': 'SummarizedExperiment',
+        'conda_pkg': 'bioconductor-summarizedexperiment',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': '基础 assay 容器 (monocle3 依赖)',
+        'mode_only': ['sc'],
+    },
+    'BPCells': {
+        'pkg': 'BPCells',
+        'conda_pkg': 'r-bpcells',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'Single-cell 稀疏矩阵 (monocle3 依赖, bioconda R 4.5 预编译)',
+        'mode_only': ['sc'],
+    },
     'Seurat': {
         'pkg': 'Seurat',
         'conda_pkg': 'r-seurat',
@@ -490,6 +559,136 @@ R_PACKAGE_REGISTRY = {
         'source': 'cran',
         'install_msg': 'Harmony batch integration for scRNA-seq (R/CRAN)',
         'mode_only': ['sc'],
+    },
+
+    # ── 全局使用（所有 mode 的 DE/plot 脚本都加载）────────────────
+    'RColorBrewer': {
+        'pkg': 'RColorBrewer',
+        'conda_pkg': 'r-rcolorbrewer',
+        'conda_channel': 'conda-forge',
+        'source': 'cran',
+        'install_msg': 'Color palettes (几乎所有 R 脚本依赖)',
+    },
+    'ggplot2': {
+        'pkg': 'ggplot2',
+        'conda_pkg': 'r-ggplot2',
+        'conda_channel': 'conda-forge',
+        'source': 'cran',
+        'install_msg': 'Grammar of graphics (ChIP peak annotation, sc analysis)',
+    },
+
+    # ── ChIP / ATAC / TF peak annotation (chipseeker.R) ────────────
+    'clusterProfiler': {
+        'pkg': 'clusterProfiler',
+        'conda_pkg': 'bioconductor-clusterprofiler',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'GO/KEGG enrichment (ChIPseeker peak annotation)',
+        'mode_only': ['chip', 'atac', 'tf'],
+    },
+    'enrichplot': {
+        'pkg': 'enrichplot',
+        'conda_pkg': 'bioconductor-enrichplot',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'Enrichment plots (clusterProfiler visualization)',
+        'mode_only': ['chip', 'atac', 'tf'],
+    },
+    'GenomicFeatures': {
+        'pkg': 'GenomicFeatures',
+        'conda_pkg': 'bioconductor-genomicfeatures',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'GenomicFeatures (ChIPseeker + cips uORF)',
+        'mode_only': ['chip', 'atac', 'tf', 'cips'],
+    },
+    'txdbmaker': {
+        'pkg': 'txdbmaker',
+        'conda_pkg': 'bioconductor-txdbmaker',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'Official new home of makeTxDb*() (GenomicFeatures 1.57+ 迁出的独立包)',
+        'mode_only': ['chip', 'atac', 'tf', 'cips'],
+    },
+
+    # ── CiPS uORF analysis (cips_uORF.R) ─────────────────────────
+    'Biostrings': {
+        'pkg': 'Biostrings',
+        'conda_pkg': 'bioconductor-biostrings',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'Sequence matching (CiPS uORF)',
+        'mode_only': ['cips'],
+    },
+    'GenomicRanges': {
+        'pkg': 'GenomicRanges',
+        'conda_pkg': 'bioconductor-genomicranges',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'Genomic interval arithmetic (CiPS + RiboMeth)',
+        'mode_only': ['cips', 'ribometh'],
+    },
+    'Rsamtools': {
+        'pkg': 'Rsamtools',
+        'conda_pkg': 'bioconductor-rsamtools',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'BAM/sam files (CiPS)',
+        'mode_only': ['cips'],
+    },
+    'future.apply': {
+        'pkg': 'future.apply',
+        'conda_pkg': 'r-future.apply',
+        'conda_channel': 'conda-forge',
+        'source': 'cran',
+        'install_msg': 'Parallel apply (CiPS)',
+        'mode_only': ['cips'],
+    },
+    'openxlsx': {
+        'pkg': 'openxlsx',
+        'conda_pkg': 'r-openxlsx',
+        'conda_channel': 'conda-forge',
+        'source': 'cran',
+        'install_msg': 'Excel export (CiPS)',
+        'mode_only': ['cips'],
+    },
+
+    # ── WGBS (DMRcaller.R) ────────────────────────────────────────
+    'betareg': {
+        'pkg': 'betareg',
+        'conda_pkg': 'r-betareg',
+        'conda_channel': 'conda-forge',
+        'source': 'cran',
+        'install_msg': 'Beta regression (WGBS DMRcaller)',
+        'mode_only': ['wgbs'],
+    },
+
+    # ── RiboMeth-seq (RNAmodR.R) ──────────────────────────────────
+    'rtracklayer': {
+        'pkg': 'rtracklayer',
+        'conda_pkg': 'bioconductor-rtracklayer',
+        'conda_channel': 'bioconda',
+        'source': 'bioconductor',
+        'install_msg': 'UCSC genome track import (RiboMeth-seq)',
+        'mode_only': ['ribometh'],
+    },
+
+    # ── Ribo-seq (TE_stats.R) ────────────────────────────────────
+    'emmeans': {
+        'pkg': 'emmeans',
+        'conda_pkg': 'r-emmeans',
+        'conda_channel': 'conda-forge',
+        'source': 'cran',
+        'install_msg': 'Estimated marginal means (Ribo-seq TE_stats)',
+        'mode_only': ['ribo'],
+    },
+    'multcomp': {
+        'pkg': 'multcomp',
+        'conda_pkg': 'r-multcomp',
+        'conda_channel': 'conda-forge',
+        'source': 'cran',
+        'install_msg': 'Multiple comparisons (Ribo-seq TE_stats)',
+        'mode_only': ['ribo'],
     },
 }
 
@@ -581,7 +780,7 @@ def install_tool(name, info, tee=None):
                 ['git', 'clone', '--depth', '1', github_url, clone_dir],
                 check=True, timeout=120
             )
-            # 安装前 patch 源码 (如 Apple clang 兼容性)
+            # 安装前 patch 源码 (如跨平台 C++ 标准库头文件缺失)
             if info.get('patch_before_install'):
                 for rel_path, sed_cmd in info['patch_before_install']:
                     full = os.path.join(clone_dir, rel_path)

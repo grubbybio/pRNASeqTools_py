@@ -39,6 +39,7 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
+    skip_fastp = opts.get('skip_fastp', False)
     # prefix must point to the project root so that prefix/reference/{genome}_Genome
     # resolves to ~/software/pRNASeqTools_py/reference/ (not prnaseqtools/reference/)
     prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent.parent))
@@ -175,7 +176,7 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
     """Run HISAT2 mapping for every sample.
 
     HISAT2 参数对应原 STAR 参数的功能：
-      STAR --outFilterMultimapNmax 50    → HISAT2 --max-hits 50
+      STAR --outFilterMultimapNmax 50    → HISAT2 -k 50
       STAR --outFilterMismatchNoverLmax  → HISAT2 --score-min L,0,-0.3 + --mp 3,3
       STAR --alignIntronMax 5000         → HISAT2 默认 (不设，hisat2-build 用 --ss 包含已知外显子边界)
       STAR --novel splice sites          → HISAT2 --novel-splicesite-outfile
@@ -194,7 +195,7 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
         os.symlink(mask_path, "mask.fa")
         run_cmd("bowtie-build -q mask.fa mask")
 
-    hisat_extra = "--max-hits 50 --mp 3,3 --score-min L,0,-0.3"
+    hisat_extra = "-k 50 --mp 3,3 --score-min L,0,-0.3"
 
     for i, tag in enumerate(tags):
         if i >= len(files):
@@ -212,15 +213,18 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
                 seq_strategy = 'single'
                 unzip_file(sra[0], tag)
                 preserve_raw_fastq(from_sra, tag, paired=False)
-                # fastp trimming
-                fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
-                run_cmd(
-                    f"fastp -w {thread} --length_required 20 "
-                    f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
-                os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
-                for rep in (f"{tag}.html", f"{tag}.json"):
-                    if os.path.exists(rep):
-                        os.unlink(rep)
+                # fastp trimming (skippable via --skip-fastp)
+                if skip_fastp:
+                    tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                else:
+                    fastp_adaptor = f"--adapter_sequence {adaptor}" if adaptor else ""
+                    run_cmd(
+                        f"fastp -w {thread} --length_required 20 "
+                        f"-i {tag}.fastq -o {tag}_trimmed.fastq {fastp_adaptor}")
+                    os.rename(f"{tag}_trimmed.fastq", f"{tag}.fastq")
+                    for rep in (f"{tag}.html", f"{tag}.json"):
+                        if os.path.exists(rep):
+                            os.unlink(rep)
                 if mask:
                     run_cmd(
                         f"bowtie -v 0 -a --un tmp.fastq -p {thread} -t mask "
@@ -238,17 +242,20 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
                 unzip_file(sra[0], f"{tag}_R1")
                 unzip_file(sra[1], f"{tag}_R2")
                 preserve_raw_fastq(from_sra, tag, paired=True)
-                # fastp trimming
-                fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
-                run_cmd(
-                    f"fastp -w {thread} --length_required 20 "
-                    f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
-                os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
-                os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
-                for rep in (f"{tag}.html", f"{tag}.json"):
-                    if os.path.exists(rep):
-                        os.unlink(rep)
+                # fastp trimming (skippable via --skip-fastp)
+                if skip_fastp:
+                    tee.write("  [SKIP] fastp (--skip-fastp)\n")
+                else:
+                    fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
+                    run_cmd(
+                        f"fastp -w {thread} --length_required 20 "
+                        f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                        f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
+                    os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
+                    os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+                    for rep in (f"{tag}.html", f"{tag}.json"):
+                        if os.path.exists(rep):
+                            os.unlink(rep)
                 if mask:
                     run_cmd(
                         f"bowtie -v 0 -a --un tmp.fastq -p {thread} -t mask "
@@ -272,17 +279,20 @@ def _do_mapping(tags, files, pars, seq_strategy, adaptor, mask,
                 seq_strategy = 'paired'
             unzip_file(f1, f"{tag}_R1")
             unzip_file(f2, f"{tag}_R2")
-            # fastp trimming
-            fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
-            run_cmd(
-                f"fastp -w {thread} --length_required 20 "
-                f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
-                f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
-            os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
-            os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
-            for rep in (f"{tag}.html", f"{tag}.json"):
-                if os.path.exists(rep):
-                    os.unlink(rep)
+            # fastp trimming (skippable via --skip-fastp)
+            if skip_fastp:
+                tee.write("  [SKIP] fastp (--skip-fastp)\n")
+            else:
+                fastp_adaptor = f"--adapter_sequence {adaptor} --adapter_sequence_r2 {adaptor}" if adaptor else ""
+                run_cmd(
+                    f"fastp -w {thread} --length_required 20 "
+                    f"-i {tag}_R1.fastq -I {tag}_R2.fastq "
+                    f"-o {tag}_R1_trimmed.fastq -O {tag}_R2_trimmed.fastq {fastp_adaptor}")
+                os.rename(f"{tag}_R1_trimmed.fastq", f"{tag}_R1.fastq")
+                os.rename(f"{tag}_R2_trimmed.fastq", f"{tag}_R2.fastq")
+                for rep in (f"{tag}.html", f"{tag}.json"):
+                    if os.path.exists(rep):
+                        os.unlink(rep)
             if mask:
                 run_cmd(
                     f"bowtie -v 0 -a --un tmp.fastq -p {thread} -t mask "
@@ -518,8 +528,7 @@ def _do_classification(class_gtf, ref_gtf, ref_fasta, classifier,
     # ── Extract novel transcript sequences ────────────────────────────
     novel_fasta = "novel_transcripts.fa"
     run_cmd(
-        f"gffread novel.gtf -g {ref_fasta} -w {novel_fasta} "
-        f"-M --extract-local-tags")
+        f"gffread novel.gtf -g {ref_fasta} -w {novel_fasta} -M")
 
     # ── Classify novel fasta → coding potential ───────────────────────
     # Dict: tid -> 'novel_coding' | 'novel_lncRNA'
@@ -933,12 +942,12 @@ def _quantify_one(tag, bam, thread, gtf_file, ref_fasta, seq_strategy, tee):
     if seq_strategy == 'paired':
         run_cmd(
             f"featureCounts -T {thread} -p --countReadPairs -BCO "
-            f"-G {ref_fasta} -s 0 -t transcript "
+            f"-G {ref_fasta} -s 0 -t transcript -g transcript_id "
             f"-a {gtf_file} -o {tag}_counts.txt {bam}")
     else:
         run_cmd(
             f"featureCounts -T {thread} -O -G {ref_fasta} -s 0 "
-            f"-t transcript -a {gtf_file} -o {tag}_counts.txt {bam}")
+            f"-t transcript -g transcript_id -a {gtf_file} -o {tag}_counts.txt {bam}")
 
     # Clean featureCounts output → two columns: transcript_id count
     with open(f"{tag}_counts.txt") as fh, open(f"{tag}.txt", 'w') as out:

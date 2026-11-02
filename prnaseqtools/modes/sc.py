@@ -32,6 +32,7 @@ def run(opts):
     thread = opts.get('thread', 4)
     genome = opts.get('genome', 'ath')
     adaptor = opts.get('adaptor')
+    skip_fastp = opts.get('skip_fastp', False)
     # prefix must point to the project root so that prefix/reference/{genome}_HisatIdx
     # resolves to ~/software/pRNASeqTools_py/reference/ (not prnaseqtools/reference/)
     prefix = opts.get('prefix', str(Path(__file__).resolve().parent.parent))
@@ -171,7 +172,7 @@ def run(opts):
                     input_r2 = f"{tag}_R2.fastq"
 
             # Adapter trimming
-            if adaptor:
+            if adaptor and not skip_fastp:
                 tee.write(f"  Trimming adapters ({tag})...\n")
                 if input_r2:
                     run_cmd(
@@ -193,11 +194,11 @@ def run(opts):
                 hisat2_align_paired(tag, input_r1, input_r2,
                                     hisat_idx, thread,
                                     out_dir=hisat_bam_dir,
-                                    extra_args="--max-hits 20 --mp 3,3 --score-min L,0,-0.4")
+                                    extra_args="-k 20 --mp 3,3 --score-min L,0,-0.4")
             else:
                 hisat2_align_single(tag, input_r1, hisat_idx, thread,
                                     out_dir=hisat_bam_dir,
-                                    extra_args="--max-hits 20 --mp 3,3 --score-min L,0,-0.4")
+                                    extra_args="-k 20 --mp 3,3 --score-min L,0,-0.4")
 
             # Show mapping stats
             log_f = os.path.join(hisat_bam_dir, f"{tag}_Log.txt")
